@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Supabase local state
+supabase/.temp/
+
+# Env / secrets
+*.env
+*.env.*
+
+# Local backups
+*.zip
