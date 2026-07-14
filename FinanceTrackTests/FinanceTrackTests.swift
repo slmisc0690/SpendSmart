@@ -3809,6 +3809,269 @@ final class FinanceTrackTests: XCTestCase {
         let remaining = try! context.fetch(FetchDescriptor<Account>())
         XCTAssertTrue(remaining.isEmpty)
     }
+
+    // MARK: - Smart Signals foundation
+
+    private struct FakeSmartSignalEngine: SmartSignalEngine {
+        let signals: [SmartSignal]
+        func generateSignals(context: SmartSignalContext) -> [SmartSignal] { signals }
+    }
+
+    private static let smartSignalsFixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func makeEmptySmartSignalContext(now: Date = FinanceTrackTests.smartSignalsFixedNow) -> SmartSignalContext {
+        SmartSignalContext(
+            transactions: [],
+            accounts: [],
+            categories: [],
+            incomeSources: [],
+            recurringExpenses: [],
+            budgetSettings: nil,
+            monthlyPlanSettings: nil,
+            now: now
+        )
+    }
+
+    private func makeSmartSignal(
+        id: String,
+        deduplicationID: String? = nil,
+        category: SmartSignalCategory = .spending,
+        severity: SmartSignalSeverity = .information,
+        confidence: SmartSignalConfidence = .medium,
+        priority: Int = 0,
+        relevantDate: Date? = nil,
+        evaluatedAt: Date = FinanceTrackTests.smartSignalsFixedNow
+    ) -> SmartSignal {
+        SmartSignal(
+            id: id,
+            deduplicationID: deduplicationID ?? id,
+            category: category,
+            severity: severity,
+            confidence: confidence,
+            priority: priority,
+            title: "Test Signal \(id)",
+            explanation: "Deterministic test explanation.",
+            metrics: [],
+            action: nil,
+            relevantDate: relevantDate,
+            evaluatedAt: evaluatedAt
+        )
+    }
+
+    // Coordinator combination behavior
+
+    func testSmartSignalsEngineWithNoEnginesReturnsEmptyArray() {
+        let coordinator = SmartSignalsEngine(engines: [])
+        XCTAssertTrue(coordinator.generateSignals(context: makeEmptySmartSignalContext()).isEmpty)
+    }
+
+    func testEnginesReturningNoSignalsProduceEmptyResult() {
+        let coordinator = SmartSignalsEngine(engines: [
+            FakeSmartSignalEngine(signals: []),
+            FakeSmartSignalEngine(signals: []),
+        ])
+        XCTAssertTrue(coordinator.generateSignals(context: makeEmptySmartSignalContext()).isEmpty)
+    }
+
+    func testResultsFromMultipleEnginesAreCombined() {
+        let engineA = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "a")])
+        let engineB = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "b")])
+        let coordinator = SmartSignalsEngine(engines: [engineA, engineB])
+        let result = coordinator.generateSignals(context: makeEmptySmartSignalContext())
+        XCTAssertEqual(Set(result.map(\.id)), Set(["a", "b"]))
+    }
+
+    func testOneEngineCanProduceMultipleSignals() {
+        let engine = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "a"), makeSmartSignal(id: "b")])
+        let coordinator = SmartSignalsEngine(engines: [engine])
+        XCTAssertEqual(coordinator.generateSignals(context: makeEmptySmartSignalContext()).count, 2)
+    }
+
+    // Ranking determinism
+
+    func testRankingIsDeterministic() {
+        let signals = [makeSmartSignal(id: "a", priority: 1), makeSmartSignal(id: "b", priority: 2)]
+        let ranking = SmartSignalRanking()
+        XCTAssertEqual(ranking.rank(signals).map(\.id), ranking.rank(signals).map(\.id))
+    }
+
+    func testRankingUnaffectedByEngineInjectionOrder() {
+        let engineA = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "a", priority: 1)])
+        let engineB = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "b", priority: 2)])
+        let resultAB = SmartSignalsEngine(engines: [engineA, engineB]).generateSignals(context: makeEmptySmartSignalContext())
+        let resultBA = SmartSignalsEngine(engines: [engineB, engineA]).generateSignals(context: makeEmptySmartSignalContext())
+        XCTAssertEqual(resultAB.map(\.id), resultBA.map(\.id))
+        XCTAssertEqual(resultAB.map(\.id), ["b", "a"])
+    }
+
+    func testHigherPrioritySortsBeforeLowerPriority() {
+        let low = makeSmartSignal(id: "low", priority: 1)
+        let high = makeSmartSignal(id: "high", priority: 5)
+        XCTAssertEqual(SmartSignalRanking().rank([low, high]).map(\.id), ["high", "low"])
+    }
+
+    func testSeverityOrderingIsCorrect() {
+        let positive = makeSmartSignal(id: "positive", severity: .positive)
+        let information = makeSmartSignal(id: "information", severity: .information)
+        let headsUp = makeSmartSignal(id: "headsUp", severity: .headsUp)
+        let important = makeSmartSignal(id: "important", severity: .important)
+        let ranked = SmartSignalRanking().rank([positive, information, headsUp, important])
+        XCTAssertEqual(ranked.map(\.id), ["important", "headsUp", "information", "positive"])
+    }
+
+    func testConfidenceOrderingIsCorrect() {
+        let limited = makeSmartSignal(id: "limited", confidence: .limitedData)
+        let medium = makeSmartSignal(id: "medium", confidence: .medium)
+        let high = makeSmartSignal(id: "high", confidence: .high)
+        let ranked = SmartSignalRanking().rank([limited, medium, high])
+        XCTAssertEqual(ranked.map(\.id), ["high", "medium", "limited"])
+    }
+
+    func testMoreRecentRelevantDateSortsFirstWhenPreviousFieldsTie() {
+        let older = makeSmartSignal(id: "older", relevantDate: Date(timeIntervalSince1970: 1_000))
+        let newer = makeSmartSignal(id: "newer", relevantDate: Date(timeIntervalSince1970: 2_000))
+        XCTAssertEqual(SmartSignalRanking().rank([older, newer]).map(\.id), ["newer", "older"])
+    }
+
+    func testEvaluatedAtIsUsedWhenRelevantDateIsNil() {
+        let early = makeSmartSignal(id: "early", relevantDate: nil, evaluatedAt: Date(timeIntervalSince1970: 1_000))
+        let late = makeSmartSignal(id: "late", relevantDate: nil, evaluatedAt: Date(timeIntervalSince1970: 2_000))
+        XCTAssertEqual(SmartSignalRanking().rank([early, late]).map(\.id), ["late", "early"])
+    }
+
+    func testEqualRankedSignalsUseStableLexicalIdOrdering() {
+        let z = makeSmartSignal(id: "z-signal")
+        let a = makeSmartSignal(id: "a-signal")
+        XCTAssertEqual(SmartSignalRanking().rank([z, a]).map(\.id), ["a-signal", "z-signal"])
+    }
+
+    // Deduplication behavior
+
+    func testDuplicateDeduplicationIDValuesProduceOneResult() {
+        let engine = FakeSmartSignalEngine(signals: [
+            makeSmartSignal(id: "a1", deduplicationID: "dup"),
+            makeSmartSignal(id: "a2", deduplicationID: "dup"),
+        ])
+        let result = SmartSignalsEngine(engines: [engine]).generateSignals(context: makeEmptySmartSignalContext())
+        XCTAssertEqual(result.count, 1)
+    }
+
+    func testSelectedDuplicateIsTheHighestRanked() {
+        let low = makeSmartSignal(id: "low", deduplicationID: "dup", priority: 1)
+        let high = makeSmartSignal(id: "high", deduplicationID: "dup", priority: 5)
+        let engine = FakeSmartSignalEngine(signals: [low, high])
+        let result = SmartSignalsEngine(engines: [engine]).generateSignals(context: makeEmptySmartSignalContext())
+        XCTAssertEqual(result.map(\.id), ["high"])
+    }
+
+    func testDuplicateSelectionIsIndependentOfEngineOrder() {
+        let low = makeSmartSignal(id: "low", deduplicationID: "dup", priority: 1)
+        let high = makeSmartSignal(id: "high", deduplicationID: "dup", priority: 5)
+        let lowFirstEngine = FakeSmartSignalEngine(signals: [low, high])
+        let highFirstEngine = FakeSmartSignalEngine(signals: [high, low])
+        let resultA = SmartSignalsEngine(engines: [lowFirstEngine]).generateSignals(context: makeEmptySmartSignalContext())
+        let resultB = SmartSignalsEngine(engines: [highFirstEngine]).generateSignals(context: makeEmptySmartSignalContext())
+        XCTAssertEqual(resultA.map(\.id), ["high"])
+        XCTAssertEqual(resultB.map(\.id), ["high"])
+    }
+
+    func testDistinctDeduplicationIDsArePreserved() {
+        let engine = FakeSmartSignalEngine(signals: [
+            makeSmartSignal(id: "a", deduplicationID: "dup-a"),
+            makeSmartSignal(id: "b", deduplicationID: "dup-b"),
+        ])
+        let result = SmartSignalsEngine(engines: [engine]).generateSignals(context: makeEmptySmartSignalContext())
+        XCTAssertEqual(Set(result.map(\.id)), Set(["a", "b"]))
+    }
+
+    // Placeholder engine safety
+
+    func testProductionPlaceholderEnginesHandleEmptyAndSparseContextsSafely() {
+        let engines: [any SmartSignalEngine] = [
+            BudgetSignalEngine(),
+            SpendingSignalEngine(),
+            SubscriptionSignalEngine(),
+            IncomeSignalEngine(),
+            CashFlowSignalEngine(),
+            SavingsSignalEngine(),
+            CreditCardSignalEngine(),
+        ]
+        let emptyContext = makeEmptySmartSignalContext()
+
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let sparseContext = SmartSignalContext(
+            transactions: [FinanceTransaction(amount: 10, type: .expense, account: checking)],
+            accounts: [checking],
+            categories: [],
+            incomeSources: [],
+            recurringExpenses: [],
+            budgetSettings: nil,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.smartSignalsFixedNow
+        )
+
+        for engine in engines {
+            XCTAssertEqual(engine.generateSignals(context: emptyContext).count, 0)
+            XCTAssertEqual(engine.generateSignals(context: sparseContext).count, 0)
+        }
+    }
+
+    // Model correctness
+
+    func testSmartSignalEqualityBehavesCorrectly() {
+        let a = makeSmartSignal(id: "a")
+        let sameAsA = makeSmartSignal(id: "a")
+        let different = makeSmartSignal(id: "b")
+        XCTAssertEqual(a, sameAsA)
+        XCTAssertNotEqual(a, different)
+    }
+
+    func testSmartSignalCodableRoundTripSucceeds() throws {
+        let original = makeSmartSignal(id: "codable-test", relevantDate: Date(timeIntervalSince1970: 1_650_000_000))
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(SmartSignal.self, from: data)
+        XCTAssertEqual(original, decoded)
+    }
+
+    func testSmartSignalActionCodableRoundTripSucceeds() throws {
+        let withDescription = SmartSignalAction(id: "action-1", title: "Review Category", description: "See the breakdown.")
+        let withDescriptionData = try JSONEncoder().encode(withDescription)
+        XCTAssertEqual(withDescription, try JSONDecoder().decode(SmartSignalAction.self, from: withDescriptionData))
+
+        let withoutDescription = SmartSignalAction(id: "action-2", title: "Review", description: nil)
+        let withoutDescriptionData = try JSONEncoder().encode(withoutDescription)
+        XCTAssertEqual(withoutDescription, try JSONDecoder().decode(SmartSignalAction.self, from: withoutDescriptionData))
+    }
+
+    func testEverySmartSignalMetricValueCaseSurvivesEqualityAndCodableRoundTrip() throws {
+        let values: [SmartSignalMetric.Value] = [
+            .currency(Decimal(string: "42.75")!),
+            .percentage(0.65),
+            .count(3),
+            .number(12.5),
+            .text("Groceries"),
+        ]
+        for value in values {
+            let metric = SmartSignalMetric(id: "metric", label: "Test Metric", value: value)
+            let data = try JSONEncoder().encode(metric)
+            let decoded = try JSONDecoder().decode(SmartSignalMetric.self, from: data)
+            XCTAssertEqual(metric, decoded, "Value \(value) must survive a Codable round trip")
+        }
+    }
+
+    // Dependency injection isolation
+
+    func testFakeEnginesCanBeInjectedWithoutGlobalMutation() {
+        let fake = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "fake-only")])
+        let coordinatorWithFake = SmartSignalsEngine(engines: [fake])
+        let coordinatorWithoutFake = SmartSignalsEngine(engines: [])
+
+        let resultWithFake = coordinatorWithFake.generateSignals(context: makeEmptySmartSignalContext())
+        let resultWithoutFake = coordinatorWithoutFake.generateSignals(context: makeEmptySmartSignalContext())
+
+        XCTAssertEqual(resultWithFake.map(\.id), ["fake-only"])
+        XCTAssertTrue(resultWithoutFake.isEmpty, "Injecting a fake engine into one coordinator instance must never affect another")
+    }
 }
 
 /// Mirrors the decision rule `refreshPlaidAccounts` (supabase/functions/_shared/plaid.ts) applies

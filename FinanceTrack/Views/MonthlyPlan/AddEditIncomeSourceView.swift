@@ -86,6 +86,8 @@ struct AddEditIncomeSourceView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle(isEditing ? "Edit Income" : "Add Income")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

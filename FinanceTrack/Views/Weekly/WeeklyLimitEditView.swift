@@ -72,6 +72,8 @@ struct WeeklyLimitEditView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle("Weekly Limit")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -35,13 +35,7 @@ struct DashboardView: View {
     }
 
     private var spentThisMonth: Decimal {
-        #if DEBUG
-        let countedTransactions = transactions.filter {
-            monthInterval.contains($0.date) && BudgetCalculator.isCounted($0, includePending: includePending, context: .monthly)
-        }.count
-        print("[MonthlySpendDebug] dashboard countedTransactions=\(countedTransactions)")
-        #endif
-        return BudgetCalculator.monthlySpent(transactions, in: monthInterval, includePending: includePending)
+        BudgetCalculator.monthlySpent(transactions, in: monthInterval, includePending: includePending)
     }
 
     private var weeklyLimit: Decimal {

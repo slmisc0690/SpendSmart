@@ -122,6 +122,8 @@ struct MonthlyPlanSettingsEditView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle("Savings Goal")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

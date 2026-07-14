@@ -219,7 +219,7 @@ struct ManualAccountDetailView: View {
                     .padding(.horizontal, Theme.Spacing.lg)
             } else {
                 if hasEligibleManualTransactions {
-                    Text("Press and hold a manual entry for options, including Delete.")
+                    Text("Use the options button or press and hold a manual entry to delete it.")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
                         .padding(.horizontal, Theme.Spacing.lg)

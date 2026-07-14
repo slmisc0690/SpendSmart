@@ -98,6 +98,8 @@ struct AddEditRecurringExpenseView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle(isEditing ? "Edit Bill" : "Add Bill")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

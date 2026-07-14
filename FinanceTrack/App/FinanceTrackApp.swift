@@ -24,6 +24,8 @@ struct FinanceTrackApp: App {
         print("[SpendSmartBuild] plaid-connection-restore-v2")
         print("[SpendSmartBuild] manual-spending-controls-v1")
         print("[SpendSmartBuild] manual-account-ux-v1")
+        print("[SpendSmartBuild] currency-toolbar-polish-v1")
+        print("[SpendSmartBuild] currency-accessory-removed-v1")
         #endif
     }
 

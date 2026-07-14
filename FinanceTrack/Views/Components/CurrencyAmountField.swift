@@ -244,7 +244,6 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
             string: placeholder,
             attributes: [.foregroundColor: placeholderColor]
         )
-        field.inputAccessoryView = context.coordinator.makeAccessoryToolbar()
         field.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged), for: .editingChanged)
         context.coordinator.textField = field
         return field
@@ -307,25 +306,6 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
             var seeded = state
             seeded.load(initialAmount)
             self.state = seeded
-        }
-
-        func makeAccessoryToolbar() -> UIToolbar {
-            let toolbar = UIToolbar(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
-            let clear = UIBarButtonItem(title: "Clear", style: .plain, target: self, action: #selector(handleClear))
-            let flexible = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
-            let done = UIBarButtonItem(title: "Done", style: .done, target: self, action: #selector(handleDone))
-            toolbar.items = [clear, flexible, done]
-            toolbar.sizeToFit()
-            return toolbar
-        }
-
-        @objc func handleClear() {
-            state.clear()
-            syncDisplay(animated: false)
-        }
-
-        @objc func handleDone() {
-            textField?.resignFirstResponder()
         }
 
         /// No-op target for `.editingChanged` — all real work happens in

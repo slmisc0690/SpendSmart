@@ -81,6 +81,8 @@ struct CreditCardPaymentView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle("Add Payment")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -114,6 +114,8 @@ struct AddAccountView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle(isEditing ? "Edit Manual Tracked Account" : "Add Manual Tracked Account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

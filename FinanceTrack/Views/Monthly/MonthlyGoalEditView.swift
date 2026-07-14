@@ -79,6 +79,8 @@ struct MonthlyGoalEditView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle("Monthly Goal")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

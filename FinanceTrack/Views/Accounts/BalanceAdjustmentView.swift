@@ -98,6 +98,8 @@ struct BalanceAdjustmentView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle("Adjust Balance")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

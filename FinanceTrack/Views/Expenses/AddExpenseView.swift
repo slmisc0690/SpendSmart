@@ -128,6 +128,8 @@ struct AddExpenseView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnBackgroundTap()
             .navigationTitle(type == .expense ? "Add Expense" : "Add Refund")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -349,10 +351,19 @@ struct AddExpenseView: View {
             category: selectedCategory
         )
         #if DEBUG
-        print("[MonthlySpendDebug] expense saved monthlyFlag=\(transaction.countsTowardMonthlySpending)")
-        print("[MonthlySpendDebug] expense saved weeklyFlag=\(transaction.countsTowardWeeklyBudget)")
-        print("[MonthlySpendDebug] monthly calculator included=\(BudgetCalculator.isCounted(transaction, includePending: true, context: .monthly))")
-        print("[MonthlySpendDebug] weekly calculator included=\(BudgetCalculator.isCounted(transaction, includePending: true, context: .weekly))")
+        // A single `print` call (one write, effectively atomic) rather than four separate calls —
+        // four discrete calls issued in the same tick were observed to occasionally lose a line
+        // over a physical-device console connection (the console pipe/relay isn't guaranteed to
+        // deliver a rapid burst of independent writes as a unit). This changes nothing about what
+        // is computed or when — only how the same four lines reach the console.
+        let monthlyIncluded = BudgetCalculator.isCounted(transaction, includePending: true, context: .monthly)
+        let weeklyIncluded = BudgetCalculator.isCounted(transaction, includePending: true, context: .weekly)
+        print("""
+        [MonthlySpendDebug] expense saved monthlyFlag=\(transaction.countsTowardMonthlySpending)
+        [MonthlySpendDebug] expense saved weeklyFlag=\(transaction.countsTowardWeeklyBudget)
+        [MonthlySpendDebug] monthly calculator included=\(monthlyIncluded)
+        [MonthlySpendDebug] weekly calculator included=\(weeklyIncluded)
+        """)
         #endif
         modelContext.insert(transaction)
 
