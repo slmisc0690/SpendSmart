@@ -3986,9 +3986,13 @@ final class FinanceTrackTests: XCTestCase {
 
     // Placeholder engine safety
 
-    func testProductionPlaceholderEnginesHandleEmptyAndSparseContextsSafely() {
+    /// The six engines still in their foundation-only placeholder state — `BudgetSignalEngine`
+    /// now has real logic (see the dedicated "BudgetSignalEngine" test section below) and is
+    /// deliberately no longer asserted here as a placeholder, though it also correctly returns no
+    /// signals for these same no-budget-configured contexts (see
+    /// `testBudgetSignalEngineWithNoBudgetSettingsReturnsNoSignals`).
+    func testRemainingPlaceholderEnginesHandleEmptyAndSparseContextsSafely() {
         let engines: [any SmartSignalEngine] = [
-            BudgetSignalEngine(),
             SpendingSignalEngine(),
             SubscriptionSignalEngine(),
             IncomeSignalEngine(),
@@ -4014,6 +4018,262 @@ final class FinanceTrackTests: XCTestCase {
             XCTAssertEqual(engine.generateSignals(context: emptyContext).count, 0)
             XCTAssertEqual(engine.generateSignals(context: sparseContext).count, 0)
         }
+    }
+
+    // MARK: - BudgetSignalEngine
+
+    private static let budgetSignalFixedNow = Date(timeIntervalSince1970: 1_752_000_000)
+
+    private func makeBudgetSettings(
+        weeklyLimit: Decimal = 300,
+        monthlyGoal: Decimal? = nil,
+        includePending: Bool = true,
+        warningThreshold: Double = 0.70,
+        weekStartsOnSunday: Bool = true
+    ) -> BudgetSettings {
+        BudgetSettings(
+            weeklySpendingLimit: weeklyLimit,
+            weekStartsOnSunday: weekStartsOnSunday,
+            includePendingTransactions: includePending,
+            monthlyGoal: monthlyGoal,
+            warningThreshold: warningThreshold
+        )
+    }
+
+    private func makeBudgetSignalContext(
+        transactions: [FinanceTransaction] = [],
+        budgetSettings: BudgetSettings?,
+        now: Date = FinanceTrackTests.budgetSignalFixedNow
+    ) -> SmartSignalContext {
+        SmartSignalContext(
+            transactions: transactions,
+            accounts: [],
+            categories: [],
+            incomeSources: [],
+            recurringExpenses: [],
+            budgetSettings: budgetSettings,
+            monthlyPlanSettings: nil,
+            now: now
+        )
+    }
+
+    /// An expense placed a controlled fraction of the way through the week containing `now` (0 =
+    /// week start, 1 = week end) — lets a test target a specific progress percentage without
+    /// hand-computing calendar boundaries itself (it reuses `DateRangeHelper`, the same date
+    /// source `BudgetSignalEngine` uses).
+    private func makeWeeklyExpense(amount: Decimal, fractionIntoWeek: Double, now: Date, weekStartsOnSunday: Bool = true) -> FinanceTransaction {
+        let week = DateRangeHelper.weekRangeContaining(now, weekStartsOnSunday: weekStartsOnSunday)
+        let date = week.start.addingTimeInterval(week.duration * fractionIntoWeek)
+        return FinanceTransaction(amount: amount, date: date, type: .expense)
+    }
+
+    private func makeMonthlyExpense(amount: Decimal, fractionIntoMonth: Double, now: Date) -> FinanceTransaction {
+        let month = DateRangeHelper.monthRangeContaining(now)
+        let date = month.start.addingTimeInterval(month.duration * fractionIntoMonth)
+        return FinanceTransaction(amount: amount, date: date, type: .expense)
+    }
+
+    func testBudgetSignalEngineWithNoBudgetSettingsReturnsNoSignals() {
+        let context = makeBudgetSignalContext(budgetSettings: nil)
+        XCTAssertTrue(BudgetSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testBudgetDisabledEquivalentToZeroOrAbsentLimitReturnsNoSignals() {
+        // This model has no separate "is budget enabled" flag distinct from a zero/absent limit
+        // (see the final report) — a weekly limit of 0 and an absent monthly goal both represent
+        // "no budget configured," the same as no `BudgetSettings` at all.
+        let settings = makeBudgetSettings(weeklyLimit: 0, monthlyGoal: nil)
+        let context = makeBudgetSignalContext(budgetSettings: settings)
+        XCTAssertTrue(BudgetSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testZeroBudgetLimitsReturnNoSignals() {
+        let settings = makeBudgetSettings(weeklyLimit: 0, monthlyGoal: 0)
+        let context = makeBudgetSignalContext(budgetSettings: settings)
+        XCTAssertTrue(BudgetSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testNegativeBudgetLimitsReturnNoSignals() {
+        let settings = makeBudgetSettings(weeklyLimit: -50, monthlyGoal: -100)
+        let context = makeBudgetSignalContext(budgetSettings: settings)
+        XCTAssertTrue(BudgetSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testBudgetExceededReturnsExactlyOneImportantSignalWithCorrectOverageMetric() {
+        let settings = makeBudgetSettings(weeklyLimit: 100, monthlyGoal: nil)
+        let expense = makeWeeklyExpense(amount: 142, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+
+        XCTAssertEqual(signals.count, 1)
+        guard let signal = signals.first else { return }
+        XCTAssertEqual(signal.severity, .important)
+        XCTAssertEqual(signal.confidence, .high)
+        XCTAssertEqual(signal.category, .budget)
+        XCTAssertEqual(signal.id, "budget.weekly.exceeded")
+        guard case .currency(let overage)? = signal.metrics.first(where: { $0.id == "budget.overage" })?.value else {
+            return XCTFail("Expected a structured currency overage metric")
+        }
+        XCTAssertEqual(overage, 42)
+    }
+
+    func testExceededTakesPrecedenceOverAllOtherBudgetStates() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 200, fractionIntoWeek: 0.9, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.exceeded"])
+    }
+
+    func testProgressExactlyOneHundredPercentProducesExceededNotNearlyReached() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 100, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.exceeded"])
+    }
+
+    func testProgressFromEightyFivePercentProducesNearlyReachedSignal() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.nearly-reached"])
+        XCTAssertEqual(signals.first?.severity, .headsUp)
+        XCTAssertEqual(signals.first?.confidence, .high)
+    }
+
+    func testProgressExactlyEightyFivePercentProducesNearlyReachedSignal() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 85, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.nearly-reached"])
+    }
+
+    func testProgressImmediatelyBelowEightyFivePercentDoesNotProduceNearlyReached() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 84, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.halfway"])
+    }
+
+    func testProgressFromFiftyPercentProducesHalfwaySignal() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 60, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.halfway"])
+        XCTAssertEqual(signals.first?.severity, .information)
+        XCTAssertEqual(signals.first?.confidence, .high)
+    }
+
+    func testProgressExactlyFiftyPercentProducesHalfwaySignal() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 50, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.halfway"])
+    }
+
+    func testProgressImmediatelyBelowFiftyPercentDoesNotProduceHalfwaySignal() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 49, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.on-track"])
+    }
+
+    func testOnTrackSignalIsNotProducedTooEarlyInThePeriod() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let week = DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true)
+        let tooEarlyNow = week.start.addingTimeInterval(3_600) // 1 hour into a 7-day week
+        let expense = FinanceTransaction(amount: 10, date: week.start.addingTimeInterval(1_800), type: .expense)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings, now: tooEarlyNow)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertTrue(signals.isEmpty, "A budget under 50% progress with almost no elapsed period must produce no signal at all, not a premature on-track one")
+    }
+
+    func testOnTrackSignalIsProducedWhenElapsedPeriodAndProgressRequirementsAreMet() {
+        let settings = makeBudgetSettings(weeklyLimit: 200)
+        let expense = makeWeeklyExpense(amount: 50, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.on-track"])
+        XCTAssertEqual(signals.first?.category, .positive)
+        XCTAssertEqual(signals.first?.severity, .positive)
+    }
+
+    func testBudgetSignalIdentifiersAreDeterministicAcrossIndependentWeeklyAndMonthlySignals() {
+        let settings = makeBudgetSettings(weeklyLimit: 100, monthlyGoal: 1_000)
+        let week = DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true)
+        let month = DateRangeHelper.monthRangeContaining(FinanceTrackTests.budgetSignalFixedNow)
+        // Isolated via the counting flags so each transaction affects only the period it's meant
+        // to test — otherwise a transaction inside both the week and the month would count toward
+        // both totals by default and make the two periods' progress interdependent.
+        let weeklyOnlyExpense = FinanceTransaction(
+            amount: 90, date: week.start.addingTimeInterval(week.duration * 0.5), type: .expense,
+            countsTowardWeeklyBudget: true, countsTowardMonthlySpending: false
+        )
+        let monthlyOnlyExpense = FinanceTransaction(
+            amount: 500, date: month.start.addingTimeInterval(month.duration * 0.5), type: .expense,
+            countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true
+        )
+        let context = makeBudgetSignalContext(transactions: [weeklyOnlyExpense, monthlyOnlyExpense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+
+        XCTAssertEqual(Set(signals.map(\.id)), Set(["budget.weekly.nearly-reached", "budget.monthly.halfway"]))
+        XCTAssertEqual(Set(signals.map(\.deduplicationID)), Set(["budget.weekly.nearly-reached", "budget.monthly.halfway"]))
+    }
+
+    func testEvaluatedAtEqualsFixedContextNow() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.first?.evaluatedAt, FinanceTrackTests.budgetSignalFixedNow)
+    }
+
+    func testBudgetSignalsNeverUseRandomIdentifiers() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let first = BudgetSignalEngine().generateSignals(context: context)
+        let second = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(first.map(\.id), second.map(\.id), "Two separate evaluations of identical input must produce identical ids — never a random one")
+    }
+
+    func testBudgetSignalMetricsRetainStructuredNumericValues() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        guard let signal = BudgetSignalEngine().generateSignals(context: context).first else {
+            return XCTFail("Expected a signal")
+        }
+        guard case .percentage(let progress)? = signal.metrics.first(where: { $0.id == "budget.progress" })?.value else {
+            return XCTFail("Expected a structured percentage progress metric")
+        }
+        XCTAssertEqual(progress, 0.9, accuracy: 0.0001)
+        guard case .currency(let remaining)? = signal.metrics.first(where: { $0.id == "budget.remaining" })?.value else {
+            return XCTFail("Expected a structured currency remaining metric")
+        }
+        XCTAssertEqual(remaining, 10)
+    }
+
+    func testEngineNeverReturnsMultiplePrimarySignalsForOneBudget() {
+        let settings = makeBudgetSettings(weeklyLimit: 100, monthlyGoal: nil)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        XCTAssertEqual(BudgetSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testRepeatedBudgetSignalEvaluationWithIdenticalContextReturnsEqualResults() {
+        let settings = makeBudgetSettings(weeklyLimit: 100, monthlyGoal: 1_000)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let engine = BudgetSignalEngine()
+        XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context))
     }
 
     // Model correctness
