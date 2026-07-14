@@ -75,6 +75,15 @@ final class Account {
     /// default (used by callers other than that view, e.g. tests/previews) stays `true`.
     var defaultCountsTowardMonthlySpending: Bool = true
 
+    /// Whether this account's transactions may appear in the Dashboard's Recent Activity list —
+    /// purely a display filter; never affects the account balance, spending eligibility, budget
+    /// calculations, or Budget Smart Signals. `true` is the schema-level default so every
+    /// pre-existing account (whose activity already appeared in Recent Activity before this
+    /// setting existed) keeps that exact behavior after a lightweight SwiftData migration
+    /// backfills this field, and so a brand-new account also starts visible — same pattern as
+    /// `defaultCountsTowardMonthlySpending` above.
+    var showsInRecentActivity: Bool = true
+
     @Relationship(deleteRule: .cascade, inverse: \FinanceTransaction.account)
     var transactions: [FinanceTransaction]? = []
 
@@ -95,7 +104,8 @@ final class Account {
         updatedAt: Date = .now,
         connectionType: TransactionSource = .manual,
         externalIdentifier: String? = nil,
-        defaultCountsTowardMonthlySpending: Bool = true
+        defaultCountsTowardMonthlySpending: Bool = true,
+        showsInRecentActivity: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -114,5 +124,6 @@ final class Account {
         self.connectionType = connectionType
         self.externalIdentifier = externalIdentifier
         self.defaultCountsTowardMonthlySpending = defaultCountsTowardMonthlySpending
+        self.showsInRecentActivity = showsInRecentActivity
     }
 }

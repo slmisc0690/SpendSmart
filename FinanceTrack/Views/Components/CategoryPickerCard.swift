@@ -1,76 +1,91 @@
 import SwiftUI
 
-/// A card containing a grid of selectable category chips (icon + name + selected state).
+/// A compact, collapsed drop-down for picking a transaction's category — shows the current
+/// selection (or "Uncategorized") and reveals every eligible category, alphabetically sorted,
+/// when tapped. Never mutates `categories`, never renames or re-relates anything; selecting an
+/// item only ever updates the `selectedCategory` binding.
 struct CategoryPickerCard: View {
     let categories: [Category]
     @Binding var selectedCategory: Category?
 
-    private let columns = [GridItem(.adaptive(minimum: 78), spacing: Theme.Spacing.sm)]
+    private var sortedCategories: [Category] {
+        CategorySorting.sortedAlphabetically(categories)
+    }
+
+    private var selectionLabel: String {
+        selectedCategory?.name ?? "Uncategorized"
+    }
 
     var body: some View {
-        CardBackground {
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                Text("Category (Optional)")
-                    .font(Theme.headlineFont)
-                    .foregroundStyle(Theme.textPrimary)
+        CardBackground(padding: Theme.Spacing.sm) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Text("Category")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
 
                 if categories.isEmpty {
-                    Text("No categories available yet.")
+                    Text("None available")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
                 } else {
-                    LazyVGrid(columns: columns, spacing: Theme.Spacing.sm) {
-                        ForEach(categories) { category in
-                            CategoryChip(
-                                category: category,
-                                isSelected: selectedCategory?.id == category.id
-                            ) {
-                                // Tapping an already-selected chip deselects it — the only way
-                                // back to "no category" once one has been picked.
-                                selectedCategory = (selectedCategory?.id == category.id) ? nil : category
-                            }
-                        }
+                    categoryMenu
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var categoryMenu: some View {
+        Menu {
+            Button {
+                selectedCategory = nil
+            } label: {
+                if selectedCategory == nil {
+                    Label("Uncategorized", systemImage: "checkmark")
+                } else {
+                    Text("Uncategorized")
+                }
+            }
+            Divider()
+            ForEach(sortedCategories) { category in
+                Button {
+                    selectedCategory = category
+                } label: {
+                    if selectedCategory?.id == category.id {
+                        Label(category.name, systemImage: "checkmark")
+                    } else {
+                        Text(category.name)
                     }
                 }
             }
-        }
-    }
-}
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: selectedCategory?.iconName ?? "questionmark.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(selectedCategory.map { Theme.categoryColor(named: $0.colorName) } ?? Theme.textTertiary)
+                    .frame(width: 20, height: 20)
 
-private struct CategoryChip: View {
-    let category: Category
-    let isSelected: Bool
-    var action: () -> Void
-
-    private var color: Color { Theme.categoryColor(named: category.colorName) }
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: category.iconName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(isSelected ? .white : color)
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(isSelected ? color : color.opacity(0.16)))
-
-                Text(category.name)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
+                Text(selectionLabel)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, Theme.Spacing.xs)
+            .padding(.horizontal, Theme.Spacing.sm)
+            .frame(minHeight: 44)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .fill(isSelected ? color.opacity(0.14) : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .strokeBorder(isSelected ? color : Color.clear, lineWidth: 1.5)
+                    .fill(Theme.cardSurface)
             )
         }
-        .buttonStyle(.plain)
+        .accessibilityLabel("Category")
+        .accessibilityValue(selectionLabel)
     }
 }
 

@@ -33,6 +33,21 @@ enum AccountBalanceManager {
         account.updatedAt = .now
     }
 
+    /// A deposit (stored as `.income`) is the same direction as a refund: it increases what's
+    /// available in a non-credit-card account, or decreases what's owed on a credit card. Kept as
+    /// its own method (not a call to `applyRefund`) because a deposit and a refund represent
+    /// different real-world events even though the math is identical for every account type
+    /// today.
+    static func applyIncome(amount: Decimal, to account: Account) {
+        switch account.type {
+        case .creditCard:
+            account.currentBalance -= amount
+        case .checking, .savings, .cash, .other:
+            account.currentBalance += amount
+        }
+        account.updatedAt = .now
+    }
+
     /// Paying a credit card moves money out of the paying account and reduces what's owed on
     /// the card by the same amount.
     static func applyCreditCardPayment(amount: Decimal, from sourceAccount: Account, to creditCardAccount: Account) {

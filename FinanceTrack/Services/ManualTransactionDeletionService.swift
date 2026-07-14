@@ -63,7 +63,13 @@ enum ManualTransactionDeletionService {
                 message: "Deleting this payment will reverse its effect on both the payment account and the credit-card balance.",
                 destructiveActionTitle: "Delete Payment"
             )
-        case .income, .transfer:
+        case .income:
+            return ConfirmationCopy(
+                title: "Delete Deposit?",
+                message: "This deposit will be removed from the account register and the balance will be adjusted.",
+                destructiveActionTitle: "Delete Deposit"
+            )
+        case .transfer:
             // Never actually constructed anywhere in the app today — generic fallback copy kept
             // only so this function is total over every `TransactionType` case.
             return ConfirmationCopy(
@@ -153,8 +159,10 @@ enum ManualTransactionDeletionService {
                 destinationAccount.updatedAt = .now
             }
         case .income:
-            // Never actually constructed anywhere in the app today; no account effect to reverse.
-            break
+            // Undo a deposit the same way an expense would: take the money back out.
+            if let account = transaction.account {
+                AccountBalanceManager.applyExpense(amount: transaction.amount, to: account)
+            }
         }
     }
 

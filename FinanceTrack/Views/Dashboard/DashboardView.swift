@@ -59,8 +59,21 @@ struct DashboardView: View {
         BudgetCalculator.remaining(limit: weeklyLimit, spent: spentThisWeek)
     }
 
+    /// The single source of truth for what Recent Activity shows — opted-out Manual Accounts are
+    /// filtered out FIRST, then the 5-item limit is applied to what remains, so a hidden
+    /// account's transactions never silently consume a slot that an eligible transaction should
+    /// have gotten. `transactions` is already date-descending (see the `@Query` sort above), so
+    /// filtering preserves that order.
     private var recentTransactions: [FinanceTransaction] {
-        Array(transactions.prefix(5))
+        Array(transactions.filter(isEligibleForRecentActivity).prefix(5))
+    }
+
+    /// A transaction with no account, or one belonging to a Plaid-linked account (no opt-out
+    /// concept exists for those today), is always eligible — this only ever excludes a Manual
+    /// Account's transactions, and only when that account's own `showsInRecentActivity` is
+    /// explicitly `false`.
+    private func isEligibleForRecentActivity(_ transaction: FinanceTransaction) -> Bool {
+        transaction.account?.showsInRecentActivity ?? true
     }
 
     /// Everything needed for the Monthly Outlook and Week-by-Week sections, computed once via

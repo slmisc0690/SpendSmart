@@ -15,6 +15,7 @@ struct ManualAccountDetailView: View {
 
     @State private var isPresentingAddExpense = false
     @State private var isPresentingEdit = false
+    @State private var isPresentingCalculator = false
     @State private var transactionPendingDeletion: FinanceTransaction?
     @State private var isPresentingDeletionError = false
     @State private var isPresentingAccountDeletionConfirmation = false
@@ -52,6 +53,9 @@ struct ManualAccountDetailView: View {
             }
             .sheet(isPresented: $isPresentingAddExpense) {
                 AddExpenseView(preselectedAccount: account)
+            }
+            .sheet(isPresented: $isPresentingCalculator) {
+                CalculatorView()
             }
             .sheet(isPresented: $isPresentingEdit) {
                 AddAccountView(account: account)
@@ -172,15 +176,76 @@ struct ManualAccountDetailView: View {
             .background(Capsule().fill(Theme.accent.opacity(0.15)))
     }
 
+    /// Neither `addTransactionButton` nor `editButton` uses `PremiumActionButton` (whose
+    /// `.frame(maxWidth: .infinity)` forces it to stretch and consume all remaining row width,
+    /// which is exactly why "Add Transaction" was rendering far too wide) — both are
+    /// content-sized pills built from `compactPillButton`, so the row lays out left-to-right at
+    /// natural width with a trailing `Spacer` absorbing any leftover space instead of one button
+    /// swallowing it.
     private var actionsRow: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            PremiumActionButton(title: "Add Expense", systemIconName: "plus") {
-                isPresentingAddExpense = true
-            }
-            PremiumActionButton(title: "Edit", systemIconName: "pencil") {
-                isPresentingEdit = true
-            }
+            addTransactionButton
+            editButton
+            calculatorButton
+            Spacer(minLength: 0)
         }
+    }
+
+    private var addTransactionButton: some View {
+        compactPillButton(title: "Add Transaction", systemIconName: "plus") {
+            isPresentingAddExpense = true
+        }
+    }
+
+    private var editButton: some View {
+        compactPillButton(title: "Edit", systemIconName: "pencil") {
+            isPresentingEdit = true
+        }
+    }
+
+    /// A smaller, content-hugging pill — mirrors `PremiumActionButton`'s gradient fill, shape, and
+    /// shadow so it still reads as the same kind of control, but (unlike `PremiumActionButton`)
+    /// never stretches to fill available width. Shared by `addTransactionButton` and `editButton`
+    /// so both stay visually identical without a new `PremiumActionButton` mode that would affect
+    /// every other call site of that shared component.
+    private func compactPillButton(title: String, systemIconName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Spacing.xs) {
+                Image(systemName: systemIconName)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, Theme.Spacing.md)
+            .frame(minHeight: 44)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                    .fill(Theme.accentGradient)
+            )
+            .shadow(color: Theme.accent.opacity(0.35), radius: 14, x: 0, y: 6)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+    }
+
+    /// Icon-only, at the far right of the row (after `editButton`). Uses the supplied
+    /// `CalculatorIcon` asset (a self-contained rounded-square glyph with its own light
+    /// background, not an SF Symbol) so it stays clearly visible next to these two bright
+    /// gradient pills regardless of theme. The visible glyph is 32×32, centered inside a 44×44 tap
+    /// target so the touch area doesn't shrink.
+    private var calculatorButton: some View {
+        Button {
+            isPresentingCalculator = true
+        } label: {
+            Image("CalculatorIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Calculator")
     }
 
     /// The consolidated, clearly-visible account-actions control — replaces relying on a tiny
@@ -189,7 +254,7 @@ struct ManualAccountDetailView: View {
     private var accountOptionsMenu: some View {
         Menu {
             Button("Edit Account", systemImage: "pencil", action: { isPresentingEdit = true })
-            Button("Add Expense", systemImage: "plus", action: { isPresentingAddExpense = true })
+            Button("Add Transaction", systemImage: "plus", action: { isPresentingAddExpense = true })
             Divider()
             Button("Delete Account", systemImage: "trash", role: .destructive) {
                 isPresentingAccountDeletionConfirmation = true

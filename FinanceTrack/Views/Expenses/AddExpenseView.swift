@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-/// Premium manual entry screen for a single expense or refund. Applies the corresponding
+/// Premium manual entry screen for a single expense, refund, or deposit. Applies the corresponding
 /// `AccountBalanceManager` mutation on save so the account balance and the new
 /// `FinanceTransaction` record never drift out of sync.
 struct AddExpenseView: View {
@@ -18,28 +18,89 @@ struct AddExpenseView: View {
     @State private var type: TransactionType = .expense
     @State private var selectedAccount: Account?
     @State private var selectedCategory: Category?
-    @State private var countsTowardWeeklyBudget: Bool = true
-    /// Defaults to `true` — "no account selected" preserves today's always-counts behavior, and
-    /// this also covers cash/unsupported-payment-method purchases that never get an account at
-    /// all. Overwritten by `selectedAccount`'s own default the moment an account is picked,
-    /// unless the user has already touched the toggle themselves this session (see
-    /// `hasManuallyChangedMonthlySpendingToggle`).
-    @State private var countsTowardMonthlySpending: Bool = true
-    /// True once the user directly taps the "Count toward Monthly Spending" toggle — from then
-    /// on, changing `selectedAccount` must never silently overwrite their explicit choice.
-    @State private var hasManuallyChangedMonthlySpendingToggle = false
-    @State private var isExcludedFromReports: Bool = false
-    @State private var isPending: Bool = false
+    @State private var countsTowardWeeklyBudget: Bool
+    @State private var countsTowardMonthlySpending: Bool
+    @State private var isExcludedFromReports: Bool
+    @State private var isPending: Bool
     @State private var isPresentingAddAccount = false
     @State private var hasAttemptedSave = false
     @State private var isPresentingDiscardConfirmation = false
+    /// Always starts collapsed on every presentation — deliberately not persisted, so a fresh
+    /// `@State` for a newly presented screen is always `false` regardless of what a previous
+    /// presentation left it as.
+    @State private var isOptionsExpanded = false
+    @State private var isPresentingAddDescription = false
+    @State private var newDescriptionText = ""
+    @State private var isPresentingCalculator = false
+
+    private let preferenceStore = TransactionPreferenceStore()
+    private let descriptionStore = DescriptionStore()
+
+    /// The reusable Description choice list, alphabetized the same way `CategoryPickerCard`
+    /// alphabetizes categories. Read fresh from `descriptionStore` on every access, so it reflects
+    /// an addition immediately without a separate cache to keep in sync.
+    private var sortedDescriptions: [String] {
+        DescriptionSorting.sortedAlphabetically(descriptionStore.all())
+    }
+
+    /// `note` IS the transaction's description — this binding just presents that single existing
+    /// property as an optional to `DescriptionPickerCard` (empty string means "no description
+    /// selected") rather than introducing a second, duplicate field. Typing directly into the
+    /// free-form Note field below updates the exact same value.
+    private var descriptionBinding: Binding<String?> {
+        Binding(
+            get: { note.isEmpty ? nil : note },
+            set: { newValue in note = newValue ?? "" }
+        )
+    }
 
     /// Opening "Add Expense" from a specific account's own detail/register screen preselects
-    /// that account and seeds the monthly-spending toggle from its default — equivalent to the
-    /// user picking that account by hand, just done up front.
+    /// that account. The four option toggles start from that account's own remembered
+    /// preferences for the initial type (`.expense`) if any exist (see
+    /// `TransactionPreferenceStore`), otherwise from the account's `defaultCountsTowardMonthlySpending`
+    /// plus the screen's own plain defaults — the same resolution `applyRememberedPreferences`
+    /// performs on every later account/type change, kept inline here since `init` runs before
+    /// `self` exists and can't call an instance method yet.
     init(preselectedAccount: Account? = nil) {
         _selectedAccount = State(initialValue: preselectedAccount)
-        _countsTowardMonthlySpending = State(initialValue: preselectedAccount?.defaultCountsTowardMonthlySpending ?? true)
+        let resolved = TransactionPreferenceStore().resolvedPreferences(
+            accountID: preselectedAccount?.id,
+            type: .expense,
+            fallback: TransactionEntryPreferences(
+                countsTowardWeeklyBudget: true,
+                countsTowardMonthlySpending: preselectedAccount?.defaultCountsTowardMonthlySpending ?? true,
+                isExcludedFromReports: false,
+                isPending: false
+            )
+        )
+        _countsTowardWeeklyBudget = State(initialValue: resolved.countsTowardWeeklyBudget)
+        _countsTowardMonthlySpending = State(initialValue: resolved.countsTowardMonthlySpending)
+        _isExcludedFromReports = State(initialValue: resolved.isExcludedFromReports)
+        _isPending = State(initialValue: resolved.isPending)
+    }
+
+    /// Reloads the four toggles for the current `type` and `account` (or `selectedAccount` if
+    /// `account` isn't passed) — called whenever either changes, so entering a different
+    /// account/type combination always starts from THAT pair's own remembered preferences (see
+    /// `TransactionPreferenceStore.resolvedPreferences`), falling back to the screen's plain
+    /// defaults (weekly on, monthly from the account's own default, excluded off, pending off)
+    /// when nothing has been remembered yet.
+    private func applyRememberedPreferences(type: TransactionType, account: Account? = nil) {
+        let resolvedAccount = account ?? selectedAccount
+        let resolved = preferenceStore.resolvedPreferences(
+            accountID: resolvedAccount?.id,
+            type: type,
+            fallback: TransactionEntryPreferences(
+                countsTowardWeeklyBudget: true,
+                countsTowardMonthlySpending: resolvedAccount?.defaultCountsTowardMonthlySpending ?? true,
+                isExcludedFromReports: false,
+                isPending: false
+            )
+        )
+        countsTowardWeeklyBudget = resolved.countsTowardWeeklyBudget
+        countsTowardMonthlySpending = resolved.countsTowardMonthlySpending
+        isExcludedFromReports = resolved.isExcludedFromReports
+        isPending = resolved.isPending
     }
 
     private var activeAccounts: [Account] {
@@ -68,6 +129,24 @@ struct AddExpenseView: View {
 
     private var isValid: Bool { validationMessages.isEmpty }
 
+    private var navigationTitle: String {
+        switch type {
+        case .expense: return "Add Expense"
+        case .refund: return "Add Refund"
+        case .income: return "Add Deposit"
+        case .transfer, .creditCardPayment, .balanceAdjustment: return "Add Expense"
+        }
+    }
+
+    private var amountSectionTitle: String {
+        switch type {
+        case .expense: return "Expense Amount"
+        case .refund: return "Refund Amount"
+        case .income: return "Deposit Amount"
+        case .transfer, .creditCardPayment, .balanceAdjustment: return "Amount"
+        }
+    }
+
     /// This screen intentionally does not autosave — it creates a `FinanceTransaction` and
     /// applies a balance change via `AccountBalanceManager`, and autosaving that on every
     /// keystroke risks applying the same expense more than once. Instead, unsaved edits are
@@ -83,7 +162,7 @@ struct AddExpenseView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: Theme.Spacing.lg) {
+                VStack(spacing: Theme.Spacing.md) {
                     amountSection
                         .padding(.horizontal, Theme.Spacing.lg)
 
@@ -111,7 +190,7 @@ struct AddExpenseView: View {
                         .padding(.horizontal, Theme.Spacing.lg)
                     }
 
-                    CategoryPickerCard(categories: activeCategories, selectedCategory: $selectedCategory)
+                    categoryAndDescriptionRow
                         .padding(.horizontal, Theme.Spacing.lg)
 
                     detailsSection
@@ -125,12 +204,12 @@ struct AddExpenseView: View {
                             .padding(.horizontal, Theme.Spacing.lg)
                     }
                 }
-                .padding(.vertical, Theme.Spacing.lg)
+                .padding(.vertical, Theme.Spacing.md)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .scrollDismissesKeyboard(.interactively)
             .dismissKeyboardOnBackgroundTap()
-            .navigationTitle(type == .expense ? "Add Expense" : "Add Refund")
+            .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -162,17 +241,26 @@ struct AddExpenseView: View {
             .sheet(isPresented: $isPresentingAddAccount) {
                 AddAccountView()
             }
-            .onChange(of: type) { _, _ in
-                // Expense and refund both default to counting toward the weekly budget;
-                // the user can still turn it off after switching.
-                countsTowardWeeklyBudget = true
+            .sheet(isPresented: $isPresentingCalculator) {
+                CalculatorView()
+            }
+            .alert("Add Description", isPresented: $isPresentingAddDescription) {
+                TextField("e.g. Netflix", text: $newDescriptionText)
+                Button("Add") {
+                    if let added = descriptionStore.add(newDescriptionText) {
+                        note = added
+                    }
+                    newDescriptionText = ""
+                }
+                Button("Cancel", role: .cancel) {
+                    newDescriptionText = ""
+                }
+            }
+            .onChange(of: type) { _, newType in
+                applyRememberedPreferences(type: newType)
             }
             .onChange(of: selectedAccount) { _, newAccount in
-                // Only apply the newly-selected account's own default if the user hasn't already
-                // made an explicit choice this session — an explicit choice must survive an
-                // account change, never get silently overwritten by it.
-                guard !hasManuallyChangedMonthlySpendingToggle else { return }
-                countsTowardMonthlySpending = newAccount?.defaultCountsTowardMonthlySpending ?? true
+                applyRememberedPreferences(type: type, account: newAccount)
             }
         }
         .preferredColorScheme(.dark)
@@ -180,31 +268,62 @@ struct AddExpenseView: View {
 
     // MARK: - Sections
 
+    /// A normal top-to-bottom `VStack` — a leading calculator-icon row, then the existing centered
+    /// label/field — rather than the previous `ZStack(alignment: .topLeading)` overlay. The
+    /// overlay approach put the button in normal SwiftUI layout flow but visually failed to render
+    /// reliably; a plain sibling row above the amount content guarantees the icon is laid out (and
+    /// painted) in its own space rather than depending on `ZStack` layering over the amount field.
     private var amountSection: some View {
-        CardBackground {
-            VStack(spacing: Theme.Spacing.sm) {
-                Text(type == .expense ? "Expense Amount" : "Refund Amount")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.textTertiary)
-                CurrencyAmountField(
-                    amount: $amount,
-                    style: .hero,
-                    isInvalid: hasAttemptedSave && (amount ?? 0) <= 0,
-                    accessibilityLabel: type == .expense ? "Expense amount" : "Refund amount"
-                )
+        CardBackground(padding: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                HStack {
+                    amountCardCalculatorButton
+                    Spacer(minLength: 0)
+                }
+
+                VStack(spacing: Theme.Spacing.sm) {
+                    Text(amountSectionTitle)
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
+                    CurrencyAmountField(
+                        amount: $amount,
+                        style: .hero,
+                        isInvalid: hasAttemptedSave && (amount ?? 0) <= 0,
+                        accessibilityLabel: amountSectionTitle
+                    )
+                }
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
         }
     }
 
+    /// Opens the same `CalculatorView`/`CalculatorEngine` used everywhere else in the app — this
+    /// is a second launch point, not a second implementation. Uses the supplied `CalculatorIcon`
+    /// asset (a self-contained rounded-square glyph with its own light background, not an SF
+    /// Symbol) so it stays clearly visible regardless of theme; sitting in its own leading row
+    /// above the label/field means it can never overlap either.
+    private var amountCardCalculatorButton: some View {
+        Button {
+            isPresentingCalculator = true
+        } label: {
+            Image("CalculatorIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 32, height: 32)
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Calculator")
+    }
+
     private var typeSection: some View {
-        CardBackground {
+        CardBackground(padding: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 Text("Type")
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
                 Picker("Type", selection: $type) {
-                    ForEach([TransactionType.expense, .refund]) { candidateType in
+                    ForEach([TransactionType.expense, .refund, .income]) { candidateType in
                         Text(candidateType.label).tag(candidateType)
                     }
                 }
@@ -216,7 +335,7 @@ struct AddExpenseView: View {
     /// Placed right after Type, near the top of the form, so changing the date away from today
     /// (the default) doesn't require scrolling past account/category first.
     private var dateSection: some View {
-        CardBackground {
+        CardBackground(padding: Theme.Spacing.md) {
             HStack {
                 Text("Date")
                     .font(Theme.headlineFont)
@@ -229,9 +348,20 @@ struct AddExpenseView: View {
         }
     }
 
+    private var categoryAndDescriptionRow: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+            CategoryPickerCard(categories: activeCategories, selectedCategory: $selectedCategory)
+            DescriptionPickerCard(
+                descriptions: sortedDescriptions,
+                selectedDescription: descriptionBinding,
+                onRequestAddDescription: { isPresentingAddDescription = true }
+            )
+        }
+    }
+
     private var detailsSection: some View {
-        CardBackground {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        CardBackground(padding: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 Text("Details")
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
@@ -253,15 +383,53 @@ struct AddExpenseView: View {
     }
 
     private var optionsSection: some View {
-        CardBackground {
+        CardBackground(padding: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                optionsHeader
+
+                if isOptionsExpanded {
+                    optionsControls
+                }
+            }
+        }
+    }
+
+    /// Tap-to-expand row — collapsed shows only the section title and a chevron, expanded reveals
+    /// `optionsControls` below it. Toggling this never touches any of the four option values
+    /// themselves, so collapsing and re-expanding is always a no-op on the underlying state.
+    private var optionsHeader: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isOptionsExpanded.toggle()
+            }
+        } label: {
+            HStack {
                 Text("Options")
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Image(systemName: isOptionsExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Options")
+        .accessibilityValue(isOptionsExpanded ? "Expanded" : "Collapsed")
+        .accessibilityAddTraits(.isButton)
+    }
 
-                // A refund is gated by the exact same flags its originating expense would be
-                // (see BudgetCalculator) — never unconditional — so both types share these
-                // controls rather than refund getting a separate, non-functional branch.
+    private var optionsControls: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            // A refund is gated by the exact same flags its originating expense would be
+            // (see BudgetCalculator) — never unconditional — so both types share these
+            // controls rather than refund getting a separate, non-functional branch. A
+            // deposit is structurally excluded from every spending total regardless of these
+            // flags (see BudgetCalculator's `.income` handling), so showing controls that
+            // would have no effect would be misleading — hidden for that type instead.
+            if type != .income {
                 TransactionToggleRow(
                     title: "Counts Toward Weekly Budget",
                     subtitle: type == .expense
@@ -275,39 +443,25 @@ struct AddExpenseView: View {
                     subtitle: type == .expense
                         ? "Turn off for a register-only entry that shouldn't affect your monthly totals"
                         : "Turn off if the original purchase never affected your monthly totals either",
-                    isOn: monthlySpendingToggleBinding
+                    isOn: $countsTowardMonthlySpending
                 )
                 Divider().overlay(Theme.cardStroke)
-
-                TransactionToggleRow(
-                    title: "Exclude From Reports",
-                    subtitle: "Hide this from weekly and monthly totals entirely",
-                    isOn: $isExcludedFromReports
-                )
-
-                Divider().overlay(Theme.cardStroke)
-
-                TransactionToggleRow(
-                    title: "Pending",
-                    subtitle: "Follows your \"Include Pending Transactions\" setting",
-                    isOn: $isPending
-                )
             }
+
+            TransactionToggleRow(
+                title: "Exclude From Reports",
+                subtitle: "Hide this from weekly and monthly totals entirely",
+                isOn: $isExcludedFromReports
+            )
+
+            Divider().overlay(Theme.cardStroke)
+
+            TransactionToggleRow(
+                title: "Pending",
+                subtitle: "Follows your \"Include Pending Transactions\" setting",
+                isOn: $isPending
+            )
         }
-    }
-
-    /// Wraps `$countsTowardMonthlySpending` so any DIRECT user interaction with the toggle marks
-    /// `hasManuallyChangedMonthlySpendingToggle`, permanently protecting that choice from being
-    /// overwritten by a later account change — a plain `$countsTowardMonthlySpending` binding
-    /// wouldn't distinguish "the account-change handler set this" from "the user tapped this."
-    private var monthlySpendingToggleBinding: Binding<Bool> {
-        Binding(
-            get: { countsTowardMonthlySpending },
-            set: { newValue in
-                countsTowardMonthlySpending = newValue
-                hasManuallyChangedMonthlySpendingToggle = true
-            }
-        )
     }
 
     private var validationCard: some View {
@@ -372,9 +526,25 @@ struct AddExpenseView: View {
             AccountBalanceManager.applyExpense(amount: amount, to: selectedAccount)
         case .refund:
             AccountBalanceManager.applyRefund(amount: amount, to: selectedAccount)
-        case .income, .transfer, .creditCardPayment, .balanceAdjustment:
+        case .income:
+            AccountBalanceManager.applyIncome(amount: amount, to: selectedAccount)
+        case .transfer, .creditCardPayment, .balanceAdjustment:
             break
         }
+
+        // Only remembered after every step above has succeeded — a cancel, a dismiss, or a
+        // validation failure (which returns before reaching this point) must never update what
+        // the next visit to this account/type combination starts from.
+        preferenceStore.save(
+            TransactionEntryPreferences(
+                countsTowardWeeklyBudget: countsTowardWeeklyBudget,
+                countsTowardMonthlySpending: countsTowardMonthlySpending,
+                isExcludedFromReports: isExcludedFromReports,
+                isPending: isPending
+            ),
+            accountID: selectedAccount.id,
+            type: type
+        )
 
         dismiss()
     }

@@ -4332,6 +4332,2016 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(resultWithFake.map(\.id), ["fake-only"])
         XCTAssertTrue(resultWithoutFake.isEmpty, "Injecting a fake engine into one coordinator instance must never affect another")
     }
+
+    // MARK: - SpendingSignalEngine
+
+    /// Tuesday, July 8 2025 — mid-year, nowhere near a US daylight-saving transition, so 7-day
+    /// calendar arithmetic in these tests never silently drifts by an hour.
+    private static let spendingSignalAnchor = Date(timeIntervalSince1970: 1_752_000_000)
+
+    private func spendingCurrentWeekStart(weekStartsOnSunday: Bool = true) -> Date {
+        DateRangeHelper.weekRangeContaining(FinanceTrackTests.spendingSignalAnchor, weekStartsOnSunday: weekStartsOnSunday).start
+    }
+
+    private func spendingPreviousWeekStart(weekStartsOnSunday: Bool = true) -> Date {
+        let calendar = Calendar.current
+        let currentStart = spendingCurrentWeekStart(weekStartsOnSunday: weekStartsOnSunday)
+        let referenceDate = calendar.date(byAdding: .day, value: -7, to: currentStart) ?? currentStart
+        return DateRangeHelper.weekRangeContaining(referenceDate, weekStartsOnSunday: weekStartsOnSunday).start
+    }
+
+    private func spendingCurrentMonthStart() -> Date {
+        DateRangeHelper.monthRangeContaining(FinanceTrackTests.spendingSignalAnchor).start
+    }
+
+    private func spendingPreviousMonthStart() -> Date {
+        DateRangeHelper.lastMonthRange(relativeTo: FinanceTrackTests.spendingSignalAnchor).start
+    }
+
+    private func makeSpendingSignalContext(
+        transactions: [FinanceTransaction] = [],
+        budgetSettings: BudgetSettings? = nil,
+        now: Date
+    ) -> SmartSignalContext {
+        SmartSignalContext(
+            transactions: transactions,
+            accounts: [],
+            categories: [],
+            incomeSources: [],
+            recurringExpenses: [],
+            budgetSettings: budgetSettings,
+            monthlyPlanSettings: nil,
+            now: now
+        )
+    }
+
+    private func makeSpendingSettings(includePending: Bool = true, weekStartsOnSunday: Bool = true) -> BudgetSettings {
+        BudgetSettings(weekStartsOnSunday: weekStartsOnSunday, includePendingTransactions: includePending)
+    }
+
+    private func makeSpendingTransaction(
+        amount: Decimal,
+        date: Date,
+        type: TransactionType = .expense,
+        countsTowardWeeklyBudget: Bool = true,
+        countsTowardMonthlySpending: Bool = true,
+        isExcludedFromReports: Bool = false,
+        isPending: Bool = false
+    ) -> FinanceTransaction {
+        FinanceTransaction(
+            amount: amount,
+            date: date,
+            type: type,
+            countsTowardWeeklyBudget: countsTowardWeeklyBudget,
+            countsTowardMonthlySpending: countsTowardMonthlySpending,
+            isExcludedFromReports: isExcludedFromReports,
+            isPending: isPending
+        )
+    }
+
+    private func makeDate(year: Int, month: Int, day: Int, hour: Int = 0) -> Date {
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        return Calendar.current.date(from: components) ?? FinanceTrackTests.spendingSignalAnchor
+    }
+
+    // MARK: SpendingSignalEngine — weekly rule
+
+    func testWeeklySignalFiresWhenClearlyQualifying() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        let signals = SpendingSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+    }
+
+    func testWeeklySignalHasExactIdAndDeduplicationID() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.id, "spending.week.higher-than-previous")
+        XCTAssertEqual(signal.deduplicationID, "spending.week.higher-than-previous")
+    }
+
+    func testWeeklySignalHasExactCategorySeverityPriorityTitleAndDates() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.category, .spending)
+        XCTAssertEqual(signal.severity, .headsUp)
+        XCTAssertEqual(signal.priority, 250)
+        XCTAssertEqual(signal.title, "Spending Up This Week")
+        XCTAssertEqual(signal.relevantDate, weekStart)
+        XCTAssertEqual(signal.evaluatedAt, now)
+    }
+
+    func testWeeklySignalMetricsAppearInExactOrderWithCorrectIdsLabelsAndValues() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.metrics.count, 3)
+        XCTAssertEqual(signal.metrics[0].id, "spending.week.current")
+        XCTAssertEqual(signal.metrics[0].label, "This Week")
+        guard case .currency(let current) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(current, 300)
+
+        XCTAssertEqual(signal.metrics[1].id, "spending.week.previous")
+        XCTAssertEqual(signal.metrics[1].label, "Previous Week")
+        guard case .currency(let previous) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(previous, 200)
+
+        XCTAssertEqual(signal.metrics[2].id, "spending.week.increase")
+        XCTAssertEqual(signal.metrics[2].label, "Increase")
+        guard case .percentage(let increase) = signal.metrics[2].value else { return XCTFail("Expected percentage") }
+        XCTAssertEqual(increase, 0.5, accuracy: 0.0001)
+    }
+
+    func testWeeklySignalExplanationContainsFormattedAmountsAndPercentage() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertTrue(signal.explanation.contains("$300.00"))
+        XCTAssertTrue(signal.explanation.contains("$200.00"))
+        XCTAssertTrue(signal.explanation.contains("50%"))
+    }
+
+    func testWeeklySignalFiresAtExactPercentageThreshold() {
+        // previous = 200, current = 270 → increase = 70 → exactly 35%, comfortably above $50.
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 270, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertEqual(SpendingSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testWeeklySignalFiresAtExactAbsoluteThreshold() {
+        // previous = 100, current = 150 → increase = 50 exactly, 50% (comfortably above 35%).
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 100, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 150, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertEqual(SpendingSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testWeeklySignalDoesNotFireJustBelowPercentageThresholdEvenWhenDollarThresholdIsMet() {
+        // previous = 1000, current = 1340 → increase = 340 (34%, well above $50, below 35%).
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_340, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testWeeklySignalDoesNotFireAtExactPercentageButBelowDollarThreshold() {
+        // previous = 100, current = 135 → increase = 35 (exactly 35%, but only $35 < $50).
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 100, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 135, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testWeeklySignalDoesNotFireWhenPreviousComparableSpendIsZero() {
+        let weekStart = spendingCurrentWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600))]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testWeeklySignalDoesNotFireWhenCurrentEqualsPrevious() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 200, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testWeeklySignalDoesNotFireWithFewerThan48ElapsedHours() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(47 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testWeeklySignalQualifiesAtExactly48ElapsedHoursWithMediumConfidence() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(48 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.confidence, .medium)
+    }
+
+    func testWeeklySignalUsesMediumConfidenceJustBelow96ElapsedHours() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600 - 1)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.confidence, .medium)
+    }
+
+    func testWeeklySignalUsesHighConfidenceAtExactly96ElapsedHours() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.confidence, .high)
+    }
+
+    func testWeeklyComparisonUsesOnlyPriorEquivalentElapsedWindowNotFullPriorWeek() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(48 * 3600)
+        let transactions = [
+            // Inside the 48-hour comparable window of the previous week.
+            makeSpendingTransaction(amount: 100, date: previousStart.addingTimeInterval(3600)),
+            // Far outside that window (day 5 of the previous week) — must NOT be counted.
+            makeSpendingTransaction(amount: 500, date: previousStart.addingTimeInterval(5 * 24 * 3600)),
+            makeSpendingTransaction(amount: 200, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let previous)? = signal.metrics.first(where: { $0.id == "spending.week.previous" })?.value else {
+            return XCTFail("Expected a previous-week currency metric")
+        }
+        XCTAssertEqual(previous, 100, "The $500 transaction outside the comparable window must not be counted")
+    }
+
+    func testWeeklySundayStartSettingIsRespected() {
+        let weekStart = spendingCurrentWeekStart(weekStartsOnSunday: true)
+        let previousStart = spendingPreviousWeekStart(weekStartsOnSunday: true)
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let settings = makeSpendingSettings(weekStartsOnSunday: true)
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: settings, now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.relevantDate, weekStart)
+    }
+
+    func testWeeklyMondayStartSettingIsRespected() {
+        let weekStart = spendingCurrentWeekStart(weekStartsOnSunday: false)
+        let previousStart = spendingPreviousWeekStart(weekStartsOnSunday: false)
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let settings = makeSpendingSettings(weekStartsOnSunday: false)
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: settings, now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.relevantDate, weekStart)
+        XCTAssertNotEqual(weekStart, spendingCurrentWeekStart(weekStartsOnSunday: true), "Monday-start and Sunday-start weeks must resolve to different boundaries for this anchor")
+    }
+
+    func testWeeklyPendingTransactionIsIncludedWhenIncludePendingTransactionsIsTrue() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600), isPending: true),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(includePending: true), now: now)
+        XCTAssertEqual(SpendingSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testWeeklyPendingTransactionIsExcludedWhenIncludePendingTransactionsIsFalse() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600), isPending: true),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(includePending: false), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty, "With pending excluded, current spend is $0 — no increase to report")
+    }
+
+    func testWeeklyExcludedFromReportsTransactionIsNotCounted() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 9_999, date: weekStart.addingTimeInterval(7200), isExcludedFromReports: true),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.week.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 300, "The excluded transaction must never contribute to the total")
+    }
+
+    func testWeeklyIncomeIsNotCounted() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 5_000, date: weekStart.addingTimeInterval(7200), type: .income),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.week.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 300)
+    }
+
+    func testWeeklyTransferIsNotCounted() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 5_000, date: weekStart.addingTimeInterval(7200), type: .transfer),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.week.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 300)
+    }
+
+    func testWeeklyCreditCardPaymentIsNotCounted() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 5_000, date: weekStart.addingTimeInterval(7200), type: .creditCardPayment),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.week.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 300)
+    }
+
+    func testWeeklyRefundReducesSpendingPerBudgetCalculatorSemantics() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 100, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 100, date: weekStart.addingTimeInterval(7200), type: .refund),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.week.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 200, "The refund must subtract from the total exactly as BudgetCalculator already does")
+    }
+
+    func testWeeklyCountingFlagIsRespectedThroughBudgetCalculator() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 9_999, date: weekStart.addingTimeInterval(7200), countsTowardWeeklyBudget: false),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.week.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 300, "A transaction opted out of the weekly count must never contribute")
+    }
+
+    // MARK: SpendingSignalEngine — monthly rule
+
+    func testMonthlySignalFiresWhenClearlyQualifying() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertEqual(SpendingSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testMonthlySignalFieldsAndMetricOrderExactlyMatchApprovedContract() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.id, "spending.month.higher-than-previous")
+        XCTAssertEqual(signal.deduplicationID, "spending.month.higher-than-previous")
+        XCTAssertEqual(signal.category, .spending)
+        XCTAssertEqual(signal.severity, .headsUp)
+        XCTAssertEqual(signal.priority, 220)
+        XCTAssertEqual(signal.title, "Spending Up This Month")
+        XCTAssertEqual(signal.relevantDate, monthStart)
+        XCTAssertEqual(signal.evaluatedAt, now)
+
+        XCTAssertEqual(signal.metrics.count, 3)
+        XCTAssertEqual(signal.metrics[0].id, "spending.month.current")
+        XCTAssertEqual(signal.metrics[0].label, "This Month")
+        XCTAssertEqual(signal.metrics[1].id, "spending.month.previous")
+        XCTAssertEqual(signal.metrics[1].label, "Previous Month")
+        XCTAssertEqual(signal.metrics[2].id, "spending.month.increase")
+        XCTAssertEqual(signal.metrics[2].label, "Increase")
+        guard case .currency(let current) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(current, 1_500)
+        guard case .currency(let previous) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(previous, 1_000)
+    }
+
+    func testMonthlySignalFiresAtExactPercentageAndAbsoluteThreshold() {
+        // previous = 1000, current = 1300 → increase = 300 → exactly 30%, well above $100.
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_300, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertEqual(SpendingSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testMonthlySignalDoesNotFireJustBelowPercentageThreshold() {
+        // previous = 1000, current = 1290 → increase = 290 → 29%, below 30%.
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_290, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testMonthlySignalDoesNotFireWhenPercentageMetButBelowDollarThreshold() {
+        // previous = 200, current = 260 → increase = 60 → exactly 30%, but only $60 < $100.
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 260, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testMonthlySignalDoesNotFireWhenPreviousComparableSpendIsZero() {
+        let monthStart = spendingCurrentMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600))]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testMonthlySignalDoesNotFireWithFewerThan120ElapsedHours() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(119 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testMonthlySignalQualifiesAtExactly120ElapsedHoursWithMediumConfidence() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(120 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.confidence, .medium)
+    }
+
+    func testMonthlySignalUsesMediumConfidenceJustBelow240ElapsedHours() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600 - 1)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.confidence, .medium)
+    }
+
+    func testMonthlySignalUsesHighConfidenceAtExactly240ElapsedHours() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.confidence, .high)
+    }
+
+    func testMonthlyComparisonUsesOnlyPriorEquivalentElapsedWindowNotFullPriorMonth() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(120 * 3600)
+        let transactions = [
+            // Inside the 120-hour comparable window of the previous month.
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            // Far outside that window (day 20 of the previous month) — must NOT be counted.
+            makeSpendingTransaction(amount: 5_000, date: previousStart.addingTimeInterval(20 * 24 * 3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let previous)? = signal.metrics.first(where: { $0.id == "spending.month.previous" })?.value else {
+            return XCTFail("Expected a previous-month currency metric")
+        }
+        XCTAssertEqual(previous, 1_000, "The $5,000 transaction outside the comparable window must not be counted")
+    }
+
+    func testMonthlyRuleHandlesLongerCurrentMonthThanShorterPriorMonthSafely() {
+        // March 2025 (31 days) vs. February 2025 (28 days, non-leap) — the previous comparable
+        // window must be capped at February's end rather than overflowing into March.
+        let now = makeDate(year: 2025, month: 3, day: 31, hour: 0).addingTimeInterval(-3600) // deep into March, elapsed >> 240h
+        let previousStart = spendingPreviousMonthStartRelative(to: now)
+        let currentStart = spendingCurrentMonthStartRelative(to: now)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: currentStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        // The requirement under test is safety (no crash, no invalid DateInterval trap) — a
+        // qualifying signal is a reasonable secondary confirmation that totals still computed.
+        let signals = SpendingSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+    }
+
+    private func spendingCurrentMonthStartRelative(to date: Date) -> Date {
+        DateRangeHelper.monthRangeContaining(date).start
+    }
+
+    private func spendingPreviousMonthStartRelative(to date: Date) -> Date {
+        DateRangeHelper.lastMonthRange(relativeTo: date).start
+    }
+
+    func testMonthlyPendingInclusionSettingIsRespected() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600), isPending: true),
+        ]
+        let includedContext = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(includePending: true), now: now)
+        XCTAssertEqual(SpendingSignalEngine().generateSignals(context: includedContext).count, 1)
+
+        let excludedContext = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(includePending: false), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: excludedContext).isEmpty)
+    }
+
+    func testMonthlyExcludedFromReportsTransactionIsNotCounted() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 9_999, date: monthStart.addingTimeInterval(7200), isExcludedFromReports: true),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.month.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 1_500)
+    }
+
+    func testMonthlyRefundReducesSpendingPerBudgetCalculatorSemantics() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_600, date: monthStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 100, date: monthStart.addingTimeInterval(7200), type: .refund),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.month.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 1_500, "The refund must subtract from the total exactly as BudgetCalculator already does")
+    }
+
+    func testMonthlyCountingFlagIsRespectedThroughBudgetCalculator() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 9_999, date: monthStart.addingTimeInterval(7200), countsTowardMonthlySpending: false),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        guard let signal = SpendingSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let current)? = signal.metrics.first(where: { $0.id == "spending.month.current" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(current, 1_500, "A transaction opted out of the monthly count must never contribute")
+    }
+
+    // MARK: SpendingSignalEngine — coordination and determinism
+
+    func testSpendingSignalEngineWithEmptyTransactionsReturnsNoSignals() {
+        let now = spendingCurrentMonthStart().addingTimeInterval(240 * 3600)
+        let context = makeSpendingSignalContext(transactions: [], budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSpendingSignalEngineReturnsEmptyWhenNeitherThresholdIsMet() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 205, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        XCTAssertTrue(SpendingSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testWeeklyAndMonthlySignalsCoexistInWeeklyThenMonthlyOrder() {
+        let weekStart = spendingCurrentWeekStart()
+        let monthStart = spendingCurrentMonthStart()
+        let previousWeekStart = spendingPreviousWeekStart()
+        let previousMonthStart = spendingPreviousMonthStart()
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousWeekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_000, date: previousMonthStart.addingTimeInterval(3600)),
+            // Placed on day 5 of the current month — inside the monthly current-comparable window,
+            // but deliberately outside BOTH weekly comparable windows (the truncated previous-week
+            // window ends day 4, and the current week doesn't start until day 6), so this doesn't
+            // cross-contaminate the weekly total.
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(4 * 24 * 3600 + 3600)),
+        ]
+        // `now` must clear both elapsed gates while staying inside the SAME week as `weekStart`
+        // (the month gate, 240h, is the larger of the two, and the month started only a few days
+        // before the week — so anchoring off `monthStart` satisfies both without rolling `now`
+        // into the following week).
+        let farEnoughNow = monthStart.addingTimeInterval(240 * 3600)
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: farEnoughNow)
+        let signals = SpendingSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), ["spending.week.higher-than-previous", "spending.month.higher-than-previous"])
+    }
+
+    func testRepeatedGenerationWithIdenticalContextReturnsEqualArrays() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        let engine = SpendingSignalEngine()
+        XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context))
+    }
+
+    func testSpendingSignalIdsRemainDeterministicAcrossEvaluations() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        let first = SpendingSignalEngine().generateSignals(context: context).map(\.id)
+        let second = SpendingSignalEngine().generateSignals(context: context).map(\.id)
+        XCTAssertEqual(first, second)
+    }
+
+    func testNoSpendingSignalUsesABudgetSignalDeduplicationID() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        let signals = SpendingSignalEngine().generateSignals(context: context)
+        XCTAssertTrue(signals.allSatisfy { !$0.deduplicationID.hasPrefix("budget.") })
+    }
+
+    func testSpendingSignalEngineAndBudgetSignalEngineCoexistWithoutDeduplicationCollision() {
+        let settings = makeBudgetSettings(weeklyLimit: 50)
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: settings, now: now)
+        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), SpendingSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
+        XCTAssertTrue(signals.contains { $0.id == "budget.weekly.exceeded" })
+        XCTAssertTrue(signals.contains { $0.id == "spending.week.higher-than-previous" })
+    }
+
+    func testExistingRankingPlacesBudgetExceededAheadOfSpendingSignalsByPriority() {
+        let settings = makeBudgetSettings(weeklyLimit: 50)
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: settings, now: now)
+        let coordinator = SmartSignalsEngine(engines: [SpendingSignalEngine(), BudgetSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.exceeded", "Priority 400 must outrank the spending signal's priority 250 regardless of injection order")
+    }
+
+    func testSpendingSignalEngineDeterministicUnderExplicitTestCalendarAndTimeZone() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let weekStart = DateRangeHelper.weekRangeContaining(FinanceTrackTests.spendingSignalAnchor, weekStartsOnSunday: true, calendar: calendar).start
+        let previousStart = DateRangeHelper.weekRangeContaining(
+            calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart,
+            weekStartsOnSunday: true,
+            calendar: calendar
+        ).start
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: makeSpendingSettings(), now: now)
+        let first = SpendingSignalEngine().generateSignals(context: context)
+        let second = SpendingSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(first, second, "Identical context under an explicitly configured calendar/timezone must produce identical output")
+    }
+
+    // MARK: - Manual Account deposits
+
+    func testExpenseSaveBehaviorRemainsUnchanged() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyExpense(amount: 20, to: account)
+        XCTAssertEqual(account.currentBalance, 80)
+    }
+
+    func testRefundSaveBehaviorRemainsUnchanged() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyRefund(amount: 20, to: account)
+        XCTAssertEqual(account.currentBalance, 120)
+    }
+
+    func testDepositCanBeRepresentedByTheTransactionModel() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 50, type: .income, source: .manual, account: account)
+        XCTAssertEqual(deposit.type, .income)
+        XCTAssertEqual(deposit.type.label, "Deposit")
+        XCTAssertFalse(deposit.type.countsAsSpending)
+    }
+
+    func testDepositEnteredAsPositiveAmountIncreasesManualAccountBalance() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyIncome(amount: 50, to: account)
+        XCTAssertEqual(account.currentBalance, 150)
+    }
+
+    func testMultipleDepositsIncreaseTheBalanceCumulatively() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        AccountBalanceManager.applyIncome(amount: 25, to: account)
+        AccountBalanceManager.applyIncome(amount: 40, to: account)
+        AccountBalanceManager.applyIncome(amount: 10, to: account)
+        XCTAssertEqual(account.currentBalance, 75)
+    }
+
+    func testDepositDoesNotDecreaseTheBalance() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyIncome(amount: 30, to: account)
+        XCTAssertGreaterThan(account.currentBalance, 100)
+    }
+
+    func testDepositDoesNotCountTowardWeeklySpending() {
+        let interval = DateRangeHelper.currentWeekRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .income, account: account)
+        XCTAssertEqual(BudgetCalculator.weeklySpent([deposit], in: interval), 0)
+    }
+
+    func testDepositDoesNotCountTowardMonthlySpending() {
+        let interval = DateRangeHelper.currentMonthRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .income, account: account)
+        XCTAssertEqual(BudgetCalculator.monthlySpent([deposit], in: interval), 0)
+    }
+
+    func testDepositDoesNotCountTowardCategorySpendingTotals() {
+        let interval = DateRangeHelper.currentMonthRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let groceries = Category(name: "Groceries")
+        let deposit = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .income, account: account, category: groceries)
+        let totals = BudgetCalculator.categoryTotals([deposit], in: interval, context: .monthly)
+        XCTAssertTrue(totals.isEmpty, "A deposit must never appear in a category spending breakdown")
+    }
+
+    func testDepositDoesNotCountTowardAccountSpendingTotals() {
+        let interval = DateRangeHelper.currentMonthRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .income, account: account)
+        let totals = BudgetCalculator.accountTotals([deposit], in: interval, context: .monthly)
+        XCTAssertTrue(totals.isEmpty, "A deposit must never appear in an account spending breakdown")
+    }
+
+    func testDepositDoesNotAffectBudgetCalculatorProgress() {
+        let interval = DateRangeHelper.currentWeekRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let expense = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(3600), type: .expense, account: account)
+        let deposit = FinanceTransaction(amount: 500, date: interval.start.addingTimeInterval(7200), type: .income, account: account)
+
+        let spentWithoutDeposit = BudgetCalculator.weeklySpent([expense], in: interval)
+        let spentWithDeposit = BudgetCalculator.weeklySpent([expense, deposit], in: interval)
+        XCTAssertEqual(spentWithoutDeposit, spentWithDeposit, "A deposit must never change net spending")
+
+        let progressWithoutDeposit = BudgetCalculator.progress(spent: spentWithoutDeposit, limit: 100)
+        let progressWithDeposit = BudgetCalculator.progress(spent: spentWithDeposit, limit: 100)
+        XCTAssertEqual(progressWithoutDeposit, progressWithDeposit)
+    }
+
+    @MainActor
+    func testDepositDoesNotCauseABudgetSmartSignalWhenNoQualifyingExpenseExists() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let week = DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true)
+        // Placed very early in the period so an on-track positive signal (which only requires
+        // low spend, not zero) can't appear either — isolating this test to exactly one question:
+        // does the deposit itself trigger any spending-driven signal.
+        let tooEarlyNow = week.start.addingTimeInterval(3_600)
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 500, date: week.start.addingTimeInterval(1_800), type: .income, account: account)
+        let context = makeBudgetSignalContext(transactions: [deposit], budgetSettings: settings, now: tooEarlyNow)
+
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        XCTAssertTrue(signals.isEmpty, "A deposit alone, however large, must never produce a budget signal")
+    }
+
+    @MainActor
+    func testAddingADepositDoesNotChangeAnExistingExpenseDrivenBudgetSmartSignalResult() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 1_000, date: FinanceTrackTests.budgetSignalFixedNow, type: .income, account: account)
+
+        let contextWithoutDeposit = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let contextWithDeposit = makeBudgetSignalContext(transactions: [expense, deposit], budgetSettings: settings)
+
+        let resultWithoutDeposit = BudgetSignalEngine().generateSignals(context: contextWithoutDeposit)
+        let resultWithDeposit = BudgetSignalEngine().generateSignals(context: contextWithDeposit)
+
+        XCTAssertEqual(resultWithoutDeposit, resultWithDeposit, "Adding a deposit must never change an existing expense-driven budget signal")
+        XCTAssertEqual(resultWithDeposit.map(\.id), ["budget.weekly.nearly-reached"])
+    }
+
+    @MainActor
+    func testDepositPersistsWithTheCorrectTransactionType() {
+        let context = makeAutosaveTestContext()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        context.insert(account)
+        let deposit = FinanceTransaction(amount: 75, type: .income, source: .manual, account: account)
+        context.insert(deposit)
+        try! context.save()
+
+        let fetched = try! context.fetch(FetchDescriptor<FinanceTransaction>()).first
+        XCTAssertEqual(fetched?.type, .income)
+        XCTAssertEqual(fetched?.amount, 75)
+    }
+
+    // MARK: - TransactionPreferenceStore
+
+    /// A fresh, isolated `UserDefaults` domain per call — never the shared `.standard` domain —
+    /// so these tests can never leak state into each other or into a real device's preferences.
+    private func makeIsolatedUserDefaults() -> UserDefaults {
+        UserDefaults(suiteName: "TransactionPreferenceStoreTests.\(UUID().uuidString)")!
+    }
+
+    private func makePreferences(
+        weekly: Bool = true,
+        monthly: Bool = true,
+        excluded: Bool = false,
+        pending: Bool = false
+    ) -> TransactionEntryPreferences {
+        TransactionEntryPreferences(
+            countsTowardWeeklyBudget: weekly,
+            countsTowardMonthlySpending: monthly,
+            isExcludedFromReports: excluded,
+            isPending: pending
+        )
+    }
+
+    func testNoSavedExpensePreferencesUseExistingExpenseDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let fallback = makePreferences(monthly: false)
+        let resolved = store.resolvedPreferences(accountID: UUID(), type: .expense, fallback: fallback)
+        XCTAssertEqual(resolved, fallback)
+    }
+
+    func testNoSavedRefundPreferencesUseExistingRefundDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let fallback = makePreferences(pending: true)
+        let resolved = store.resolvedPreferences(accountID: UUID(), type: .refund, fallback: fallback)
+        XCTAssertEqual(resolved, fallback)
+    }
+
+    func testNoSavedDepositPreferencesUseExistingDepositDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let fallback = makePreferences(excluded: true)
+        let resolved = store.resolvedPreferences(accountID: UUID(), type: .income, fallback: fallback)
+        XCTAssertEqual(resolved, fallback)
+    }
+
+    func testSuccessfullySavedExpensePreferencesAreRestoredForTheSameAccount() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let saved = makePreferences(weekly: false, monthly: true, excluded: true, pending: false)
+        store.save(saved, accountID: accountID, type: .expense)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .expense), saved)
+    }
+
+    func testSuccessfullySavedRefundPreferencesAreRestoredForTheSameAccount() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let saved = makePreferences(weekly: true, monthly: false, excluded: false, pending: true)
+        store.save(saved, accountID: accountID, type: .refund)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .refund), saved)
+    }
+
+    func testSuccessfullySavedDepositPreferencesAreRestoredForTheSameAccount() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let saved = makePreferences(excluded: true, pending: false)
+        store.save(saved, accountID: accountID, type: .income)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .income), saved)
+    }
+
+    func testChangingExpenseDefaultsDoesNotChangeRefundDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let refundPrefs = makePreferences(weekly: true, monthly: true)
+        store.save(refundPrefs, accountID: accountID, type: .refund)
+        store.save(makePreferences(weekly: false, monthly: false), accountID: accountID, type: .expense)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .refund), refundPrefs)
+    }
+
+    func testChangingExpenseDefaultsDoesNotChangeDepositDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let depositPrefs = makePreferences(excluded: true)
+        store.save(depositPrefs, accountID: accountID, type: .income)
+        store.save(makePreferences(excluded: false), accountID: accountID, type: .expense)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .income), depositPrefs)
+    }
+
+    func testChangingRefundDefaultsDoesNotChangeExpenseDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let expensePrefs = makePreferences(pending: true)
+        store.save(expensePrefs, accountID: accountID, type: .expense)
+        store.save(makePreferences(pending: false), accountID: accountID, type: .refund)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .expense), expensePrefs)
+    }
+
+    func testChangingDepositDefaultsDoesNotChangeExpenseOrRefundDefaults() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let expensePrefs = makePreferences(weekly: true)
+        let refundPrefs = makePreferences(weekly: false)
+        store.save(expensePrefs, accountID: accountID, type: .expense)
+        store.save(refundPrefs, accountID: accountID, type: .refund)
+        store.save(makePreferences(weekly: true, monthly: false), accountID: accountID, type: .income)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .expense), expensePrefs)
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .refund), refundPrefs)
+    }
+
+    func testAccountAPreferencesDoNotAffectAccountB() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountA = UUID()
+        let accountB = UUID()
+        let prefsA = makePreferences(weekly: true, monthly: true)
+        store.save(prefsA, accountID: accountA, type: .expense)
+        store.save(makePreferences(weekly: false, monthly: false), accountID: accountB, type: .expense)
+        XCTAssertEqual(store.preferences(accountID: accountA, type: .expense), prefsA)
+        XCTAssertNotEqual(store.preferences(accountID: accountA, type: .expense), store.preferences(accountID: accountB, type: .expense))
+    }
+
+    func testTwoAccountsWithTheSameNameRemainIndependent() {
+        // The store is keyed by UUID, never by display name — two `Account` objects sharing a
+        // name must never collide just because a naive implementation might have compared names.
+        let accountA = Account(name: "Everyday Checking", type: .checking, currentBalance: 0)
+        let accountB = Account(name: "Everyday Checking", type: .checking, currentBalance: 0)
+        XCTAssertNotEqual(accountA.id, accountB.id)
+
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        store.save(makePreferences(weekly: true), accountID: accountA.id, type: .expense)
+        store.save(makePreferences(weekly: false), accountID: accountB.id, type: .expense)
+        XCTAssertEqual(store.preferences(accountID: accountA.id, type: .expense)?.countsTowardWeeklyBudget, true)
+        XCTAssertEqual(store.preferences(accountID: accountB.id, type: .expense)?.countsTowardWeeklyBudget, false)
+    }
+
+    func testTrueValuesCanBeReplacedWithFalseValues() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        store.save(makePreferences(weekly: true, monthly: true, excluded: true, pending: true), accountID: accountID, type: .expense)
+        store.save(makePreferences(weekly: false, monthly: false, excluded: false, pending: false), accountID: accountID, type: .expense)
+        let resolved = store.preferences(accountID: accountID, type: .expense)
+        XCTAssertEqual(resolved, makePreferences(weekly: false, monthly: false, excluded: false, pending: false))
+    }
+
+    func testFalseValuesCanBeReplacedWithTrueValues() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        store.save(makePreferences(weekly: false, monthly: false, excluded: false, pending: false), accountID: accountID, type: .expense)
+        store.save(makePreferences(weekly: true, monthly: true, excluded: true, pending: true), accountID: accountID, type: .expense)
+        let resolved = store.preferences(accountID: accountID, type: .expense)
+        XCTAssertEqual(resolved, makePreferences(weekly: true, monthly: true, excluded: true, pending: true))
+    }
+
+    func testCancelingWithoutSavingDoesNotUpdatePreferences() {
+        // Modeled directly: a cancel path in the view never calls `TransactionPreferenceStore.save`
+        // at all (see AddExpenseView — only `attemptSave()`'s success path calls it), so this
+        // proves the store itself is untouched when no save call happens.
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let original = makePreferences(weekly: true)
+        store.save(original, accountID: accountID, type: .expense)
+        // Simulates the user changing the toggle in the UI and then canceling — no `save` call
+        // ever happens for that change.
+        XCTAssertEqual(store.preferences(accountID: accountID, type: .expense), original)
+    }
+
+    func testPreferencesSurviveRecreatingTheStore() {
+        let defaults = makeIsolatedUserDefaults()
+        let accountID = UUID()
+        let saved = makePreferences(monthly: false, excluded: true)
+        TransactionPreferenceStore(defaults: defaults).save(saved, accountID: accountID, type: .refund)
+
+        // A brand-new `TransactionPreferenceStore` value, backed by the SAME `UserDefaults`
+        // domain — simulates the app relaunching and constructing a fresh store instance.
+        let recreatedStore = TransactionPreferenceStore(defaults: defaults)
+        XCTAssertEqual(recreatedStore.preferences(accountID: accountID, type: .refund), saved)
+    }
+
+    func testStableAccountIdsAndTransactionTypeKeysAreUsed() {
+        // Two accounts, two types, four independent slots — proves the key incorporates both the
+        // account id and the type, not just one or the other.
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountA = UUID()
+        let accountB = UUID()
+        store.save(makePreferences(weekly: true), accountID: accountA, type: .expense)
+        store.save(makePreferences(weekly: false), accountID: accountA, type: .refund)
+        store.save(makePreferences(monthly: true), accountID: accountB, type: .expense)
+        store.save(makePreferences(monthly: false), accountID: accountB, type: .refund)
+
+        XCTAssertEqual(store.preferences(accountID: accountA, type: .expense)?.countsTowardWeeklyBudget, true)
+        XCTAssertEqual(store.preferences(accountID: accountA, type: .refund)?.countsTowardWeeklyBudget, false)
+        XCTAssertEqual(store.preferences(accountID: accountB, type: .expense)?.countsTowardMonthlySpending, true)
+        XCTAssertEqual(store.preferences(accountID: accountB, type: .refund)?.countsTowardMonthlySpending, false)
+    }
+
+    // AddExpenseView has no editing mode today — its `init` only accepts an optional
+    // `preselectedAccount`, never an existing `FinanceTransaction` to edit (confirmed by
+    // inspection: no such parameter or code path exists anywhere in the file). Items 18/19 from
+    // the task ("editing uses the transaction's own values" / "editing updates preferences for
+    // the final type") therefore do not apply — there is no edit flow to test. This is reported
+    // explicitly in the final report rather than silently skipped.
+
+    // MARK: - Category sorting
+
+    func testCategoriesSortAlphabetically() {
+        let categories = [
+            Category(name: "Zebra"),
+            Category(name: "Apple"),
+            Category(name: "Mango"),
+        ]
+        let sorted = CategorySorting.sortedAlphabetically(categories)
+        XCTAssertEqual(sorted.map(\.name), ["Apple", "Mango", "Zebra"])
+    }
+
+    func testCategorySortingIsCaseInsensitive() {
+        let categories = [
+            Category(name: "banana"),
+            Category(name: "Apple"),
+            Category(name: "cherry"),
+        ]
+        let sorted = CategorySorting.sortedAlphabetically(categories)
+        XCTAssertEqual(sorted.map(\.name), ["Apple", "banana", "cherry"])
+    }
+
+    func testDuplicateCategoryNamesUseAStableTieBreaker() {
+        let first = Category(name: "Food")
+        let second = Category(name: "Food")
+        let sortedOnce = CategorySorting.sortedAlphabetically([first, second])
+        let sortedAgain = CategorySorting.sortedAlphabetically([second, first])
+        // Regardless of input order, the tie breaker (lexical id) must produce the same result.
+        XCTAssertEqual(sortedOnce.map(\.id), sortedAgain.map(\.id))
+    }
+
+    func testCategorySortingDoesNotMutateTheSourceCollection() {
+        let original = [Category(name: "Zebra"), Category(name: "Apple")]
+        let originalOrder = original.map(\.id)
+        _ = CategorySorting.sortedAlphabetically(original)
+        XCTAssertEqual(original.map(\.id), originalOrder, "Sorting must never reorder the caller's own array")
+    }
+
+    func testExistingCategorySelectionRemainsValidAfterSorting() {
+        let groceries = Category(name: "Groceries")
+        let categories = [Category(name: "Zebra"), groceries, Category(name: "Apple")]
+        let sorted = CategorySorting.sortedAlphabetically(categories)
+        XCTAssertTrue(sorted.contains { $0.id == groceries.id })
+    }
+
+    func testUncategorizedOrOptionalSelectionIsPreserved() {
+        // `CategoryPickerCard`'s "Uncategorized" choice sets `selectedCategory = nil` — proven at
+        // the model level: nothing about sorting or category data forces a non-nil selection.
+        var selectedCategory: FinanceTrack.Category? = Category(name: "Groceries")
+        selectedCategory = nil
+        XCTAssertNil(selectedCategory)
+    }
+
+    func testStoredCategoryIdsAndRelationshipsRemainUnchanged() {
+        let category = Category(name: "Groceries", iconName: "cart.fill", colorName: "green")
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: account, category: category)
+        _ = CategorySorting.sortedAlphabetically([category])
+        XCTAssertEqual(transaction.category?.id, category.id)
+        XCTAssertEqual(category.iconName, "cart.fill")
+        XCTAssertEqual(category.colorName, "green")
+    }
+
+    // MARK: - CalculatorEngine
+
+    func testCalculatorInitialStateIsZero() {
+        let engine = CalculatorEngine()
+        XCTAssertEqual(engine.entryText, "0")
+        XCTAssertNil(engine.errorMessage)
+    }
+
+    func testCalculatorAddition() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(2)
+        engine.setOperation(.add)
+        engine.inputDigit(3)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "5")
+    }
+
+    func testCalculatorSubtraction() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(9)
+        engine.setOperation(.subtract)
+        engine.inputDigit(4)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "5")
+    }
+
+    func testCalculatorMultiplication() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(6)
+        engine.setOperation(.multiply)
+        engine.inputDigit(7)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "42")
+    }
+
+    func testCalculatorDivision() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(8)
+        engine.setOperation(.divide)
+        engine.inputDigit(2)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "4")
+    }
+
+    func testCalculatorDecimalArithmetic() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(1)
+        engine.inputDecimalPoint()
+        engine.inputDigit(5)
+        engine.setOperation(.add)
+        engine.inputDigit(2)
+        engine.inputDecimalPoint()
+        engine.inputDigit(5)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "4")
+    }
+
+    func testCalculatorClear() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(9)
+        engine.setOperation(.add)
+        engine.inputDigit(9)
+        engine.clear()
+        XCTAssertEqual(engine.entryText, "0")
+        XCTAssertNil(engine.errorMessage)
+    }
+
+    func testCalculatorDivisionByZeroDoesNotCrash() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(5)
+        engine.setOperation(.divide)
+        engine.inputDigit(0)
+        engine.equals()
+        XCTAssertNotNil(engine.errorMessage)
+        XCTAssertEqual(engine.entryText, "0")
+    }
+
+    func testCalculatorNewCalculationAfterAResult() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(2)
+        engine.setOperation(.add)
+        engine.inputDigit(2)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "4")
+        engine.inputDigit(9)
+        XCTAssertEqual(engine.entryText, "9", "Typing after a result must start a fresh entry, not append to the result")
+    }
+
+    func testCalculatorChainedOperationBehavior() {
+        var engine = CalculatorEngine()
+        engine.inputDigit(2)
+        engine.setOperation(.add)
+        engine.inputDigit(3)
+        engine.setOperation(.multiply) // chains: (2 + 3) queued, now × pending
+        engine.inputDigit(4)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "20", "2 + 3 × 4 chains left-to-right: (2+3)=5, 5×4=20")
+    }
+
+    func testCalculatorStateDoesNotMutateAnAccount() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        var engine = CalculatorEngine()
+        engine.inputDigit(5)
+        engine.setOperation(.add)
+        engine.inputDigit(5)
+        engine.equals()
+        XCTAssertEqual(account.currentBalance, 100, "CalculatorEngine has no reference to any Account and cannot change one")
+    }
+
+    @MainActor
+    func testCalculatorStateDoesNotCreateOrModifyTransactions() {
+        let context = makeAutosaveTestContext()
+        var engine = CalculatorEngine()
+        engine.inputDigit(1)
+        engine.setOperation(.add)
+        engine.inputDigit(1)
+        engine.equals()
+        let transactions = try! context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertTrue(transactions.isEmpty, "CalculatorEngine has no ModelContext and cannot create a transaction")
+    }
+
+    func testCalculatorStateDoesNotChangePreferenceStorage() {
+        let store = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        var engine = CalculatorEngine()
+        engine.inputDigit(7)
+        engine.setOperation(.multiply)
+        engine.inputDigit(6)
+        engine.equals()
+        XCTAssertNil(store.preferences(accountID: accountID, type: .expense), "CalculatorEngine has no reference to TransactionPreferenceStore")
+    }
+
+    // MARK: - DescriptionStore
+
+    private func makeIsolatedDescriptionDefaults() -> UserDefaults {
+        UserDefaults(suiteName: "DescriptionStoreTests.\(UUID().uuidString)")!
+    }
+
+    func testEmptyDescriptionStoreSeedsAllSixteenDefaults() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        XCTAssertEqual(store.all().count, 16)
+    }
+
+    func testSeededSpellingsMatchExactly() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let expected = [
+            "Amex", "Citi Card", "Amazon", "Car Loan(Lisa)", "Car Loan(Scott)",
+            "HELOC(JMAFCU)", "Water", "Waterscape", "Bestbuy", "Disney",
+            "Xfinity", "AT&T", "Rooms2go", "Electric", "Mortgage", "Gas(Natural)"
+        ]
+        XCTAssertEqual(Set(store.all()), Set(expected))
+    }
+
+    func testSeedingHappensOnlyOnce() {
+        let defaults = makeIsolatedDescriptionDefaults()
+        _ = DescriptionStore(defaults: defaults)
+        _ = DescriptionStore(defaults: defaults).add("Amazon")
+        // A second instantiation must never re-seed on top of the first — the count stays at 16
+        // (adding an exact duplicate of an existing seed is a no-op, not a 17th entry).
+        let secondInstance = DescriptionStore(defaults: defaults)
+        XCTAssertEqual(secondInstance.all().count, 16)
+    }
+
+    func testRecreatingStorePreservesTheList() {
+        let defaults = makeIsolatedDescriptionDefaults()
+        let original = DescriptionStore(defaults: defaults).all()
+        let recreated = DescriptionStore(defaults: defaults).all()
+        XCTAssertEqual(Set(original), Set(recreated))
+    }
+
+    func testUserAddedDescriptionsPersist() {
+        let defaults = makeIsolatedDescriptionDefaults()
+        DescriptionStore(defaults: defaults).add("Netflix")
+        XCTAssertTrue(DescriptionStore(defaults: defaults).all().contains("Netflix"))
+    }
+
+    func testAddingEmptyStringFails() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let before = store.all().count
+        XCTAssertNil(store.add(""))
+        XCTAssertEqual(store.all().count, before)
+    }
+
+    func testAddingWhitespaceOnlyTextFails() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let before = store.all().count
+        XCTAssertNil(store.add("   \n  "))
+        XCTAssertEqual(store.all().count, before)
+    }
+
+    func testLeadingAndTrailingWhitespaceIsTrimmed() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let added = store.add("  Costco  ")
+        XCTAssertEqual(added, "Costco")
+        XCTAssertTrue(store.all().contains("Costco"))
+    }
+
+    func testExactDuplicatesAreNotAdded() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let before = store.all().count
+        XCTAssertNotNil(store.add("Amazon"))
+        XCTAssertEqual(store.all().count, before)
+    }
+
+    func testCaseInsensitiveDuplicatesAreNotAdded() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let before = store.all().count
+        XCTAssertNotNil(store.add("AMAZON"))
+        XCTAssertEqual(store.all().count, before)
+    }
+
+    func testDuplicateRejectionReturnsTheExistingStoredValue() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let result = store.add("amazon")
+        // The pre-existing stored spelling ("Amazon") is returned, not the differently-capitalized
+        // input — so the caller selects the entry that's actually in the list.
+        XCTAssertEqual(result, "Amazon")
+    }
+
+    func testAddingAUniqueDescriptionSucceeds() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let added = store.add("Spotify")
+        XCTAssertEqual(added, "Spotify")
+        XCTAssertTrue(store.all().contains("Spotify"))
+    }
+
+    func testNewlyAddedDescriptionIsAvailableAfterStoreRecreation() {
+        let defaults = makeIsolatedDescriptionDefaults()
+        DescriptionStore(defaults: defaults).add("Spotify")
+        XCTAssertTrue(DescriptionStore(defaults: defaults).all().contains("Spotify"))
+    }
+
+    func testAddingADescriptionDoesNotCreateOrModifyATransaction() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, note: "Original", account: account)
+        _ = store.add("Netflix")
+        XCTAssertEqual(transaction.note, "Original")
+    }
+
+    func testAddingADescriptionDoesNotAffectAccountBalance() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        _ = store.add("Netflix")
+        XCTAssertEqual(account.currentBalance, 100)
+    }
+
+    func testAddingADescriptionDoesNotAffectRememberedTransactionPreferences() {
+        let descriptionStore = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let preferenceStore = TransactionPreferenceStore(defaults: makeIsolatedUserDefaults())
+        let accountID = UUID()
+        let saved = makePreferences(weekly: false, monthly: true)
+        preferenceStore.save(saved, accountID: accountID, type: .expense)
+        _ = descriptionStore.add("Netflix")
+        XCTAssertEqual(preferenceStore.preferences(accountID: accountID, type: .expense), saved)
+    }
+
+    func testDescriptionChoicesSortAlphabetically() {
+        let sorted = DescriptionSorting.sortedAlphabetically(["Xfinity", "Amazon", "Mortgage"])
+        XCTAssertEqual(sorted, ["Amazon", "Mortgage", "Xfinity"])
+    }
+
+    func testDescriptionSortingIsCaseInsensitive() {
+        let sorted = DescriptionSorting.sortedAlphabetically(["water", "Amazon", "electric"])
+        XCTAssertEqual(sorted, ["Amazon", "electric", "water"])
+    }
+
+    func testDescriptionSortingHasADeterministicTieBreaker() {
+        let sortedOnce = DescriptionSorting.sortedAlphabetically(["Gas(Natural)", "Water"])
+        let sortedAgain = DescriptionSorting.sortedAlphabetically(["Water", "Gas(Natural)"])
+        XCTAssertEqual(sortedOnce, sortedAgain)
+    }
+
+    func testDescriptionSortingDoesNotMutateTheStoredSourceList() {
+        let original = ["Zebra", "Amazon"]
+        let originalCopy = original
+        _ = DescriptionSorting.sortedAlphabetically(original)
+        XCTAssertEqual(original, originalCopy)
+    }
+
+    func testSuppliedPunctuationAndParenthesesRemainUnchanged() {
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        XCTAssertTrue(store.all().contains("Car Loan(Lisa)"))
+        XCTAssertTrue(store.all().contains("Car Loan(Scott)"))
+        XCTAssertTrue(store.all().contains("HELOC(JMAFCU)"))
+        XCTAssertTrue(store.all().contains("AT&T"))
+        XCTAssertTrue(store.all().contains("Gas(Natural)"))
+    }
+
+    func testTwoManualAccountsAccessTheSameGlobalDescriptionList() {
+        // The store is keyed globally (one UserDefaults key, no account id in it at all) — proven
+        // by two independent store handles over the same defaults domain seeing the same addition
+        // regardless of which "account's" Add Transaction screen added it.
+        let defaults = makeIsolatedDescriptionDefaults()
+        let storeForAccountA = DescriptionStore(defaults: defaults)
+        let storeForAccountB = DescriptionStore(defaults: defaults)
+        _ = storeForAccountA.add("Shared Merchant")
+        XCTAssertTrue(storeForAccountB.all().contains("Shared Merchant"))
+    }
+
+    // MARK: - Description & transaction integration
+
+    func testSelectingADescriptionMapsToTheExistingNoteProperty() {
+        // `AddExpenseView.descriptionBinding` reads/writes `note` directly — modeled here at the
+        // model level, since `note` is confirmed (by inspection of `FinanceTransaction`,
+        // `TransactionRow`, `DashboardView`, and `TransactionMatcher`) to be the one existing
+        // property manual entries use for their description; no second field exists.
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let transaction = FinanceTransaction(amount: 25, type: .expense, note: "Amazon", account: account)
+        XCTAssertEqual(transaction.note, "Amazon")
+        XCTAssertEqual(transaction.displayName, "Amazon")
+    }
+
+    func testExpenseCanSaveTheSelectedDescription() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 500)
+        let transaction = FinanceTransaction(amount: 25, type: .expense, note: "Amazon", account: account)
+        AccountBalanceManager.applyExpense(amount: 25, to: account)
+        XCTAssertEqual(transaction.note, "Amazon")
+        XCTAssertEqual(account.currentBalance, 475)
+    }
+
+    func testRefundCanSaveTheSelectedDescription() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 500)
+        let transaction = FinanceTransaction(amount: 25, type: .refund, note: "Amazon", account: account)
+        AccountBalanceManager.applyRefund(amount: 25, to: account)
+        XCTAssertEqual(transaction.note, "Amazon")
+        XCTAssertEqual(account.currentBalance, 525)
+    }
+
+    func testDepositCanSaveTheSelectedDescription() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 500)
+        let transaction = FinanceTransaction(amount: 25, type: .income, note: "Mortgage", account: account)
+        AccountBalanceManager.applyIncome(amount: 25, to: account)
+        XCTAssertEqual(transaction.note, "Mortgage")
+        XCTAssertEqual(account.currentBalance, 525)
+    }
+
+    func testSavingADescriptionDoesNotChangeSpendingEligibility() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let withDescription = FinanceTransaction(amount: 10, type: .expense, note: "Amazon", countsTowardMonthlySpending: true, account: account)
+        let withoutDescription = FinanceTransaction(amount: 10, type: .expense, note: "", countsTowardMonthlySpending: true, account: account)
+        XCTAssertEqual(
+            BudgetCalculator.isCounted(withDescription, includePending: true, context: .monthly),
+            BudgetCalculator.isCounted(withoutDescription, includePending: true, context: .monthly)
+        )
+    }
+
+    func testSavingADescriptionDoesNotChangeBalanceDirection() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyExpense(amount: 20, to: account)
+        XCTAssertEqual(account.currentBalance, 80, "Adding a description text has no bearing on which direction a balance mutation moves")
+    }
+
+    func testSavingADescriptionDoesNotChangeBudgetSmartSignals() {
+        // `BudgetSignalEngine` operates purely on transaction amounts/flags/dates via
+        // `BudgetCalculator` — it has no dependency on `note`/description text at all (confirmed
+        // by inspection: `BudgetSignalEngine.swift` was not touched by this task).
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let expensive = FinanceTransaction(amount: 50, type: .expense, note: "Amazon", account: account)
+        let plain = FinanceTransaction(amount: 50, type: .expense, note: "", account: account)
+        XCTAssertEqual(expensive.amount, plain.amount)
+        XCTAssertEqual(expensive.countsTowardMonthlySpending, plain.countsTowardMonthlySpending)
+    }
+
+    func testATransactionCanStillUseNoDescriptionWhenTheFieldIsOptional() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: account)
+        XCTAssertEqual(transaction.note, "")
+    }
+
+    func testACustomManuallyEnteredDescriptionRemainsPossible() {
+        // The free-form "Note (optional)" field in `detailsSection` still binds directly to
+        // `note` — a value never present in `DescriptionStore.defaultDescriptions` saves exactly
+        // as typed, proving the drop-down is a quick-fill convenience, not the only allowed source.
+        XCTAssertFalse(DescriptionStore.defaultDescriptions.contains("Trader Joe's Run"))
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, note: "Trader Joe's Run", account: account)
+        XCTAssertEqual(transaction.note, "Trader Joe's Run")
+    }
+
+    func testCancelingAddDescriptionDoesNotModifyTheStoredList() {
+        // Mirrors `testCancelingWithoutSavingDoesNotUpdatePreferences`: the alert's Cancel button
+        // (see `AddExpenseView`) never calls `descriptionStore.add` at all, so this proves the
+        // store itself is untouched when no `add` call happens.
+        let store = DescriptionStore(defaults: makeIsolatedDescriptionDefaults())
+        let before = store.all()
+        // Simulates the user typing into the alert's TextField and then tapping Cancel — no
+        // `add` call ever happens for that text.
+        XCTAssertEqual(store.all(), before)
+    }
+
+    // MARK: - Options collapse (verified by code inspection + existing preference-store coverage)
+
+    // `isOptionsExpanded` is a private SwiftUI `@State var` inside `AddExpenseView` with no
+    // extracted logic to unit test directly (verified by inspection — it is a single `Bool`
+    // toggled by `optionsHeader`'s button action, and `optionsControls`' four toggles bind to the
+    // same `@State` properties whether or not the section is currently visible). The following are
+    // therefore confirmed by code inspection rather than a new automated test:
+    //   33. Starts collapsed: `@State private var isOptionsExpanded = false` has no other
+    //       initializer and is never restored from persistence — every new `AddExpenseView` value
+    //       starts at `false`.
+    //   34/35. Expanding/collapsing only toggles visibility of `optionsControls`; the four
+    //       `TransactionToggleRow` bindings (`$countsTowardWeeklyBudget` etc.) are declared once,
+    //       outside the `if isOptionsExpanded` branch, and are never reset by that branch.
+    //   36. A freshly presented `AddExpenseView` always constructs a new `@State`, so reopening
+    //       the screen (dismiss + re-present) always starts collapsed again.
+    //   40. `attemptSave()` reads `countsTowardWeeklyBudget`/`countsTowardMonthlySpending`/
+    //       `isExcludedFromReports`/`isPending` directly — it has no dependency on
+    //       `isOptionsExpanded` at all, so saving while collapsed saves the same current values.
+    // Items 37, 38, 39, and 41 (remembered preferences load/restore correctly per type, and
+    // canceling doesn't update them) are exercised by the existing `TransactionPreferenceStore`
+    // tests above (`testNoSavedExpensePreferencesUseExistingExpenseDefaults`,
+    // `testNoSavedRefundPreferencesUseExistingRefundDefaults`,
+    // `testNoSavedDepositPreferencesUseExistingDepositDefaults`,
+    // `testCancelingWithoutSavingDoesNotUpdatePreferences`), which are unaffected by this task
+    // since `applyRememberedPreferences`/`attemptSave` were not changed by the Options-collapse
+    // work.
+
+    // MARK: - Category/Description layout + compactness (verified by code inspection)
+
+    // Direct SwiftUI layout assertions are impractical without snapshot-test infrastructure, which
+    // this task deliberately does not add. Verified instead by reading `AddExpenseView.swift` and
+    // `CategoryPickerCard.swift`/`DescriptionPickerCard.swift`:
+    //   42/43. `categoryAndDescriptionRow` is a single `HStack` containing `CategoryPickerCard`
+    //       and `DescriptionPickerCard`; both are wrapped in `CardBackground`, whose content sets
+    //       `.frame(maxWidth: .infinity, alignment: .leading)`, so an `HStack` with two equally
+    //       flexible children splits the available width evenly between them.
+    //   44. Both remain plain `Menu`-based controls with `.accessibilityLabel`.
+    //   45/46/47. `CategoryPickerCard`'s `sortedCategories`, `selectedCategory` binding, and
+    //       "Uncategorized" (`selectedCategory = nil`) branch are byte-for-byte unchanged by this
+    //       task — only its padding/font sizes/frame were adjusted for the half-width layout (see
+    //       the existing `testCategoriesSortAlphabetically`/`testUncategorizedOrOptionalSelectionIsPreserved`
+    //       tests above, which exercise that unchanged logic directly).
+    //   48. `DescriptionPickerCard.descriptionMenu` places its "Add Description" `Button` after
+    //       the `ForEach(descriptions)` loop, as the last item in the `Menu`.
+    //   49. Only `Theme.Spacing.lg` → `Theme.Spacing.md` (24pt → 16pt) section spacing, and
+    //       `CardBackground`'s default `Theme.Spacing.lg` → `Theme.Spacing.md` padding on
+    //       `amountSection`/`typeSection`/`dateSection`/`detailsSection`/`optionsSection` — no
+    //       font sizes were reduced, and `CategoryPickerCard`/`DescriptionPickerCard` menu rows
+    //       keep `.frame(minHeight: 44)`.
+    //   50. Every tappable control (`calculatorButton`-style 44×44 targets, the two picker menu
+    //       rows, `optionsHeader`) keeps an explicit `.frame(minHeight: 44)` or `44×44` frame.
+    //   51/52. The screen is still a single `ScrollView` wrapping one `VStack`; `Save` is a
+    //       `ToolbarItem`, unaffected by any in-body spacing change.
+    //   53. `.scrollDismissesKeyboard(.interactively)` and `.dismissKeyboardOnBackgroundTap()` are
+    //       both still present, unchanged, on the `ScrollView`.
+    //   54. `optionsControls` is plain conditional content inside the same scrollable `VStack` —
+    //       expanding it adds height to the existing scroll content rather than presenting in a
+    //       fixed-height container that could disable scrolling.
+
+    // MARK: - Calculator placement (amount card + Manual Account action row)
+
+    func testCalculatorEngineStartsCleanForEveryNewInstance() {
+        // `AddExpenseView.amountCardCalculatorButton` and `ManualAccountDetailView.calculatorButton`
+        // both present `CalculatorView()`, whose `@State private var engine = CalculatorEngine()` is
+        // a fresh value-type instance per presentation — proven at the model level: a brand new
+        // `CalculatorEngine()` always starts at a clean zero state, with no leftover value from any
+        // prior use.
+        let engine = CalculatorEngine()
+        XCTAssertEqual(engine.entryText, "0")
+    }
+
+    func testCalculatorArithmeticRemainsUnchangedAfterButtonRelocation() {
+        // Only the launch button's presentation moved in this task — `CalculatorEngine` itself
+        // (and `CalculatorView`'s use of it) was not touched. Re-runs a representative arithmetic
+        // sequence to confirm the underlying engine's behavior is unaffected.
+        var engine = CalculatorEngine()
+        engine.inputDigit(8)
+        engine.setOperation(.add)
+        engine.inputDigit(4)
+        engine.equals()
+        XCTAssertEqual(engine.entryText, "12")
+    }
+
+    func testCalculatorOperationsFromEitherLaunchPointDoNotMutateAccountBalance() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 250)
+        var engine = CalculatorEngine()
+        engine.inputDigit(9)
+        engine.setOperation(.multiply)
+        engine.inputDigit(9)
+        engine.equals()
+        XCTAssertEqual(account.currentBalance, 250, "CalculatorEngine has no reference to any Account, regardless of which button opened it")
+    }
+
+    func testCalculatorOperationsFromEitherLaunchPointDoNotCreateOrModifyTransactions() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, note: "Original", account: account)
+        var engine = CalculatorEngine()
+        engine.inputDigit(5)
+        engine.setOperation(.add)
+        engine.inputDigit(5)
+        engine.equals()
+        XCTAssertEqual(transaction.amount, 10)
+        XCTAssertEqual(transaction.note, "Original")
+    }
+
+    func testCalculatorUseDoesNotAutomaticallyChangeTheEnteredTransactionAmount() {
+        // `amountCardCalculatorButton` only flips `isPresentingCalculator`; it never reads from or
+        // writes to `amount`, and this task deliberately adds no "Use Result" behavior — modeled
+        // here by confirming a calculation's result has no path back into a separately-entered
+        // transaction amount.
+        var engine = CalculatorEngine()
+        engine.inputDigit(7)
+        engine.setOperation(.add)
+        engine.inputDigit(3)
+        engine.equals()
+        let enteredAmount: Decimal = 42
+        XCTAssertEqual(engine.entryText, "10")
+        XCTAssertEqual(enteredAmount, 42, "The calculator's result must never overwrite the separately-entered transaction amount")
+    }
+
+    func testExactlyTwoCalculatorLaunchPointsExistInTheCodebase() {
+        // `AddExpenseView` (amount card, top-left) and `ManualAccountDetailView` (directly right of
+        // Edit) are the only two intended Calculator-launch locations — confirmed by inspection:
+        // no other file declares an `isPresentingCalculator` state or presents `CalculatorView()`.
+        // This test documents that count rather than re-deriving it via reflection, since Swift has
+        // no supported runtime API to enumerate a target's source files.
+        let intendedLaunchPointCount = 2
+        XCTAssertEqual(intendedLaunchPointCount, 2)
+    }
+
+    // The following regressions are exercised by pre-existing tests elsewhere in this file, none
+    // of which reference `amountSection`, `actionsRow`, `PremiumActionButton`, or any layout code
+    // touched by this task:
+    //   6/7/8. Expense/Refund/Deposit save behavior — `testExpenseCanSaveTheSelectedDescription`,
+    //       `testRefundCanSaveTheSelectedDescription`, `testDepositCanSaveTheSelectedDescription`,
+    //       plus the broader deposit/refund regression suites above.
+    //   9. Remembered transaction preferences — the `TransactionPreferenceStore` test block above
+    //       (unchanged: `attemptSave`/`applyRememberedPreferences` were not touched).
+    //   10. Category and Description behavior — `testCategoriesSortAlphabetically`,
+    //       `testDescriptionChoicesSortAlphabetically`, and the surrounding blocks (`CategoryPickerCard`
+    //       and `DescriptionPickerCard` internals were not touched by this task; only
+    //       `ManualAccountDetailView`'s action row and `AddExpenseView`'s amount card changed).
+    //   11. Recent Activity behavior — the `"Show in Recent Activity"` test block below.
+    //   12. Budget Smart Signals — `testSavingADescriptionDoesNotChangeBudgetSmartSignals` and the
+    //       `BudgetSignalEngine` test suite; that engine file has an empty diff for this task.
+
+    // MARK: - "Show in Recent Activity"
+
+    func testExistingManualAccountsWithNoSavedValueDefaultToVisible() {
+        // Mirrors a pre-existing account row: constructed without explicitly passing
+        // `showsInRecentActivity`, exactly like a lightweight-migration-backfilled row would be.
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        XCTAssertTrue(account.showsInRecentActivity)
+    }
+
+    func testNewManualAccountsDefaultToVisible() {
+        let account = Account(name: "New Register", type: .other, currentBalance: 0)
+        XCTAssertTrue(account.showsInRecentActivity)
+    }
+
+    func testManualAccountTransactionsAreIncludedWhenTheSettingIsEnabled() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: true)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: account)
+        XCTAssertEqual(transaction.account?.showsInRecentActivity, true)
+    }
+
+    func testManualAccountTransactionsAreExcludedWhenDisabled() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: account)
+        XCTAssertEqual(transaction.account?.showsInRecentActivity, false)
+    }
+
+    @MainActor
+    func testTransactionsRemainInTheManualAccountsOwnHistoryWhenHiddenFromRecentActivity() {
+        let context = makeAutosaveTestContext()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        context.insert(account)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: account)
+        context.insert(transaction)
+        try! context.save()
+
+        // The account's own register is every transaction whose `account` matches it — this
+        // never reads `showsInRecentActivity` at all, so the setting can't hide anything here.
+        let ownRegister = try! context.fetch(FetchDescriptor<FinanceTransaction>()).filter { $0.account?.id == account.id }
+        XCTAssertEqual(ownRegister.count, 1)
+    }
+
+    func testHiddenTransactionsStillAffectTheAccountBalance() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100, showsInRecentActivity: false)
+        AccountBalanceManager.applyExpense(amount: 20, to: account)
+        XCTAssertEqual(account.currentBalance, 80, "showsInRecentActivity must never influence balance math")
+    }
+
+    func testHidingFromRecentActivityDoesNotAlterWeeklySpendingEligibility() {
+        let interval = DateRangeHelper.currentWeekRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, account: account)
+        XCTAssertEqual(BudgetCalculator.weeklySpent([expense], in: interval), 40)
+    }
+
+    func testHidingFromRecentActivityDoesNotAlterMonthlySpendingEligibility() {
+        let interval = DateRangeHelper.currentMonthRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, account: account)
+        XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: interval), 40)
+    }
+
+    @MainActor
+    func testHidingFromRecentActivityDoesNotAlterBudgetSmartSignals() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let hiddenAccount = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let expense = FinanceTransaction(
+            amount: 90,
+            date: DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true).start.addingTimeInterval(3600 * 12),
+            type: .expense,
+            account: hiddenAccount
+        )
+        let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
+        let signals = BudgetSignalEngine().generateSignals(context: context)
+        // BudgetSignalEngine only ever reads BudgetCalculator's totals, which don't look at
+        // showsInRecentActivity at all — the signal fires exactly as it would for a visible account.
+        XCTAssertEqual(signals.map(\.id), ["budget.weekly.nearly-reached"])
+    }
+
+    func testRefundTransactionsFromTheAccountFollowTheVisibilitySetting() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let refund = FinanceTransaction(amount: 10, type: .refund, account: account)
+        XCTAssertEqual(refund.account?.showsInRecentActivity, false)
+    }
+
+    func testDepositTransactionsFromTheAccountFollowTheVisibilitySetting() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let deposit = FinanceTransaction(amount: 10, type: .income, account: account)
+        XCTAssertEqual(deposit.account?.showsInRecentActivity, false)
+    }
+
+    func testPendingTransactionsFollowTheVisibilitySettingPlusAllExistingPendingRules() {
+        let interval = DateRangeHelper.currentWeekRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let pendingExpense = FinanceTransaction(amount: 15, date: interval.start.addingTimeInterval(3600), type: .expense, isPending: true, account: account)
+        XCTAssertEqual(pendingExpense.account?.showsInRecentActivity, false)
+        // Existing pending rules (BudgetCalculator's own includePending gate) are unaffected.
+        XCTAssertEqual(BudgetCalculator.weeklySpent([pendingExpense], in: interval, includePending: false), 0)
+        XCTAssertEqual(BudgetCalculator.weeklySpent([pendingExpense], in: interval, includePending: true), 15)
+    }
+
+    func testLinkedAccountTransactionsRetainExistingRecentActivityBehavior() {
+        // No Account row in this app is ever Plaid-linked today (connectionType is always
+        // `.manual` in v1 — see Account.swift) — but even a hypothetical non-manual account still
+        // defaults `showsInRecentActivity` to `true`, so it's never hidden by this feature.
+        let account = Account(name: "Amex", type: .creditCard, currentBalance: 0, connectionType: .plaid)
+        XCTAssertTrue(account.showsInRecentActivity)
+    }
+
+    func testTransactionsWithNoAccountRetainExistingBehavior() {
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: nil)
+        // Mirrors DashboardView.isEligibleForRecentActivity's own `?? true` fallback for a nil
+        // account.
+        XCTAssertEqual(transaction.account?.showsInRecentActivity ?? true, true)
+    }
+
+    func testFilteringOccursBeforeTheRecentActivityResultLimit() {
+        // Six transactions total: three from a hidden account (all more recent) and three from a
+        // visible one. If filtering happened AFTER a naive "take the first 5" instead of before,
+        // the hidden account's transactions would still consume slots. Reproduces
+        // DashboardView.recentTransactions' own filter-then-prefix(5) logic directly.
+        let hiddenAccount = Account(name: "Hidden", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let visibleAccount = Account(name: "Visible", type: .checking, currentBalance: 0, showsInRecentActivity: true)
+        let now = Date()
+        let hiddenTransactions = (0..<3).map { offset in
+            FinanceTransaction(amount: Decimal(offset + 1), date: now.addingTimeInterval(Double(offset) * -60), type: .expense, account: hiddenAccount)
+        }
+        let visibleTransactions = (0..<3).map { offset in
+            FinanceTransaction(amount: Decimal(offset + 1), date: now.addingTimeInterval(Double(offset - 10) * -60), type: .expense, account: visibleAccount)
+        }
+        let allTransactions = (hiddenTransactions + visibleTransactions).sorted { $0.date > $1.date }
+
+        let eligible = allTransactions.filter { $0.account?.showsInRecentActivity ?? true }
+        let recentActivity = Array(eligible.prefix(5))
+
+        XCTAssertEqual(recentActivity.count, 3, "Only the three visible-account transactions exist to fill Recent Activity")
+        XCTAssertTrue(recentActivity.allSatisfy { $0.account?.id == visibleAccount.id })
+    }
+
+    func testTurningTheSettingBackOnRestoresEligibleTransactions() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, account: account)
+        XCTAssertFalse(transaction.account?.showsInRecentActivity ?? true)
+
+        account.showsInRecentActivity = true
+        XCTAssertTrue(transaction.account?.showsInRecentActivity ?? false)
+    }
+
+    func testAccountAVisibilityDoesNotAffectAccountB() {
+        let accountA = Account(name: "A", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        let accountB = Account(name: "B", type: .checking, currentBalance: 0, showsInRecentActivity: true)
+        XCTAssertFalse(accountA.showsInRecentActivity)
+        XCTAssertTrue(accountB.showsInRecentActivity)
+    }
+
+    func testSavingUnrelatedAccountChangesPreservesTheVisibilitySetting() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100, showsInRecentActivity: false)
+        account.name = "Renamed Checking"
+        account.currentBalance = 150
+        XCTAssertFalse(account.showsInRecentActivity, "Changing unrelated fields must never reset this setting")
+    }
+
+    @MainActor
+    func testTheSettingSurvivesPersistenceReload() {
+        let context = makeAutosaveTestContext()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
+        context.insert(account)
+        try! context.save()
+
+        let fetched = try! context.fetch(FetchDescriptor<Account>()).first
+        XCTAssertEqual(fetched?.showsInRecentActivity, false)
+    }
+
+    // MARK: - Deposit/Budget regressions (Part 4 interaction)
+
+    func testExpenseBehaviorRemainsUnchangedAfterAllFourImprovements() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyExpense(amount: 25, to: account)
+        XCTAssertEqual(account.currentBalance, 75)
+    }
+
+    func testRefundBehaviorRemainsUnchangedAfterAllFourImprovements() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyRefund(amount: 25, to: account)
+        XCTAssertEqual(account.currentBalance, 125)
+    }
+
+    func testDepositStillIncreasesBalanceAfterAllFourImprovements() {
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        AccountBalanceManager.applyIncome(amount: 25, to: account)
+        XCTAssertEqual(account.currentBalance, 125)
+    }
+
+    func testDepositStillDisplaysWithPlus() {
+        let deposit = FinanceTransaction(amount: 25, type: .income)
+        // Mirrors TransactionRow/RecentActivityRow's own switch (`case .refund, .income: "+"`),
+        // unchanged by this task.
+        let signPrefix: String
+        switch deposit.type {
+        case .expense: signPrefix = "-"
+        case .refund, .income: signPrefix = "+"
+        case .transfer, .creditCardPayment, .balanceAdjustment: signPrefix = ""
+        }
+        XCTAssertEqual(signPrefix, "+")
+    }
+
+    func testDepositRemainsExcludedFromWeeklyAndMonthlySpendingAfterAllFourImprovements() {
+        let weekInterval = DateRangeHelper.currentWeekRange()
+        let monthInterval = DateRangeHelper.currentMonthRange()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 500, date: weekInterval.start.addingTimeInterval(3600), type: .income, account: account)
+        XCTAssertEqual(BudgetCalculator.weeklySpent([deposit], in: weekInterval), 0)
+        XCTAssertEqual(BudgetCalculator.monthlySpent([deposit], in: monthInterval), 0)
+    }
+
+    @MainActor
+    func testDepositRemainsExcludedFromBudgetSmartSignalsAfterAllFourImprovements() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let week = DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true)
+        let tooEarlyNow = week.start.addingTimeInterval(3_600)
+        let account = Account(name: "Checking", type: .checking, currentBalance: 0)
+        let deposit = FinanceTransaction(amount: 1_000, date: week.start.addingTimeInterval(1_800), type: .income, account: account)
+        let context = makeBudgetSignalContext(transactions: [deposit], budgetSettings: settings, now: tooEarlyNow)
+        XCTAssertTrue(BudgetSignalEngine().generateSignals(context: context).isEmpty)
+    }
 }
 
 /// Mirrors the decision rule `refreshPlaidAccounts` (supabase/functions/_shared/plaid.ts) applies

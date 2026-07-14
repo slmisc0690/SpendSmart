@@ -21,6 +21,7 @@ struct AddAccountView: View {
     @State private var hasPaymentDueDate: Bool
     @State private var paymentDueDate: Date
     @State private var defaultCountsTowardMonthlySpending: Bool
+    @State private var showsInRecentActivity: Bool
     @State private var hasAttemptedSave = false
 
     @State private var createdAccount: Account?
@@ -42,6 +43,10 @@ struct AddAccountView: View {
         // A brand-new account defaults OFF (register-only-first) — an existing account being
         // edited always loads its own already-stored value, never this default.
         _defaultCountsTowardMonthlySpending = State(initialValue: account?.defaultCountsTowardMonthlySpending ?? false)
+        // Both a brand-new account and an existing one default to visible in Recent Activity —
+        // `Account.showsInRecentActivity`'s own schema default is `true`, this just mirrors that
+        // for the form's starting state (an existing account always loads its own stored value).
+        _showsInRecentActivity = State(initialValue: account?.showsInRecentActivity ?? true)
     }
 
     private var isEditing: Bool { editingAccount != nil }
@@ -82,10 +87,11 @@ struct AddAccountView: View {
         var hasPaymentDueDate: Bool
         var paymentDueDate: Date
         var defaultCountsTowardMonthlySpending: Bool
+        var showsInRecentActivity: Bool
     }
 
     private var formSnapshot: FormSnapshot {
-        FormSnapshot(name: name, type: type, balance: balance, institutionName: institutionName, lastFourDigitsText: lastFourDigitsText, creditLimit: creditLimit, minimumPayment: minimumPayment, hasPaymentDueDate: hasPaymentDueDate, paymentDueDate: paymentDueDate, defaultCountsTowardMonthlySpending: defaultCountsTowardMonthlySpending)
+        FormSnapshot(name: name, type: type, balance: balance, institutionName: institutionName, lastFourDigitsText: lastFourDigitsText, creditLimit: creditLimit, minimumPayment: minimumPayment, hasPaymentDueDate: hasPaymentDueDate, paymentDueDate: paymentDueDate, defaultCountsTowardMonthlySpending: defaultCountsTowardMonthlySpending, showsInRecentActivity: showsInRecentActivity)
     }
 
     var body: some View {
@@ -267,6 +273,16 @@ struct AddAccountView: View {
                 Text("When enabled, new expenses entered for this account will count toward your overall monthly spending. You can change this for each expense. This is only the default for future expenses — changing it does not retroactively modify prior transactions.")
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
+
+                Divider().overlay(Theme.cardStroke)
+
+                Toggle("Show in Recent Activity", isOn: $showsInRecentActivity)
+                    .tint(Theme.accent)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Text("When off, this account's transactions stay in its own register but won't appear in the Dashboard's Recent Activity list. Balances and spending totals are unaffected.")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
             }
         }
     }
@@ -363,6 +379,7 @@ struct AddAccountView: View {
             existing.minimumPayment = resolvedMinimumPayment
             existing.paymentDueDate = resolvedDueDate
             existing.defaultCountsTowardMonthlySpending = defaultCountsTowardMonthlySpending
+            existing.showsInRecentActivity = showsInRecentActivity
             existing.updatedAt = .now
         } else {
             let account = Account(
@@ -374,7 +391,8 @@ struct AddAccountView: View {
                 creditLimit: resolvedCreditLimit,
                 paymentDueDate: resolvedDueDate,
                 minimumPayment: resolvedMinimumPayment,
-                defaultCountsTowardMonthlySpending: defaultCountsTowardMonthlySpending
+                defaultCountsTowardMonthlySpending: defaultCountsTowardMonthlySpending,
+                showsInRecentActivity: showsInRecentActivity
             )
             modelContext.insert(account)
             createdAccount = account
