@@ -5488,6 +5488,574 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(signals.first?.id, "spending.month.higher-than-previous", "Priority 220 must outrank the subscription signal's priority 150 regardless of injection order")
     }
 
+    // MARK: - IncomeSignalEngine
+
+    private func makeIncomeContext(
+        incomeSources: [IncomeSource] = [],
+        now: Date = FinanceTrackTests.spendingSignalAnchor
+    ) -> SmartSignalContext {
+        SmartSignalContext(
+            transactions: [],
+            accounts: [],
+            categories: [],
+            incomeSources: incomeSources,
+            recurringExpenses: [],
+            budgetSettings: nil,
+            monthlyPlanSettings: nil,
+            now: now
+        )
+    }
+
+    // Threshold and suppression
+
+    func testIncomeConcentrationFiresAboveEightyPercent() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertEqual(IncomeSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testIncomeConcentrationFiresAtExactlyEightyPercent() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 800, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 200, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertEqual(IncomeSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testIncomeConcentrationDoesNotFireJustBelowEightyPercent() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 799, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 201, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationReturnsEmptyForEmptyIncomeSources() {
+        let context = makeIncomeContext(incomeSources: [])
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationReturnsEmptyForOneQualifyingSource() {
+        let sources = [IncomeSource(name: "Job", amount: 1_000, frequency: .monthly)]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationReturnsEmptyWhenOnlyOneStoredSourceContributes() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 1_000, frequency: .monthly),
+            IncomeSource(name: "Old Gig", amount: 500, frequency: .monthly, isActive: false),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationReturnsEmptyForZeroTotalIncome() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 0, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 0, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationReturnsEmptyForNegativeTotalIncome() {
+        let sources = [
+            IncomeSource(name: "Adjustment A", amount: -600, frequency: .monthly),
+            IncomeSource(name: "Adjustment B", amount: -400, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationDoesNotFireWhenLargestContributionIsZero() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 0, frequency: .monthly),
+            IncomeSource(name: "Old Gig", amount: 0, frequency: .monthly, isActive: false),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testIncomeConcentrationDoesNotFireForBalancedTwoSourceCase() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 500, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 500, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    // Signal contract
+
+    func testIncomeConcentrationSignalHasExactIdAndDeduplicationID() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.id, "income.concentration")
+        XCTAssertEqual(signal.deduplicationID, "income.concentration")
+    }
+
+    func testIncomeConcentrationSignalHasExactCategorySeverityConfidencePriorityTitleAndDates() {
+        let now = FinanceTrackTests.spendingSignalAnchor
+        let monthStart = DateRangeHelper.monthRangeContaining(now).start
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources, now: now)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.category, .income)
+        XCTAssertEqual(signal.severity, .information)
+        XCTAssertEqual(signal.confidence, .medium)
+        XCTAssertEqual(signal.priority, 110)
+        XCTAssertEqual(signal.title, "Most of Your Income Comes From One Source")
+        XCTAssertEqual(signal.relevantDate, monthStart)
+        XCTAssertEqual(signal.evaluatedAt, now)
+        XCTAssertNil(signal.action)
+    }
+
+    func testIncomeConcentrationExplanationContentAndTone() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertTrue(signal.explanation.contains("$900.00"))
+        XCTAssertTrue(signal.explanation.contains("$1,000.00"))
+        XCTAssertTrue(signal.explanation.contains("90%"))
+        XCTAssertFalse(signal.explanation.lowercased().contains("disappear"))
+        XCTAssertFalse(signal.explanation.lowercased().contains("budget"))
+        for alarmingWord in ["dangerous", "crisis", "urgent", "severe", "critical", "risky"] {
+            XCTAssertFalse(signal.explanation.lowercased().contains(alarmingWord))
+        }
+    }
+
+    // Metrics
+
+    func testIncomeConcentrationMetricsAppearInExactOrderWithCorrectIdsLabelsAndValues() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.metrics.count, 4)
+
+        XCTAssertEqual(signal.metrics[0].id, "income.total.monthly")
+        XCTAssertEqual(signal.metrics[0].label, "Monthly Income")
+        guard case .currency(let total) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(total, 1_000)
+
+        XCTAssertEqual(signal.metrics[1].id, "income.largest-source.monthly")
+        XCTAssertEqual(signal.metrics[1].label, "Largest Income Source")
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 900)
+
+        XCTAssertEqual(signal.metrics[2].id, "income.concentration.ratio")
+        XCTAssertEqual(signal.metrics[2].label, "Income Concentration")
+        guard case .percentage(let ratio) = signal.metrics[2].value else { return XCTFail("Expected percentage") }
+        XCTAssertEqual(ratio, 0.9, accuracy: 0.0001, "Must follow the existing fraction convention (0.9, not 90.0)")
+
+        XCTAssertEqual(signal.metrics[3].id, "income.total.annualized")
+        XCTAssertEqual(signal.metrics[3].label, "Annualized Income")
+        guard case .currency(let annualized) = signal.metrics[3].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(annualized, 12_000, "Must equal total monthly income \u{d7} 12")
+    }
+
+    // Calculator-owned behavior
+
+    func testIncomeConcentrationTreatsInactiveSourceAsNonQualifying() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            IncomeSource(name: "Old Job", amount: 5_000, frequency: .monthly, isActive: false),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let total) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(total, 1_000, "The inactive source must never contribute to the total")
+    }
+
+    func testIncomeConcentrationNormalizesWeeklyFrequency() {
+        let sources = [
+            IncomeSource(name: "Freelance", amount: 900, frequency: .weekly),
+            IncomeSource(name: "Side Gig", amount: 10, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 900 * 52 / 12, "Must reuse MonthlyPlanCalculator's weekly conversion exactly")
+    }
+
+    func testIncomeConcentrationNormalizesBiweeklyFrequency() {
+        let sources = [
+            IncomeSource(name: "Paycheck", amount: 2_000, frequency: .biweekly),
+            IncomeSource(name: "Side Gig", amount: 10, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 2_000 * 26 / 12)
+    }
+
+    func testIncomeConcentrationNormalizesTwiceMonthlyFrequency() {
+        let sources = [
+            IncomeSource(name: "Paycheck", amount: 1_000, frequency: .twiceMonthly),
+            IncomeSource(name: "Side Gig", amount: 10, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 2_000)
+    }
+
+    func testIncomeConcentrationNormalizesMonthlyFrequency() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 900)
+    }
+
+    func testIncomeConcentrationNormalizesQuarterlyFrequency() {
+        let sources = [
+            IncomeSource(name: "Bonus Retainer", amount: 3_600, frequency: .quarterly),
+            IncomeSource(name: "Side Gig", amount: 10, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 3_600 / 3)
+    }
+
+    func testIncomeConcentrationNormalizesYearlyFrequency() {
+        let sources = [
+            IncomeSource(name: "Annual Bonus", amount: 24_000, frequency: .yearly),
+            IncomeSource(name: "Side Gig", amount: 10, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(largest, 24_000 / 12)
+    }
+
+    func testIncomeConcentrationIncludesOneTimeIncomeInsideCurrentMonth() {
+        let now = FinanceTrackTests.spendingSignalAnchor
+        let monthStart = DateRangeHelper.monthRangeContaining(now).start
+        let sources = [
+            IncomeSource(name: "Tax Refund", amount: 900, frequency: .oneTime, nextPayDate: monthStart.addingTimeInterval(3600)),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources, now: now)
+        XCTAssertEqual(IncomeSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testIncomeConcentrationExcludesOneTimeIncomeOutsideCurrentMonth() {
+        let now = FinanceTrackTests.spendingSignalAnchor
+        let previousMonthStart = DateRangeHelper.lastMonthRange(relativeTo: now).start
+        let sources = [
+            IncomeSource(name: "Tax Refund", amount: 900, frequency: .oneTime, nextPayDate: previousMonthStart.addingTimeInterval(3600)),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources, now: now)
+        XCTAssertTrue(IncomeSignalEngine().generateSignals(context: context).isEmpty, "With the one-time source excluded, only one source qualifies — not enough for concentration")
+    }
+
+    func testIncomeConcentrationHandlesMixedFrequenciesCorrectly() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 4_000, frequency: .monthly),
+            IncomeSource(name: "Freelance", amount: 100, frequency: .weekly),
+            IncomeSource(name: "Annual Bonus", amount: 1_200, frequency: .yearly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        let expectedFreelance = Decimal(100) * 52 / 12
+        let expectedBonus = Decimal(1_200) / 12
+        let expectedTotal = Decimal(4_000) + expectedFreelance + expectedBonus
+        guard case .currency(let total) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        guard case .currency(let largest) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(total, expectedTotal)
+        XCTAssertEqual(largest, 4_000, "The monthly Job source is the largest of the three converted contributions")
+    }
+
+    func testIncomeConcentrationIncludesAllPositiveSourcesInTotal() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig A", amount: 60, frequency: .monthly),
+            IncomeSource(name: "Side Gig B", amount: 40, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let total) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(total, 1_000)
+    }
+
+    // Determinism
+
+    func testIncomeConcentrationRepeatedGenerationReturnsEqualArrays() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        let engine = IncomeSignalEngine()
+        XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context))
+    }
+
+    func testIncomeConcentrationIdsRemainDeterministic() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources)
+        let first = IncomeSignalEngine().generateSignals(context: context).map(\.id)
+        let second = IncomeSignalEngine().generateSignals(context: context).map(\.id)
+        XCTAssertEqual(first, second)
+    }
+
+    func testIncomeConcentrationReorderingNonTiedSourcesDoesNotChangeOutput() {
+        let sourceA = IncomeSource(name: "Job", amount: 900, frequency: .monthly)
+        let sourceB = IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly)
+        let forward = IncomeSignalEngine().generateSignals(context: makeIncomeContext(incomeSources: [sourceA, sourceB]))
+        let reversed = IncomeSignalEngine().generateSignals(context: makeIncomeContext(incomeSources: [sourceB, sourceA]))
+        XCTAssertEqual(forward, reversed)
+    }
+
+    func testIncomeConcentrationTiedLargestSourcesProduceDeterministicOutputRegardlessOfOrder() {
+        // Two sources tied for the maximum can mathematically never reach an 80% concentration
+        // ratio on their own (the shared maximum can be at most half of a two-source total), so
+        // this proves the tie is handled safely (no crash, no order-dependent result) rather than
+        // that it fires.
+        let sourceA = IncomeSource(name: "Job A", amount: 500, frequency: .monthly)
+        let sourceB = IncomeSource(name: "Job B", amount: 500, frequency: .monthly)
+        let forward = IncomeSignalEngine().generateSignals(context: makeIncomeContext(incomeSources: [sourceA, sourceB]))
+        let reversed = IncomeSignalEngine().generateSignals(context: makeIncomeContext(incomeSources: [sourceB, sourceA]))
+        XCTAssertEqual(forward, reversed)
+        XCTAssertTrue(forward.isEmpty)
+    }
+
+    func testIncomeConcentrationSignalIdentifierNeverContainsAnIncomeSourceUUID() {
+        let sourceA = IncomeSource(name: "Job", amount: 900, frequency: .monthly)
+        let sourceB = IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly)
+        let context = makeIncomeContext(incomeSources: [sourceA, sourceB])
+        guard let signal = IncomeSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertFalse(signal.id.contains(sourceA.id.uuidString))
+        XCTAssertFalse(signal.id.contains(sourceB.id.uuidString))
+        XCTAssertFalse(signal.deduplicationID.contains(sourceA.id.uuidString))
+        XCTAssertFalse(signal.deduplicationID.contains(sourceB.id.uuidString))
+    }
+
+    func testIncomeConcentrationMonthBoundaryBehaviorIsDeterministic() {
+        let lastDayOfMonth = DateRangeHelper.monthRangeContaining(FinanceTrackTests.spendingSignalAnchor).end.addingTimeInterval(-3600)
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources, now: lastDayOfMonth)
+        let engine = IncomeSignalEngine()
+        XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context))
+    }
+
+    func testIncomeConcentrationLeapYearFebruaryBehaviorIsDeterministic() {
+        let leapFebruary = makeDate(year: 2024, month: 2, day: 29, hour: 12)
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources, now: leapFebruary)
+        let engine = IncomeSignalEngine()
+        let first = engine.generateSignals(context: context)
+        let second = engine.generateSignals(context: context)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.count, 1)
+    }
+
+    func testIncomeConcentrationDeterministicUnderExplicitTestCalendarAndTimeZone() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let now = DateRangeHelper.monthRangeContaining(FinanceTrackTests.spendingSignalAnchor, calendar: calendar).start.addingTimeInterval(3600)
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = makeIncomeContext(incomeSources: sources, now: now)
+        let first = IncomeSignalEngine().generateSignals(context: context)
+        let second = IncomeSignalEngine().generateSignals(context: context)
+        XCTAssertEqual(first, second, "Identical context under an explicitly configured calendar/timezone must produce identical output")
+    }
+
+    // Coordinator and ranking
+
+    func testIncomeConcentrationCoexistsWithBudgetSignalEngineWithoutDeduplicationCollision() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 142, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = SmartSignalContext(
+            transactions: [expense],
+            accounts: [],
+            categories: [],
+            incomeSources: [
+                IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+                IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            ],
+            recurringExpenses: [],
+            budgetSettings: settings,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.budgetSignalFixedNow
+        )
+        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
+        XCTAssertTrue(signals.contains { $0.id == "budget.weekly.exceeded" })
+        XCTAssertTrue(signals.contains { $0.id == "income.concentration" })
+        XCTAssertEqual(signals.first?.id, "budget.weekly.exceeded", "Priority 400 must outrank Income's priority 110")
+    }
+
+    func testIncomeConcentrationCoexistsWithSpendingSignalEngineWithoutDeduplicationCollision() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let now = weekStart.addingTimeInterval(96 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = SmartSignalContext(
+            transactions: transactions,
+            accounts: [],
+            categories: [],
+            incomeSources: [
+                IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+                IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            ],
+            recurringExpenses: [],
+            budgetSettings: makeSpendingSettings(),
+            monthlyPlanSettings: nil,
+            now: now
+        )
+        let coordinator = SmartSignalsEngine(engines: [SpendingSignalEngine(), IncomeSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
+        XCTAssertEqual(signals.first?.id, "spending.week.higher-than-previous", "Priority 250 must outrank Income's priority 110")
+    }
+
+    func testIncomeConcentrationCoexistsWithSubscriptionSignalEngineWithoutDeduplicationCollision() {
+        let sources = [
+            IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+        ]
+        let context = SmartSignalContext(
+            transactions: [],
+            accounts: [],
+            categories: [],
+            incomeSources: sources,
+            recurringExpenses: [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)],
+            budgetSettings: nil,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.spendingSignalAnchor
+        )
+        let coordinator = SmartSignalsEngine(engines: [IncomeSignalEngine(), SubscriptionSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
+        XCTAssertEqual(signals.first?.id, "subscription.fixed-expense-ratio", "Priority 150 must outrank Income's priority 110")
+        XCTAssertTrue(signals.contains { $0.id == "income.concentration" })
+    }
+
+    func testBudgetNearlyReachedRanksAheadOfIncome() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 85, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = SmartSignalContext(
+            transactions: [expense],
+            accounts: [],
+            categories: [],
+            incomeSources: [
+                IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+                IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            ],
+            recurringExpenses: [],
+            budgetSettings: settings,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.budgetSignalFixedNow
+        )
+        let coordinator = SmartSignalsEngine(engines: [IncomeSignalEngine(), BudgetSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.nearly-reached", "Priority 300 must outrank Income's priority 110")
+    }
+
+    func testBudgetHalfwayRanksAheadOfIncome() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 60, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = SmartSignalContext(
+            transactions: [expense],
+            accounts: [],
+            categories: [],
+            incomeSources: [
+                IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+                IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            ],
+            recurringExpenses: [],
+            budgetSettings: settings,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.budgetSignalFixedNow
+        )
+        let coordinator = SmartSignalsEngine(engines: [IncomeSignalEngine(), BudgetSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.halfway", "Priority 200 must outrank Income's priority 110")
+    }
+
+    func testIncomeRanksAheadOfBudgetOnTrack() {
+        let settings = makeBudgetSettings(weeklyLimit: 200)
+        let expense = makeWeeklyExpense(amount: 50, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = SmartSignalContext(
+            transactions: [expense],
+            accounts: [],
+            categories: [],
+            incomeSources: [
+                IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+                IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            ],
+            recurringExpenses: [],
+            budgetSettings: settings,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.budgetSignalFixedNow
+        )
+        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(signals.first?.id, "income.concentration", "Income's priority 110 must outrank Budget on-track's priority 100")
+        XCTAssertEqual(signals.last?.id, "budget.weekly.on-track")
+    }
+
+    func testIncomeConcentrationCoordinatorRepeatedGenerationRemainsDeterministic() {
+        let settings = makeBudgetSettings(weeklyLimit: 100)
+        let expense = makeWeeklyExpense(amount: 142, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
+        let context = SmartSignalContext(
+            transactions: [expense],
+            accounts: [],
+            categories: [],
+            incomeSources: [
+                IncomeSource(name: "Job", amount: 900, frequency: .monthly),
+                IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
+            ],
+            recurringExpenses: [],
+            budgetSettings: settings,
+            monthlyPlanSettings: nil,
+            now: FinanceTrackTests.budgetSignalFixedNow
+        )
+        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
+        XCTAssertEqual(coordinator.generateSignals(context: context), coordinator.generateSignals(context: context))
+    }
+
     // MARK: - Manual Account deposits
 
     func testExpenseSaveBehaviorRemainsUnchanged() {
