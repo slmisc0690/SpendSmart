@@ -5185,6 +5185,309 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(first, second, "Identical context under an explicitly configured calendar/timezone must produce identical output")
     }
 
+    // MARK: - SubscriptionSignalEngine
+
+    private func makeSubscriptionContext(
+        recurringExpenses: [RecurringExpense] = [],
+        incomeSources: [IncomeSource] = [],
+        now: Date = FinanceTrackTests.spendingSignalAnchor
+    ) -> SmartSignalContext {
+        SmartSignalContext(
+            transactions: [],
+            accounts: [],
+            categories: [],
+            incomeSources: incomeSources,
+            recurringExpenses: recurringExpenses,
+            budgetSettings: nil,
+            monthlyPlanSettings: nil,
+            now: now
+        )
+    }
+
+    func testSubscriptionSignalFiresWhenRatioMeetsThreshold() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertEqual(SubscriptionSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testSubscriptionSignalHasExactIdAndDeduplicationID() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.id, "subscription.fixed-expense-ratio")
+        XCTAssertEqual(signal.deduplicationID, "subscription.fixed-expense-ratio")
+    }
+
+    func testSubscriptionSignalHasExactCategorySeverityConfidencePriorityTitleAndDates() {
+        let now = FinanceTrackTests.spendingSignalAnchor
+        let monthStart = DateRangeHelper.monthRangeContaining(now).start
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income, now: now)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.category, .subscriptions)
+        XCTAssertEqual(signal.severity, .headsUp)
+        XCTAssertEqual(signal.confidence, .medium)
+        XCTAssertEqual(signal.priority, 150)
+        XCTAssertEqual(signal.title, "Fixed Expenses Are a Large Share of Income")
+        XCTAssertEqual(signal.relevantDate, monthStart)
+        XCTAssertEqual(signal.evaluatedAt, now)
+    }
+
+    func testSubscriptionSignalMetricsAppearInExactOrderWithCorrectIdsLabelsAndValues() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.metrics.count, 4)
+
+        XCTAssertEqual(signal.metrics[0].id, "subscription.fixed.monthly")
+        XCTAssertEqual(signal.metrics[0].label, "Monthly Fixed Expenses")
+        guard case .currency(let fixed) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(fixed, 600)
+
+        XCTAssertEqual(signal.metrics[1].id, "subscription.income.monthly")
+        XCTAssertEqual(signal.metrics[1].label, "Monthly Income")
+        guard case .currency(let incomeMetric) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(incomeMetric, 1_000)
+
+        XCTAssertEqual(signal.metrics[2].id, "subscription.fixed.ratio")
+        XCTAssertEqual(signal.metrics[2].label, "Percent of Income")
+        guard case .percentage(let ratio) = signal.metrics[2].value else { return XCTFail("Expected percentage") }
+        XCTAssertEqual(ratio, 0.6, accuracy: 0.0001)
+
+        XCTAssertEqual(signal.metrics[3].id, "subscription.fixed.annualized")
+        XCTAssertEqual(signal.metrics[3].label, "Annualized Fixed Expenses")
+        guard case .currency(let annualized) = signal.metrics[3].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(annualized, 7_200, "Annualized must be exactly 12x the monthly fixed-expense total")
+    }
+
+    func testSubscriptionSignalExplanationContainsFormattedAmountsAndPercentage() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        XCTAssertTrue(signal.explanation.contains("$600.00"))
+        XCTAssertTrue(signal.explanation.contains("$1,000.00"))
+        XCTAssertTrue(signal.explanation.contains("60%"))
+    }
+
+    func testSubscriptionSignalFiresAtExactly60PercentBoundary() {
+        let income = [IncomeSource(name: "Paycheck", amount: 500, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 300, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertEqual(SubscriptionSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testSubscriptionSignalDoesNotFireJustBelow60PercentThreshold() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 599, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalDoesNotFireWithNoIncomeSources() {
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: [])
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalDoesNotFireWithZeroIncome() {
+        let income = [IncomeSource(name: "Paycheck", amount: 0, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalDoesNotFireWithNoRecurringExpenses() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: [], incomeSources: income)
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalDoesNotFireWithOnlyInactiveRecurringExpenses() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Old Gym", amount: 600, frequency: .monthly, isActive: false)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalDoesNotFireWithOnlyInactiveIncomeSources() {
+        let income = [IncomeSource(name: "Old Job", amount: 1_000, frequency: .monthly, isActive: false)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalConvertsWeeklyFrequencyCorrectly() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Meal Kit", amount: 150, frequency: .weekly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let fixed) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(fixed, 150 * 52 / 12, "Must reuse MonthlyPlanCalculator.monthlyAmount's weekly conversion exactly")
+    }
+
+    func testSubscriptionSignalConvertsBiweeklyFrequencyCorrectly() {
+        let income = [IncomeSource(name: "Paycheck", amount: 5_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Storage Unit", amount: 1_400, frequency: .biweekly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let fixed) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(fixed, 1_400 * 26 / 12)
+    }
+
+    func testSubscriptionSignalConvertsQuarterlyFrequencyCorrectly() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Storage Insurance", amount: 1_800, frequency: .quarterly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let fixed) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(fixed, 1_800 / 3)
+    }
+
+    func testSubscriptionSignalConvertsYearlyFrequencyCorrectly() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Annual Membership", amount: 7_200, frequency: .yearly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let fixed) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(fixed, 7_200 / 12)
+    }
+
+    func testSubscriptionSignalIncludesOneTimeExpenseOnlyWhenDueDateFallsInCurrentMonth() {
+        let now = FinanceTrackTests.spendingSignalAnchor
+        let monthStart = DateRangeHelper.monthRangeContaining(now).start
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "One-Time Repair", amount: 700, frequency: .oneTime, dueDate: monthStart.addingTimeInterval(3600))]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income, now: now)
+        XCTAssertEqual(SubscriptionSignalEngine().generateSignals(context: context).count, 1)
+    }
+
+    func testSubscriptionSignalExcludesOneTimeExpenseWhenDueDateFallsOutsideCurrentMonth() {
+        let now = FinanceTrackTests.spendingSignalAnchor
+        let previousMonthStart = DateRangeHelper.lastMonthRange(relativeTo: now).start
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "One-Time Repair", amount: 700, frequency: .oneTime, dueDate: previousMonthStart.addingTimeInterval(3600))]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income, now: now)
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalSumsMultipleRecurringExpenses() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [
+            RecurringExpense(name: "Rent", amount: 400, frequency: .monthly),
+            RecurringExpense(name: "Car Payment", amount: 200, frequency: .monthly),
+        ]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let fixed) = signal.metrics[0].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(fixed, 600)
+    }
+
+    func testSubscriptionSignalSumsMultipleIncomeSources() {
+        let income = [
+            IncomeSource(name: "Job", amount: 800, frequency: .monthly),
+            IncomeSource(name: "Side Gig", amount: 200, frequency: .monthly),
+        ]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        guard let signal = SubscriptionSignalEngine().generateSignals(context: context).first else { return XCTFail("Expected a signal") }
+        guard case .currency(let incomeMetric) = signal.metrics[1].value else { return XCTFail("Expected currency") }
+        XCTAssertEqual(incomeMetric, 1_000)
+    }
+
+    func testSubscriptionSignalUsesOnlyOneSignalEvenWithManyQualifyingExpenses() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [
+            RecurringExpense(name: "Rent", amount: 400, frequency: .monthly),
+            RecurringExpense(name: "Car Payment", amount: 300, frequency: .monthly),
+            RecurringExpense(name: "Insurance", amount: 200, frequency: .monthly),
+        ]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        XCTAssertEqual(SubscriptionSignalEngine().generateSignals(context: context).count, 1, "Exactly one rule is implemented — it must never produce more than one signal")
+    }
+
+    func testSubscriptionSignalEngineWithEmptyContextReturnsNoSignals() {
+        let context = makeSubscriptionContext()
+        XCTAssertTrue(SubscriptionSignalEngine().generateSignals(context: context).isEmpty)
+    }
+
+    func testSubscriptionSignalDeterministicAcrossRepeatedGeneration() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        let engine = SubscriptionSignalEngine()
+        XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context))
+    }
+
+    func testSubscriptionSignalIdsRemainDeterministic() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        let first = SubscriptionSignalEngine().generateSignals(context: context).map(\.id)
+        let second = SubscriptionSignalEngine().generateSignals(context: context).map(\.id)
+        XCTAssertEqual(first, second)
+    }
+
+    func testSubscriptionSignalDoesNotUseABudgetOrSpendingDeduplicationID() {
+        let income = [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)]
+        let expenses = [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)]
+        let context = makeSubscriptionContext(recurringExpenses: expenses, incomeSources: income)
+        let signals = SubscriptionSignalEngine().generateSignals(context: context)
+        XCTAssertTrue(signals.allSatisfy { !$0.deduplicationID.hasPrefix("budget.") && !$0.deduplicationID.hasPrefix("spending.") })
+    }
+
+    func testSubscriptionSignalCoexistsWithBudgetAndSpendingSignalsWithoutDeduplicationCollision() {
+        let weekStart = spendingCurrentWeekStart()
+        let previousStart = spendingPreviousWeekStart()
+        let spendingNow = weekStart.addingTimeInterval(96 * 3600)
+        let budgetSettings = makeBudgetSettings(weeklyLimit: 50)
+        let transactions = [
+            makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
+        ]
+        let context = SmartSignalContext(
+            transactions: transactions,
+            accounts: [],
+            categories: [],
+            incomeSources: [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)],
+            recurringExpenses: [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)],
+            budgetSettings: budgetSettings,
+            monthlyPlanSettings: nil,
+            now: spendingNow
+        )
+        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), SpendingSignalEngine(), SubscriptionSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
+        XCTAssertTrue(signals.contains { $0.id == "subscription.fixed-expense-ratio" })
+    }
+
+    func testExistingRankingPlacesSpendingMonthlyAheadOfSubscriptionSignalByPriority() {
+        let monthStart = spendingCurrentMonthStart()
+        let previousMonthStart = spendingPreviousMonthStart()
+        let now = monthStart.addingTimeInterval(240 * 3600)
+        let transactions = [
+            makeSpendingTransaction(amount: 1_000, date: previousMonthStart.addingTimeInterval(3600)),
+            makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
+        ]
+        let context = SmartSignalContext(
+            transactions: transactions,
+            accounts: [],
+            categories: [],
+            incomeSources: [IncomeSource(name: "Paycheck", amount: 1_000, frequency: .monthly)],
+            recurringExpenses: [RecurringExpense(name: "Rent", amount: 600, frequency: .monthly)],
+            budgetSettings: makeSpendingSettings(),
+            monthlyPlanSettings: nil,
+            now: now
+        )
+        let coordinator = SmartSignalsEngine(engines: [SubscriptionSignalEngine(), SpendingSignalEngine()])
+        let signals = coordinator.generateSignals(context: context)
+        XCTAssertEqual(signals.first?.id, "spending.month.higher-than-previous", "Priority 220 must outrank the subscription signal's priority 150 regardless of injection order")
+    }
+
     // MARK: - Manual Account deposits
 
     func testExpenseSaveBehaviorRemainsUnchanged() {
