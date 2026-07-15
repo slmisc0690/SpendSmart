@@ -252,14 +252,18 @@ Deno.test("isSandboxEnvironment: false for a misspelled value — never falls ba
   });
 });
 
-// --- PLAID_OAUTH_REDIRECT_URI (Phase P1B) ----------------------------------------------------------
+// --- PLAID_OAUTH_REDIRECT_URI (Phase P1B, host moved to Cloudflare subdomain in P1B.1) ---------
 
-Deno.test("PLAID_OAUTH_REDIRECT_URI: is the exact approved Universal Link", () => {
-  assertEquals(PLAID_OAUTH_REDIRECT_URI, "https://sldevapps.com/spendsmart/plaid/");
+Deno.test("PLAID_OAUTH_REDIRECT_URI: is the exact approved Cloudflare-subdomain Universal Link", () => {
+  assertEquals(PLAID_OAUTH_REDIRECT_URI, "https://plaid.sldevapps.com/spendsmart/plaid/");
 });
 
 Deno.test("PLAID_OAUTH_REDIRECT_URI: is HTTPS, never a custom scheme", () => {
   assert(PLAID_OAUTH_REDIRECT_URI.startsWith("https://"));
+});
+
+Deno.test("PLAID_OAUTH_REDIRECT_URI: no longer uses the old root-domain host", () => {
+  assert(!PLAID_OAUTH_REDIRECT_URI.startsWith("https://sldevapps.com"));
 });
 
 Deno.test("PLAID_OAUTH_REDIRECT_URI: is not the spendsmart:// Supabase auth callback scheme", () => {

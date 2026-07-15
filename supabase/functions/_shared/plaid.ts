@@ -295,17 +295,18 @@ export function buildPlaidWebhookUrl(): string {
 }
 
 /**
- * The single, trusted OAuth redirect URI every `/link/token/create` call must pass (Phase P1B) —
- * a fixed HTTPS Universal Link on this project's own domain, never a custom URL scheme (Plaid
- * requires a proper Universal Link for native-iOS OAuth/App-to-App redirects; a custom scheme is
- * not supported). This exact string must also match, byte-for-byte: the iOS Associated Domains
- * entitlement (`applinks:sldevapps.com`), the app-side URL-recognition boundary
+ * The single, trusted OAuth redirect URI every `/link/token/create` call must pass (Phase P1B,
+ * moved to this dedicated Cloudflare-hosted subdomain in Phase P1B.1 because the root domain
+ * lacks a trusted SSL certificate) — a fixed HTTPS Universal Link, never a custom URL scheme
+ * (Plaid requires a proper Universal Link for native-iOS OAuth/App-to-App redirects; a custom
+ * scheme is not supported). This exact string must also match, byte-for-byte: the iOS Associated
+ * Domains entitlement (`applinks:plaid.sldevapps.com`), the app-side URL-recognition boundary
  * (`PlaidOAuthReturn` in `PlaidConnectionManager.swift`), the future Plaid Dashboard Allowed
- * Redirect URI entry, and the future `apple-app-site-association` file hosted at that domain.
+ * Redirect URI entry, and the future `apple-app-site-association` file hosted at that subdomain.
  * Deliberately a fixed constant, not derived from any secret or request field — create-link-token
  * never reads a redirect_uri from the request body, so the iOS client can never influence it.
  */
-export const PLAID_OAUTH_REDIRECT_URI = "https://sldevapps.com/spendsmart/plaid/";
+export const PLAID_OAUTH_REDIRECT_URI = "https://plaid.sldevapps.com/spendsmart/plaid/";
 
 export async function plaidFetch(
   path: string,

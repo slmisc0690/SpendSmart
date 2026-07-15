@@ -2627,30 +2627,31 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(manager.connections.count, 1, "Repeated restoration with the same server state must never create duplicates")
     }
 
-    // MARK: - PlaidOAuthReturn (Phase P1B — OAuth Universal Link recognition)
+    // MARK: - PlaidOAuthReturn (Phase P1B — OAuth Universal Link recognition; host moved to a
+    // dedicated Cloudflare subdomain in Phase P1B.1)
 
     func testPlaidOAuthReturnMatchesExactApprovedURI() {
-        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/")!
+        let url = URL(string: "https://plaid.sldevapps.com/spendsmart/plaid/")!
         XCTAssertTrue(PlaidOAuthReturn.matches(url))
     }
 
     func testPlaidOAuthReturnMatchesSamePathWithoutTrailingSlash() {
-        let url = URL(string: "https://sldevapps.com/spendsmart/plaid")!
+        let url = URL(string: "https://plaid.sldevapps.com/spendsmart/plaid")!
         XCTAssertTrue(PlaidOAuthReturn.matches(url))
     }
 
     func testPlaidOAuthReturnMatchesChildPathUnderApprovedPath() {
-        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/oauth_state_id=abc123")!
+        let url = URL(string: "https://plaid.sldevapps.com/spendsmart/plaid/oauth_state_id=abc123")!
         XCTAssertTrue(PlaidOAuthReturn.matches(url))
     }
 
     func testPlaidOAuthReturnMatchesWithQueryString() {
-        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/?oauth_state_id=abc123")!
+        let url = URL(string: "https://plaid.sldevapps.com/spendsmart/plaid/?oauth_state_id=abc123")!
         XCTAssertTrue(PlaidOAuthReturn.matches(url))
     }
 
     func testPlaidOAuthReturnRejectsWrongScheme() {
-        let url = URL(string: "http://sldevapps.com/spendsmart/plaid/")!
+        let url = URL(string: "http://plaid.sldevapps.com/spendsmart/plaid/")!
         XCTAssertFalse(PlaidOAuthReturn.matches(url))
     }
 
@@ -2664,18 +2665,25 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(PlaidOAuthReturn.matches(url))
     }
 
+    /// The old, pre-P1B.1 root-domain host must no longer be recognized — the root domain lacks a
+    /// trusted SSL certificate and is no longer where the association file is hosted.
+    func testPlaidOAuthReturnRejectsOldRootDomainURI() {
+        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
     func testPlaidOAuthReturnRejectsSimilarButIncorrectPath() {
-        let url = URL(string: "https://sldevapps.com/spendsmart/plaidx/")!
+        let url = URL(string: "https://plaid.sldevapps.com/spendsmart/plaidx/")!
         XCTAssertFalse(PlaidOAuthReturn.matches(url))
     }
 
     func testPlaidOAuthReturnRejectsUnrelatedPathOnSameDomain() {
-        let url = URL(string: "https://sldevapps.com/some/other/page")!
+        let url = URL(string: "https://plaid.sldevapps.com/some/other/page")!
         XCTAssertFalse(PlaidOAuthReturn.matches(url))
     }
 
     func testPlaidOAuthReturnRejectsBareHostWithNoPath() {
-        let url = URL(string: "https://sldevapps.com/")!
+        let url = URL(string: "https://plaid.sldevapps.com/")!
         XCTAssertFalse(PlaidOAuthReturn.matches(url))
     }
 

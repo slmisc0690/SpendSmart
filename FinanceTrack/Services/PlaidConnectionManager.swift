@@ -1,20 +1,22 @@
 import Foundation
 import Observation
 
-/// Recognizes SpendSmart's one Plaid OAuth Universal Link — `https://sldevapps.com/spendsmart/plaid/`
+/// Recognizes SpendSmart's one Plaid OAuth Universal Link — `https://plaid.sldevapps.com/spendsmart/plaid/`
 /// (see `PLAID_OAUTH_REDIRECT_URI` in `supabase/functions/_shared/plaid.ts`, which this must match
-/// byte-for-byte). LinkKit (the installed `plaid-link-ios-spm` 7.0.2 package) exposes no public API
-/// for "continuing"/"resuming" a Link session from a URL — verified directly against its installed
-/// `.swiftinterface` and Plaid's own current OAuth documentation: the SDK completes the entire
-/// OAuth round-trip internally once the app is foregrounded via this registered Universal Link.
-/// This type's only job is the boundary decision every app-level URL handler needs regardless:
-/// "is this URL ours to silently absorb, or should it fall through to something else" (here,
-/// Supabase's own `spendsmart://` auth callback, handled separately in `FinanceTrackApp`).
+/// byte-for-byte). Hosted on this dedicated subdomain (via Cloudflare), not the root domain, since
+/// the root domain lacks a trusted SSL certificate. LinkKit (the installed `plaid-link-ios-spm`
+/// 7.0.2 package) exposes no public API for "continuing"/"resuming" a Link session from a URL —
+/// verified directly against its installed `.swiftinterface` and Plaid's own current OAuth
+/// documentation: the SDK completes the entire OAuth round-trip internally once the app is
+/// foregrounded via this registered Universal Link. This type's only job is the boundary decision
+/// every app-level URL handler needs regardless: "is this URL ours to silently absorb, or should
+/// it fall through to something else" (here, Supabase's own `spendsmart://` auth callback, handled
+/// separately in `FinanceTrackApp`).
 enum PlaidOAuthReturn {
-    static let host = "sldevapps.com"
+    static let host = "plaid.sldevapps.com"
     static let path = "/spendsmart/plaid"
 
-    /// True only for `https://sldevapps.com/spendsmart/plaid` or any path beginning with
+    /// True only for `https://plaid.sldevapps.com/spendsmart/plaid` or any path beginning with
     /// `/spendsmart/plaid/` (e.g. Plaid appending its own query parameters or a sub-path) — never
     /// a bare host match, never a different path on the same domain, and never anything but
     /// `https`. Pure and side-effect-free so it is directly unit-testable without LinkKit, UIKit,

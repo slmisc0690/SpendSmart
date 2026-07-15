@@ -70,7 +70,7 @@ targets:
       path: FinanceTrack/FinanceTrack.entitlements
       properties:
         com.apple.developer.associated-domains:
-          - applinks:sldevapps.com
+          - applinks:plaid.sldevapps.com
 
   FinanceTrackTests:
     type: bundle.unit-test
