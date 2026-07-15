@@ -60,6 +60,17 @@ targets:
       - package: Supabase
         product: Supabase
     capabilities: []
+    # Plaid OAuth (Phase P1B): the app must be reachable via this exact Universal Link so iOS
+    # routes a bank's OAuth/App-to-App return back into SpendSmart. LinkKit completes the OAuth
+    # round-trip internally once foregrounded this way — see PlaidConnectionManager.swift's
+    # PlaidOAuthReturn for the app-side recognition boundary. xcodegen writes the actual
+    # .entitlements file at the path below; do not hand-edit it, it is regenerated on every
+    # `xcodegen generate`.
+    entitlements:
+      path: FinanceTrack/FinanceTrack.entitlements
+      properties:
+        com.apple.developer.associated-domains:
+          - applinks:sldevapps.com
 
   FinanceTrackTests:
     type: bundle.unit-test

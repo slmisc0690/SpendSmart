@@ -1,6 +1,31 @@
 import Foundation
 import Observation
 
+/// Recognizes SpendSmart's one Plaid OAuth Universal Link — `https://sldevapps.com/spendsmart/plaid/`
+/// (see `PLAID_OAUTH_REDIRECT_URI` in `supabase/functions/_shared/plaid.ts`, which this must match
+/// byte-for-byte). LinkKit (the installed `plaid-link-ios-spm` 7.0.2 package) exposes no public API
+/// for "continuing"/"resuming" a Link session from a URL — verified directly against its installed
+/// `.swiftinterface` and Plaid's own current OAuth documentation: the SDK completes the entire
+/// OAuth round-trip internally once the app is foregrounded via this registered Universal Link.
+/// This type's only job is the boundary decision every app-level URL handler needs regardless:
+/// "is this URL ours to silently absorb, or should it fall through to something else" (here,
+/// Supabase's own `spendsmart://` auth callback, handled separately in `FinanceTrackApp`).
+enum PlaidOAuthReturn {
+    static let host = "sldevapps.com"
+    static let path = "/spendsmart/plaid"
+
+    /// True only for `https://sldevapps.com/spendsmart/plaid` or any path beginning with
+    /// `/spendsmart/plaid/` (e.g. Plaid appending its own query parameters or a sub-path) — never
+    /// a bare host match, never a different path on the same domain, and never anything but
+    /// `https`. Pure and side-effect-free so it is directly unit-testable without LinkKit, UIKit,
+    /// or any network/session state.
+    static func matches(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https" else { return false }
+        guard url.host?.lowercased() == host else { return false }
+        return url.path == path || url.path.hasPrefix(path + "/")
+    }
+}
+
 /// One linked institution's local UI-state snapshot — mirrors a `plaid_items` row's non-sensitive
 /// fields. `id` is the row's own opaque UUID (`connection_id` in every backend response), never a
 /// Plaid `item_id`/`access_token`, neither of which this device ever holds.
@@ -63,6 +88,36 @@ final class PlaidConnectionManager {
     /// all" — most call sites should read `connections` directly once they need per-institution
     /// detail.
     var isConnected: Bool { !connections.isEmpty }
+
+    /// Set by `ConnectedAccountsView` while a Plaid Link session (including a native OAuth
+    /// hand-off) is actively presented, cleared once it finishes or is dismissed — mirrors that
+    /// view's own `isPresentingLink` lifecycle. This is the only signal this manager has for "was
+    /// a Link flow actually in progress" when a Plaid OAuth-return Universal Link arrives.
+    /// LinkKit completes the OAuth round-trip internally once foregrounded via that link (see
+    /// `PlaidOAuthReturn`'s doc comment) — there is no LinkKit API this app calls to "resume" it;
+    /// this flag exists solely to detect the one unsafe case below.
+    var hasActiveLinkFlow = false
+
+    /// Set once a recognized Plaid OAuth return URL arrives while `hasActiveLinkFlow` is false —
+    /// e.g. the link was opened directly, outside of any connection attempt, or the app was
+    /// killed mid-flow. `ConnectedAccountsView` reads this to show a calm, actionable recovery
+    /// message rather than silently doing nothing. Never causes a crash, never creates a
+    /// connection, never touches Supabase auth state.
+    private(set) var oauthReturnMissedActiveSession = false
+
+    /// Called from the app's single `.onOpenURL` entry point for any URL already confirmed to
+    /// match `PlaidOAuthReturn.matches(_:)`. Intentionally does nothing beyond recording the
+    /// no-active-session case — LinkKit's own already-presented session (if any) resolves itself;
+    /// there is no forwarding call to make.
+    func handlePlaidOAuthReturn() {
+        if !hasActiveLinkFlow {
+            oauthReturnMissedActiveSession = true
+        }
+    }
+
+    func acknowledgeOAuthReturnWithoutActiveSession() {
+        oauthReturnMissedActiveSession = false
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults

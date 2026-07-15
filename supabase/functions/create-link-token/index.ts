@@ -21,6 +21,7 @@ import {
   isValidUuid,
   jsonResponse,
   logSafeError,
+  PLAID_OAUTH_REDIRECT_URI,
   plaidFetch,
   requireAuthenticatedUserId,
   SafeError,
@@ -87,6 +88,9 @@ Deno.serve(async (req) => {
         // Item created before this project started passing one — see buildPlaidWebhookUrl's doc
         // comment.
         webhook: buildPlaidWebhookUrl(),
+        // A reconnect can equally require OAuth re-authentication (e.g. the institution's consent
+        // expired) — see PLAID_OAUTH_REDIRECT_URI's doc comment.
+        redirect_uri: PLAID_OAUTH_REDIRECT_URI,
       });
       return jsonResponse({ link_token: data.link_token, expiration: data.expiration });
     }
@@ -103,6 +107,9 @@ Deno.serve(async (req) => {
       // Deliberately institution-agnostic — Plaid's Link UI itself is where the user picks their
       // institution (American Express or otherwise); nothing here scopes it to one.
       webhook: buildPlaidWebhookUrl(),
+      // Required for native-iOS OAuth/App-to-App institutions — see PLAID_OAUTH_REDIRECT_URI's
+      // doc comment. Fixed, trusted, never client-supplied.
+      redirect_uri: PLAID_OAUTH_REDIRECT_URI,
     };
 
     if (days_requested !== undefined) {

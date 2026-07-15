@@ -1,14 +1,18 @@
 // Focused regression tests for the pure/deterministic pieces of ../_shared/plaid.ts added or
-// changed for Plaid Production preparation (Phase P1A/P1A.1): environment loading (including the
-// now-unblocked "production" case and the fail-closed correction — no implicit Sandbox fallback),
-// per-Item environment consistency, webhook URL construction, and the extracted sandbox-only gate
+// changed for Plaid Production preparation (Phase P1A/P1A.1) and OAuth Universal Link support
+// (Phase P1B): environment loading (including the now-unblocked "production" case and the
+// fail-closed correction — no implicit Sandbox fallback), per-Item environment consistency,
+// webhook URL construction, the OAuth redirect URI constant, and the extracted sandbox-only gate
 // used by debug-reset-cursor.
 //
 // Deliberately does NOT test anything that requires a live Supabase/Postgres connection or a
 // live Plaid API call (createPrivilegedClient, refreshPlaidAccounts, requireAuthenticatedUserId,
 // plaidFetch) — those need real infrastructure this repo's test setup doesn't provide, and are
-// covered instead by direct code review (see the accompanying audit report). Every test here
-// exercises pure functions of environment variables/string inputs only.
+// covered instead by direct code review (see the accompanying audit report). This also includes
+// whether create-link-token's request bodies include `redirect_uri`/`webhook` — that construction
+// happens inline inside a `Deno.serve` handler, not a pure exported function, so it is verified by
+// code review rather than a unit test, matching how `webhook` itself was already verified. Every
+// test here exercises pure functions of environment variables/string inputs only.
 //
 // Run with: deno test --allow-env supabase/functions/_shared/plaid.test.ts
 
@@ -19,6 +23,7 @@ import {
   EnvironmentMismatchError,
   isSandboxEnvironment,
   loadPlaidCredentials,
+  PLAID_OAUTH_REDIRECT_URI,
 } from "./plaid.ts";
 
 const ENV_KEYS = ["PLAID_CLIENT_ID", "PLAID_SECRET", "PLAID_ENV", "SUPABASE_URL"] as const;
@@ -245,4 +250,18 @@ Deno.test("isSandboxEnvironment: false for a misspelled value — never falls ba
   withEnv({ PLAID_ENV: "Sandbox" }, () => {
     assertEquals(isSandboxEnvironment(), false);
   });
+});
+
+// --- PLAID_OAUTH_REDIRECT_URI (Phase P1B) ----------------------------------------------------------
+
+Deno.test("PLAID_OAUTH_REDIRECT_URI: is the exact approved Universal Link", () => {
+  assertEquals(PLAID_OAUTH_REDIRECT_URI, "https://sldevapps.com/spendsmart/plaid/");
+});
+
+Deno.test("PLAID_OAUTH_REDIRECT_URI: is HTTPS, never a custom scheme", () => {
+  assert(PLAID_OAUTH_REDIRECT_URI.startsWith("https://"));
+});
+
+Deno.test("PLAID_OAUTH_REDIRECT_URI: is not the spendsmart:// Supabase auth callback scheme", () => {
+  assert(!PLAID_OAUTH_REDIRECT_URI.startsWith("spendsmart://"));
 });

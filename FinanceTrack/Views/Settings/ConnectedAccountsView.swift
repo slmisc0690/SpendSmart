@@ -71,6 +71,21 @@ struct ConnectedAccountsView: View {
                 VStack(spacing: Theme.Spacing.lg) {
                     header
                     if isSignedIn {
+                        if plaidConnection.oauthReturnMissedActiveSession {
+                            CardBackground {
+                                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                                    inlineMessage(
+                                        icon: "exclamationmark.triangle.fill",
+                                        text: "We couldn't finish connecting your bank. Please try connecting again below.",
+                                        color: Theme.statusWarning
+                                    )
+                                    PremiumActionButton(title: "Dismiss", systemIconName: "xmark") {
+                                        plaidConnection.acknowledgeOAuthReturnWithoutActiveSession()
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, Theme.Spacing.lg)
+                        }
                         if let restoreErrorMessage {
                             CardBackground {
                                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
@@ -635,6 +650,7 @@ struct ConnectedAccountsView: View {
             },
             onExit: { exit in
                 isPresentingLink = false
+                plaidConnection.hasActiveLinkFlow = false
                 if let error = exit.error {
                     #if DEBUG
                     if linkReconnectingConnectionId != nil {
@@ -661,6 +677,10 @@ struct ConnectedAccountsView: View {
         do {
             linkSession = try Plaid.createPlaidLinkSession(configuration: configuration)
             isPresentingLink = true
+            // Marks a Link flow as genuinely in progress — see `PlaidConnectionManager
+            // .hasActiveLinkFlow`'s doc comment for why this exists: it's the only signal
+            // available if a Plaid OAuth return URL arrives while no flow was ever started.
+            plaidConnection.hasActiveLinkFlow = true
         } catch {
             connectionAttempt = .failed(error.localizedDescription)
         }
@@ -672,6 +692,7 @@ struct ConnectedAccountsView: View {
     /// comment for the required post-update-mode sequence.
     private func handleLinkSuccess(publicToken: String, institutionId: String, institutionName: String) async {
         isPresentingLink = false
+        plaidConnection.hasActiveLinkFlow = false
         connectionAttempt = .exchangingToken
 
         if let reconnectingId = linkReconnectingConnectionId {

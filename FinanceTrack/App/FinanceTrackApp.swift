@@ -90,6 +90,22 @@ struct FinanceTrackApp: App {
                     await authService.restoreSession()
                 }
                 .onOpenURL { url in
+                    // Single dispatch point for every URL this app can be opened with. Checked
+                    // FIRST and exclusively: a Plaid OAuth return must never be handed to
+                    // AuthenticationService.handle(url:), which unconditionally attempts to
+                    // establish a Supabase session from whatever URL it receives.
+                    if PlaidOAuthReturn.matches(url) {
+                        // Never log the full URL — Plaid's OAuth return can carry state/query
+                        // parameters. Only confirms recognition, matching this project's existing
+                        // safe-logging convention (see AuthenticationService.handle(url:)'s own
+                        // structural-fields-only logging).
+                        #if DEBUG
+                        print("[PlaidOAuthReturn] recognized Plaid OAuth callback: true")
+                        #endif
+                        plaidConnection.handlePlaidOAuthReturn()
+                        return
+                    }
+
                     // Password-reset / email-confirmation deep link callback — see
                     // AuthenticationService.resetPassword's redirectTo and SupabaseConfig. Fires
                     // whether the app was already running (foreground or background) or launched

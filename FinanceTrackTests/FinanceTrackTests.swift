@@ -2627,6 +2627,97 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(manager.connections.count, 1, "Repeated restoration with the same server state must never create duplicates")
     }
 
+    // MARK: - PlaidOAuthReturn (Phase P1B — OAuth Universal Link recognition)
+
+    func testPlaidOAuthReturnMatchesExactApprovedURI() {
+        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/")!
+        XCTAssertTrue(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnMatchesSamePathWithoutTrailingSlash() {
+        let url = URL(string: "https://sldevapps.com/spendsmart/plaid")!
+        XCTAssertTrue(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnMatchesChildPathUnderApprovedPath() {
+        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/oauth_state_id=abc123")!
+        XCTAssertTrue(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnMatchesWithQueryString() {
+        let url = URL(string: "https://sldevapps.com/spendsmart/plaid/?oauth_state_id=abc123")!
+        XCTAssertTrue(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnRejectsWrongScheme() {
+        let url = URL(string: "http://sldevapps.com/spendsmart/plaid/")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnRejectsCustomScheme() {
+        let url = URL(string: "spendsmart://plaid")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnRejectsWrongHost() {
+        let url = URL(string: "https://evil.com/spendsmart/plaid/")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnRejectsSimilarButIncorrectPath() {
+        let url = URL(string: "https://sldevapps.com/spendsmart/plaidx/")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnRejectsUnrelatedPathOnSameDomain() {
+        let url = URL(string: "https://sldevapps.com/some/other/page")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    func testPlaidOAuthReturnRejectsBareHostWithNoPath() {
+        let url = URL(string: "https://sldevapps.com/")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    /// Confirms the Supabase `spendsmart://` auth-callback scheme is structurally unaffected —
+    /// its host is nil (custom schemes have no `host` in this exact shape) and its scheme isn't
+    /// `https`, so it can never be misrouted to the Plaid OAuth path.
+    func testSupabaseAuthCallbackSchemeNeverMatchesPlaidOAuthReturn() {
+        let url = URL(string: "spendsmart://auth-callback?flow=recovery")!
+        XCTAssertFalse(PlaidOAuthReturn.matches(url))
+    }
+
+    // MARK: - PlaidConnectionManager OAuth-return session tracking (Phase P1B)
+
+    func testHandlePlaidOAuthReturnWithActiveLinkFlowDoesNotSetMissedFlag() {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.hasActiveLinkFlow = true
+
+        manager.handlePlaidOAuthReturn()
+
+        XCTAssertFalse(manager.oauthReturnMissedActiveSession, "A recognized OAuth return during an active Link flow must not be treated as unsafe")
+    }
+
+    func testHandlePlaidOAuthReturnWithNoActiveLinkFlowFailsSafely() {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        XCTAssertFalse(manager.hasActiveLinkFlow)
+
+        manager.handlePlaidOAuthReturn()
+
+        XCTAssertTrue(manager.oauthReturnMissedActiveSession)
+        XCTAssertTrue(manager.connections.isEmpty, "Must never create a connection automatically")
+    }
+
+    func testAcknowledgeOAuthReturnWithoutActiveSessionClearsFlag() {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.handlePlaidOAuthReturn()
+        XCTAssertTrue(manager.oauthReturnMissedActiveSession)
+
+        manager.acknowledgeOAuthReturnWithoutActiveSession()
+
+        XCTAssertFalse(manager.oauthReturnMissedActiveSession)
+    }
+
     // MARK: - PlaidBalanceFormatter (account-type-aware balance display)
 
     private func makeBalance(

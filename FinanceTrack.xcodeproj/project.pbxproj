@@ -168,6 +168,7 @@
 		1525189F422766EA20818819 /* MonthlyPlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonthlyPlanView.swift; sourceTree = "<group>"; };
 		16CDAB5F0D8E6FD93987B632 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1AAFD81CE1641B68E9EA1041 /* SpendSenseTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendSenseTestView.swift; sourceTree = "<group>"; };
+		1FDFACC3C99033BAE18805E2 /* FinanceTrack.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FinanceTrack.entitlements; sourceTree = "<group>"; };
 		21184532157037938C565516 /* CreditUtilizationCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreditUtilizationCalculator.swift; sourceTree = "<group>"; };
 		238C94B77B4B392A7DBCEC01 /* PremiumActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PremiumActionButton.swift; sourceTree = "<group>"; };
 		256C585D8F69A6C3EC483503 /* SpendSenseEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendSenseEngine.swift; sourceTree = "<group>"; };
@@ -427,6 +428,7 @@
 		6A616615A68F33E8C85FBC2D /* FinanceTrack */ = {
 			isa = PBXGroup;
 			children = (
+				1FDFACC3C99033BAE18805E2 /* FinanceTrack.entitlements */,
 				0559F00D5AFF1D6483FAFCDE /* Info.plist */,
 				485C9BA3F06E049E56DF7CF7 /* App */,
 				9A143C14B27227CA207EF752 /* Auth */,
@@ -996,6 +998,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = FinanceTrack/FinanceTrack.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 2UZJX3TEG4;
@@ -1078,6 +1081,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = FinanceTrack/FinanceTrack.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 2UZJX3TEG4;
