@@ -5,11 +5,13 @@
 //   `supabase secrets set`, never committed to source control, never sent to the iOS app).
 // - PLAID_ENV selects which Plaid environment every function talks to — see `loadPlaidCredentials`
 //   below. This is the SINGLE place that decides Plaid's base URL; no other file in this project
-//   (Edge Function or iOS) may hardcode a `*.plaid.com` host. `production` is a deliberate
-//   placeholder that hard-fails until reviewed and explicitly enabled — see that function's doc
-//   comment.
+//   (Edge Function or iOS) may hardcode a `*.plaid.com` host.
 // - Every function in this project calls Plaid over HTTPS using these credentials server-side.
 //   The iOS app never sees PLAID_CLIENT_ID, PLAID_SECRET, or any Plaid access_token.
+// - Every plaid_items row records the environment it was created under (see migration
+//   0005_plaid_items_environment.sql); `assertItemEnvironmentMatches` below must be called before
+//   any Plaid request that reuses an existing Item's stored access_token, so a token issued under
+//   one environment can never be sent to a different environment's host.
 //
 // AUTH: user-invoked functions (create-link-token, exchange-public-token, sync-transactions,
 // disconnect-account) run with `verify_jwt = false` at the gateway — NOT because they're
@@ -22,9 +24,8 @@
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 
-/// The three Plaid environments this project is prepared to run against. `production` is a
-/// documented placeholder (see `loadPlaidCredentials`) — Plaid itself only issues `development`
-/// or `production` API keys distinct from `sandbox`; which of those two a given
+/// The three Plaid environments this project can run against. Plaid itself only issues
+/// `development` or `production` API keys distinct from `sandbox`; which of those two a given
 /// PLAID_CLIENT_ID/PLAID_SECRET pair actually authenticates against is determined entirely by
 /// Plaid's own dashboard, not by this project. `PLAID_ENV` just tells this code which base URL to
 /// call with whatever credentials are currently set.
@@ -180,14 +181,13 @@ export function loadSupabaseSecretKey(): string {
  * talks to. Controlled entirely by the `PLAID_ENV` Supabase Secret (`supabase secrets set
  * PLAID_ENV=sandbox|development|production`) — no other file, iOS or Edge Function, may hardcode
  * a `*.plaid.com` host or branch on environment name. Changing environments is a one-secret
- * change, never a code change.
+ * change.
  *
- * `sandbox` and `development` are both live/usable (see `PLAID_BASE_URLS` above for why they
- * currently resolve to the same host). `production` is a DELIBERATE placeholder: it always
- * throws here, even if `PLAID_CLIENT_ID`/`PLAID_SECRET` are already production-issued keys. This
- * project is not yet ready for production Plaid traffic (see the Phase 5/6 readiness audit) —
- * flipping this requires a deliberate, separate code change to this one `if`, never a side effect
- * of just setting a secret.
+ * All three environments are live/usable (see `PLAID_BASE_URLS` above for why `development` and
+ * `production` currently resolve to the same host — Plaid retired the separate development
+ * host). `PLAID_ENV` is never defaulted to anything other than the pre-existing `"sandbox"`
+ * fallback below when unset, and an unrecognized value still fails closed rather than silently
+ * picking an environment.
  */
 export function loadPlaidCredentials(): PlaidCredentials {
   const clientId = Deno.env.get("PLAID_CLIENT_ID");
@@ -204,16 +204,78 @@ export function loadPlaidCredentials(): PlaidCredentials {
     );
   }
 
-  if (envRaw === "production") {
-    // See this function's doc comment — production is a placeholder until a deliberate,
-    // separate decision to go live. Never flip this as a side effect of an unrelated change.
-    throw new Error(
-      'PLAID_ENV=production is not yet enabled for this project — it is a placeholder pending ' +
-        "a deliberate go-live review (see loadPlaidCredentials in _shared/plaid.ts).",
+  return { clientId, secret, baseUrl: PLAID_BASE_URLS[envRaw], environment: envRaw };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-Item environment consistency (used by every function that calls Plaid with an EXISTING
+// Item's stored access_token)
+// ---------------------------------------------------------------------------------------------
+//
+// A plaid_items row's access_token is only ever valid against the Plaid host it was originally
+// issued under (see migration 0005_plaid_items_environment.sql). If the server's active PLAID_ENV
+// ever differs from the environment a given Item was created under — e.g. a Sandbox-created Item
+// still on file while PLAID_ENV is now "production" — calling Plaid with that token against the
+// CURRENT host would be wrong: at best a confusing failure, at worst a stale token happening to
+// still resolve to something. Every function that loads an existing Item's access_token must
+// check this BEFORE calling Plaid, never after.
+
+/**
+ * Thrown when a `plaid_items` row's stored `environment` doesn't match the server's currently
+ * active `PLAID_ENV`. The message only ever contains environment LABELS ("sandbox",
+ * "development", "production"), never a secret or token value — safe to log and safe to return
+ * to the client as-is.
+ */
+export class EnvironmentMismatchError extends SafeError {
+  constructor(itemEnvironment: string, activeEnvironment: string) {
+    super(
+      `This connection was created under a different Plaid environment (item="${itemEnvironment}", active="${activeEnvironment}") and must be reconnected.`,
     );
   }
+}
 
-  return { clientId, secret, baseUrl: PLAID_BASE_URLS[envRaw], environment: envRaw };
+/**
+ * Throws `EnvironmentMismatchError` if `itemEnvironment` doesn't match the server's currently
+ * active Plaid environment (read via `loadPlaidCredentials()`, the same single source of truth
+ * every Plaid call already goes through). Callers must call this BEFORE `plaidFetch`/
+ * `refreshPlaidAccounts` for any Item loaded from `plaid_items`, never after.
+ */
+export function assertItemEnvironmentMatches(itemEnvironment: string | null): void {
+  const { environment: activeEnvironment } = loadPlaidCredentials();
+  if (itemEnvironment !== activeEnvironment) {
+    throw new EnvironmentMismatchError(itemEnvironment ?? "unknown", activeEnvironment);
+  }
+}
+
+/**
+ * True when the server's active `PLAID_ENV` is `"sandbox"` (or unset, which defaults to
+ * sandbox). Used by `debug-reset-cursor`'s server-side gate — extracted as a small, independently
+ * testable helper rather than left inlined, so that guard can be verified without invoking a full
+ * `Deno.serve` handler. Deliberately reads the raw env var directly rather than going through
+ * `loadPlaidCredentials()`, so this still evaluates correctly even when `PLAID_CLIENT_ID`/
+ * `PLAID_SECRET` aren't set — this check must run before those become relevant.
+ */
+export function isSandboxEnvironment(): boolean {
+  return (Deno.env.get("PLAID_ENV") ?? "sandbox") === "sandbox";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Webhook URL (used by create-link-token)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Builds the trusted webhook URL for this project's `plaid-webhook` Edge Function, from the
+ * server-side `SUPABASE_URL` secret — never hardcoded, never client-supplied. Plaid POSTs
+ * Item-state changes here once it's passed as `/link/token/create`'s `webhook` field (see
+ * plaid-webhook/index.ts). Normalizes any trailing slash(es) on `SUPABASE_URL` so the result is
+ * always a well-formed URL regardless of how the secret happens to be set.
+ */
+export function buildPlaidWebhookUrl(): string {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  if (!supabaseUrl) {
+    throw new SafeError("Backend is misconfigured: SUPABASE_URL must be set.");
+  }
+  return `${supabaseUrl.replace(/\/+$/, "")}/functions/v1/plaid-webhook`;
 }
 
 export async function plaidFetch(

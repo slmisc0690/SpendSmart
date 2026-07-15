@@ -36,6 +36,7 @@
 
 import {
   createPrivilegedClient,
+  isSandboxEnvironment,
   isValidUuid,
   jsonResponse,
   logSafeError,
@@ -52,8 +53,7 @@ Deno.serve(async (req) => {
   // Server-side environment gate — see this file's header comment. Checked BEFORE authentication
   // so a non-sandbox environment rejects every call uniformly, without depending on whether the
   // caller happens to hold a valid token.
-  const plaidEnv = Deno.env.get("PLAID_ENV") ?? "sandbox";
-  if (plaidEnv !== "sandbox") {
+  if (!isSandboxEnvironment()) {
     console.error("[debug-reset-cursor] rejected: PLAID_ENV is not sandbox");
     return jsonResponse({ error: "Not available in this environment" }, 403);
   }

@@ -13,9 +13,11 @@
 import {
   createPrivilegedClient,
   jsonResponse,
+  loadPlaidCredentials,
   logSafeError,
   plaidFetch,
   requireAuthenticatedUserId,
+  SafeError,
   UnauthorizedError,
 } from "../_shared/plaid.ts";
 
@@ -39,11 +41,25 @@ Deno.serve(async (req) => {
     // item, so one already-invalid token never blocks the rest of account deletion.
     const { data: items, error: fetchError } = await supabase
       .from("plaid_items")
-      .select("access_token")
+      .select("access_token, environment")
       .eq("user_id", userId);
     if (fetchError) throw fetchError;
 
+    // Read once — an Item created under a different Plaid environment than the one this server is
+    // currently active under must never have its access_token sent to the CURRENT host (see
+    // assertItemEnvironmentMatches's doc comment). Account deletion itself must still proceed
+    // regardless — a mismatched item is skipped here (not revoked at Plaid) exactly like an
+    // already-failed revoke is: best-effort, logged, non-fatal to the rest of this function.
+    const { environment: activeEnvironment } = loadPlaidCredentials();
+
     for (const item of items ?? []) {
+      if (item.environment !== activeEnvironment) {
+        logSafeError(
+          "delete-account: skipped revoking a Plaid item created under a different environment",
+          new SafeError(`item environment="${item.environment ?? "unknown"}" active="${activeEnvironment}"`),
+        );
+        continue;
+      }
       try {
         await plaidFetch("/item/remove", { access_token: item.access_token });
       } catch (revokeError) {

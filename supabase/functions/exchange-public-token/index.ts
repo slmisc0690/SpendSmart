@@ -25,6 +25,7 @@
 import {
   createPrivilegedClient,
   jsonResponse,
+  loadPlaidCredentials,
   logSafeError,
   plaidFetch,
   refreshPlaidAccounts,
@@ -67,11 +68,17 @@ Deno.serve(async (req) => {
   // under.
 
   try {
+    // Read once, up front — this is the same active environment plaidFetch itself will use for
+    // this call, and it's what gets stamped onto the plaid_items row below so this Item can never
+    // later be ambiguous about which Plaid environment issued its access_token.
+    const { environment } = loadPlaidCredentials();
+
     const data = await plaidFetch("/item/public_token/exchange", { public_token });
     const accessToken = data.access_token as string;
     const itemId = data.item_id as string;
     console.log("[exchange-public-token] plaid exchange completed:", true);
     console.log("[exchange-public-token] item_id received:", typeof itemId === "string" && itemId.length > 0);
+    console.log("[exchange-public-token] environment:", environment);
 
     const resolvedInstitutionName =
       typeof institution_name === "string" && institution_name.length > 0
@@ -95,6 +102,11 @@ Deno.serve(async (req) => {
           // flag set (onConflict below can hit an existing row).
           requires_reauth: false,
           new_accounts_available: false,
+          // Always the server's CURRENT active environment — never client-supplied, never
+          // inferred from the credential format. A successful exchange just happened against
+          // this exact environment, so it is by construction the correct value to stamp here,
+          // even if this upsert is overwriting an existing row's prior environment value.
+          environment,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "item_id" }, // matches plaid_items.item_id's `unique` constraint

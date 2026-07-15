@@ -14,7 +14,10 @@
 // `Authorization: Bearer <user access token>`; requireAuthenticatedUserId validates it in code.
 
 import {
+  assertItemEnvironmentMatches,
+  buildPlaidWebhookUrl,
   createPrivilegedClient,
+  EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
   logSafeError,
@@ -62,7 +65,7 @@ Deno.serve(async (req) => {
       }
       const { data: item, error: lookupError } = await supabase
         .from("plaid_items")
-        .select("access_token")
+        .select("access_token, environment")
         .eq("id", connection_id)
         .eq("user_id", userId)
         .maybeSingle();
@@ -70,6 +73,9 @@ Deno.serve(async (req) => {
       if (!item) {
         return jsonResponse({ error: "No such connection for this account" }, 404);
       }
+      // Must be checked BEFORE calling Plaid — this Item's access_token is only valid against
+      // the host it was originally issued under (see assertItemEnvironmentMatches's doc comment).
+      assertItemEnvironmentMatches(item.environment);
 
       const data = await plaidFetch("/link/token/create", {
         client_name: "SpendSmart",
@@ -77,6 +83,10 @@ Deno.serve(async (req) => {
         country_codes: ["US"],
         user: { client_user_id: userId },
         access_token: item.access_token,
+        // Re-asserts the correct webhook URL on every reconnect, which also backfills it for any
+        // Item created before this project started passing one — see buildPlaidWebhookUrl's doc
+        // comment.
+        webhook: buildPlaidWebhookUrl(),
       });
       return jsonResponse({ link_token: data.link_token, expiration: data.expiration });
     }
@@ -92,6 +102,7 @@ Deno.serve(async (req) => {
       products: ["transactions"],
       // Deliberately institution-agnostic — Plaid's Link UI itself is where the user picks their
       // institution (American Express or otherwise); nothing here scopes it to one.
+      webhook: buildPlaidWebhookUrl(),
     };
 
     if (days_requested !== undefined) {
@@ -117,6 +128,9 @@ Deno.serve(async (req) => {
     logSafeError("create-link-token failed", error);
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    if (error instanceof EnvironmentMismatchError) {
+      return jsonResponse({ error: error.message, environment_mismatch: true }, 409);
     }
     if (error instanceof SafeError) {
       return jsonResponse({ error: error.message }, 500);

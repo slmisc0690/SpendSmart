@@ -21,7 +21,9 @@
 // and derives user_id ONLY from that verified token — never from the request body.
 
 import {
+  assertItemEnvironmentMatches,
   createPrivilegedClient,
+  EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
   logSafeError,
@@ -55,7 +57,7 @@ Deno.serve(async (req) => {
     // Scoped by the specific row id AND user_id — never a bare "first row for this user" lookup.
     const { data: item, error: lookupError } = await supabase
       .from("plaid_items")
-      .select("id, access_token")
+      .select("id, access_token, environment")
       .eq("id", connection_id)
       .eq("user_id", userId)
       .maybeSingle();
@@ -66,6 +68,11 @@ Deno.serve(async (req) => {
       // success rather than an error (this must never delete something ELSE on a mismatch).
       return jsonResponse({ disconnected: true });
     }
+    // Must be checked BEFORE calling Plaid — see assertItemEnvironmentMatches's doc comment. On a
+    // mismatch, this row is intentionally left untouched here (neither revoked at Plaid nor
+    // deleted) rather than partially cleaning it up — dedicated Sandbox-data cleanup is a
+    // separate, deliberate action, not a side effect of a routine disconnect request.
+    assertItemEnvironmentMatches(item.environment);
 
     await plaidFetch("/item/remove", { access_token: item.access_token });
 
@@ -82,6 +89,9 @@ Deno.serve(async (req) => {
 
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    if (error instanceof EnvironmentMismatchError) {
+      return jsonResponse({ error: error.message, environment_mismatch: true }, 409);
     }
     if (error instanceof SafeError) {
       return jsonResponse({ error: error.message }, 500);

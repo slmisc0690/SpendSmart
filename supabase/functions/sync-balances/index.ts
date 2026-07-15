@@ -19,7 +19,9 @@
 // Returns only non-sensitive per-account fields (never access_token, never full Plaid response).
 
 import {
+  assertItemEnvironmentMatches,
   createPrivilegedClient,
+  EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
   logSafeError,
@@ -54,7 +56,7 @@ Deno.serve(async (req) => {
   try {
     const { data: item, error: lookupError } = await supabase
       .from("plaid_items")
-      .select("id, access_token, requires_reauth")
+      .select("id, access_token, requires_reauth, environment")
       .eq("id", connection_id)
       .eq("user_id", userId)
       .maybeSingle();
@@ -63,6 +65,8 @@ Deno.serve(async (req) => {
     if (!item) {
       return jsonResponse({ error: "No such connection for this account" }, 404);
     }
+    // Must be checked BEFORE calling Plaid — see assertItemEnvironmentMatches's doc comment.
+    assertItemEnvironmentMatches(item.environment);
     if (item.requires_reauth) {
       return jsonResponse({ error: "This connection needs to be reconnected", requires_reauth: true }, 409);
     }
@@ -95,6 +99,9 @@ Deno.serve(async (req) => {
     logSafeError("sync-balances failed", error);
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    if (error instanceof EnvironmentMismatchError) {
+      return jsonResponse({ error: error.message, environment_mismatch: true }, 409);
     }
     if (error instanceof SafeError) {
       return jsonResponse({ error: error.message }, 500);

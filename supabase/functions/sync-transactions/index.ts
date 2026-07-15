@@ -28,7 +28,9 @@
 // to requiring `connection_id` unconditionally) once telemetry shows the old client is no
 // longer calling this function — see the deployment plan for the exact removal criteria.
 import {
+  assertItemEnvironmentMatches,
   createPrivilegedClient,
+  EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
   logSafeError,
@@ -61,7 +63,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    let item: { id: string; access_token: string; cursor: string | null; requires_reauth: boolean } | null;
+    let item: { id: string; access_token: string; cursor: string | null; requires_reauth: boolean; environment: string | null } | null;
 
     if (connection_id !== undefined) {
       // Scoped by the specific row id AND user_id — never a bare "first row for this user"
@@ -69,7 +71,7 @@ Deno.serve(async (req) => {
       // more than one connection).
       const { data, error: lookupError } = await supabase
         .from("plaid_items")
-        .select("id, access_token, cursor, requires_reauth")
+        .select("id, access_token, cursor, requires_reauth, environment")
         .eq("id", connection_id)
         .eq("user_id", userId)
         .maybeSingle();
@@ -82,7 +84,7 @@ Deno.serve(async (req) => {
       console.warn("[sync-transactions] DEPRECATED: request omitted connection_id — falling back to single-item lookup. Remove this path once the old client is fully retired.");
       const { data: candidates, error: lookupError } = await supabase
         .from("plaid_items")
-        .select("id, access_token, cursor, requires_reauth")
+        .select("id, access_token, cursor, requires_reauth, environment")
         .eq("user_id", userId)
         .limit(2);
       if (lookupError) throw lookupError;
@@ -99,6 +101,8 @@ Deno.serve(async (req) => {
     if (!item) {
       return jsonResponse({ error: "No such connection for this account" }, 404);
     }
+    // Must be checked BEFORE calling Plaid — see assertItemEnvironmentMatches's doc comment.
+    assertItemEnvironmentMatches(item.environment);
     if (item.requires_reauth) {
       // Plaid will reject /transactions/sync for an Item in this state anyway (ITEM_LOGIN_REQUIRED
       // webhooks fire precisely because the access_token can no longer be used) — failing fast
@@ -188,6 +192,9 @@ Deno.serve(async (req) => {
 
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    if (error instanceof EnvironmentMismatchError) {
+      return jsonResponse({ error: error.message, environment_mismatch: true }, 409);
     }
     if (error instanceof SafeError) {
       return jsonResponse({ error: error.message }, 500);

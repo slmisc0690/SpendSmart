@@ -184,7 +184,7 @@ struct ConnectedAccountsView: View {
                         Text(connection.institutionName)
                             .font(Theme.headlineFont)
                             .foregroundStyle(Theme.textPrimary)
-                        Text("via Plaid \u{00B7} Sandbox")
+                        Text("via Plaid")
                             .font(Theme.captionFont)
                             .foregroundStyle(Theme.textTertiary)
                     }
@@ -515,7 +515,7 @@ struct ConnectedAccountsView: View {
         CardBackground {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 noteRow(icon: "key.slash", text: "Your bank username and password are never entered into or stored by SpendSmart — Plaid Link's own hosted UI collects them.")
-                noteRow(icon: "lock.shield", text: "The connection goes through Plaid Sandbox via a secure backend. This app never talks to Plaid directly and never holds a Plaid access token.")
+                noteRow(icon: "lock.shield", text: "The connection goes through Plaid via a secure backend. This app never talks to Plaid directly and never holds a Plaid access token.")
                 noteRow(icon: "checkmark.circle", text: "Every imported transaction stays read-only and excluded from your totals until you explicitly add or match it.")
             }
         }
