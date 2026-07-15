@@ -76,6 +76,7 @@ struct SettingsView: View {
                     accountSection
                     budgetSection
                     planningSection
+                    spendSenseSection
                     securitySection
                     categoriesSection
                     dataSection
@@ -344,6 +345,42 @@ struct SettingsView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    // MARK: - B3. Spend Sense
+
+    private var spendSenseSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Spend Sense")
+
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    TransactionToggleRow(
+                        title: "Enable Spend Sense",
+                        subtitle: "Local financial guidance based on your data",
+                        isOn: Binding(
+                            get: { settings.spendSenseEnabled ?? true },
+                            set: { newValue in
+                                settings.spendSenseEnabled = newValue
+                                settings.updatedAt = .now
+                            }
+                        )
+                    )
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                        Text("Spend Sense analyzes your financial activity locally to identify useful trends, budget updates, recurring patterns, and other financial observations.")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
                 }
             }
             .padding(.horizontal, Theme.Spacing.lg)

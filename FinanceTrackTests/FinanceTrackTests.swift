@@ -118,6 +118,47 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(settings.warningThreshold, 0.70)
     }
 
+    // MARK: - Spend Sense setting
+
+    func testNewBudgetSettingsHasSpendSenseEnabled() {
+        let settings = BudgetSettings()
+        XCTAssertEqual(settings.spendSenseEnabled, true)
+    }
+
+    func testMissingSpendSenseEnabledResolvesToEnabled() {
+        // Simulates an installation whose stored `BudgetSettings` predates this field — the
+        // backing storage is `nil`, matching what SwiftData's lightweight migration leaves behind
+        // for an existing record. Every read site is expected to treat `nil` as "on" via `?? true`.
+        let settings = BudgetSettings()
+        settings.spendSenseEnabled = nil
+        XCTAssertEqual(settings.spendSenseEnabled ?? true, true)
+    }
+
+    func testSpendSenseEnabledCanBeSetToFalse() {
+        let settings = BudgetSettings()
+        settings.spendSenseEnabled = false
+        XCTAssertEqual(settings.spendSenseEnabled, false)
+    }
+
+    func testSpendSenseEnabledCanBeSetBackToTrue() {
+        let settings = BudgetSettings()
+        settings.spendSenseEnabled = false
+        settings.spendSenseEnabled = true
+        XCTAssertEqual(settings.spendSenseEnabled, true)
+    }
+
+    @MainActor
+    func testSpendSenseEnabledPersistsAcrossSaveAndReload() throws {
+        let context = makeAutosaveTestContext()
+        let settings = BudgetSettings()
+        settings.spendSenseEnabled = false
+        context.insert(settings)
+        try context.save()
+
+        let reloaded = try context.fetch(FetchDescriptor<BudgetSettings>()).first
+        XCTAssertEqual(reloaded?.spendSenseEnabled, false)
+    }
+
     func testSeventyPercentSpentTriggersWarningStatus() {
         let status = BudgetCalculator.status(spent: 70, limit: 100, warningThreshold: 0.70)
         XCTAssertEqual(status, .warning)
@@ -1462,6 +1503,37 @@ final class FinanceTrackTests: XCTestCase {
         let document = makeFullSampleDocument()
         XCTAssertEqual(document.budgetSettings.count, 1)
         XCTAssertEqual(document.budgetSettings.first?.weeklySpendingLimit.value, 300)
+    }
+
+    func testBackupPreservesSpendSenseEnabledFalse() throws {
+        let settings = BudgetSettings(spendSenseEnabled: false)
+        let document = SpendSmartBackupService.makeDocument(
+            accounts: [], transactions: [], categories: [], budgetSettings: [settings],
+            monthlyPlanSettings: [], incomeSources: [], recurringExpenses: []
+        )
+        let encoded = try SpendSmartBackupService.encode(document)
+        let decoded = try SpendSmartBackupService.decode(encoded)
+
+        XCTAssertEqual(decoded.budgetSettings.first?.spendSenseEnabled, false)
+    }
+
+    func testBackupDecodingOldBudgetSettingsJSONWithoutSpendSenseFieldDefaultsToTrue() throws {
+        // Simulates a backup file written before this field existed — the key is simply absent.
+        let oldFormatJSON = """
+        {
+            "id": "\(UUID().uuidString)",
+            "weeklySpendingLimit": "300.00",
+            "weekStartsOnSunday": true,
+            "includePendingTransactions": true,
+            "hideBalancesByDefault": false,
+            "requireFaceID": false,
+            "warningThreshold": 0.70,
+            "autoBackupEnabled": true,
+            "updatedAt": \(Date().timeIntervalSinceReferenceDate)
+        }
+        """
+        let decoded = try JSONDecoder().decode(SpendSmartBackupService.BudgetSettingsDTO.self, from: Data(oldFormatJSON.utf8))
+        XCTAssertTrue(decoded.spendSenseEnabled)
     }
 
     func testBackupExportIncludesMonthlyPlanSettings() {

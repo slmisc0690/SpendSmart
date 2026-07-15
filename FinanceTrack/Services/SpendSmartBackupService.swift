@@ -227,7 +227,45 @@ enum SpendSmartBackupService {
         let monthlyGoal: DecimalValue?
         let warningThreshold: Double
         let autoBackupEnabled: Bool
+        /// Added after the initial backup format shipped — decoded with a `true` fallback (via
+        /// `decodeIfPresent`) so a backup file from before this field existed still restores
+        /// cleanly, with Spend Sense defaulting to the same "on" behavior every other install gets.
+        let spendSenseEnabled: Bool
         let updatedAt: Date
+
+        init(
+            id: UUID, weeklySpendingLimit: DecimalValue, weekStartsOnSunday: Bool,
+            includePendingTransactions: Bool, hideBalancesByDefault: Bool, requireFaceID: Bool,
+            monthlyGoal: DecimalValue?, warningThreshold: Double, autoBackupEnabled: Bool,
+            spendSenseEnabled: Bool, updatedAt: Date
+        ) {
+            self.id = id
+            self.weeklySpendingLimit = weeklySpendingLimit
+            self.weekStartsOnSunday = weekStartsOnSunday
+            self.includePendingTransactions = includePendingTransactions
+            self.hideBalancesByDefault = hideBalancesByDefault
+            self.requireFaceID = requireFaceID
+            self.monthlyGoal = monthlyGoal
+            self.warningThreshold = warningThreshold
+            self.autoBackupEnabled = autoBackupEnabled
+            self.spendSenseEnabled = spendSenseEnabled
+            self.updatedAt = updatedAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(UUID.self, forKey: .id)
+            weeklySpendingLimit = try container.decode(DecimalValue.self, forKey: .weeklySpendingLimit)
+            weekStartsOnSunday = try container.decode(Bool.self, forKey: .weekStartsOnSunday)
+            includePendingTransactions = try container.decode(Bool.self, forKey: .includePendingTransactions)
+            hideBalancesByDefault = try container.decode(Bool.self, forKey: .hideBalancesByDefault)
+            requireFaceID = try container.decode(Bool.self, forKey: .requireFaceID)
+            monthlyGoal = try container.decodeIfPresent(DecimalValue.self, forKey: .monthlyGoal)
+            warningThreshold = try container.decode(Double.self, forKey: .warningThreshold)
+            autoBackupEnabled = try container.decode(Bool.self, forKey: .autoBackupEnabled)
+            spendSenseEnabled = try container.decodeIfPresent(Bool.self, forKey: .spendSenseEnabled) ?? true
+            updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        }
     }
 
     struct MonthlyPlanSettingsDTO: Codable, Equatable {
@@ -566,6 +604,7 @@ enum SpendSmartBackupService {
                 monthlyGoal: dto.monthlyGoal?.value,
                 warningThreshold: dto.warningThreshold,
                 autoBackupEnabled: dto.autoBackupEnabled,
+                spendSenseEnabled: dto.spendSenseEnabled,
                 updatedAt: dto.updatedAt
             )
             context.insert(settings)
@@ -714,6 +753,7 @@ private extension SpendSmartBackupService.BudgetSettingsDTO {
             monthlyGoal: settings.monthlyGoal.map(SpendSmartBackupService.DecimalValue.init),
             warningThreshold: settings.warningThreshold,
             autoBackupEnabled: settings.autoBackupEnabled ?? true,
+            spendSenseEnabled: settings.spendSenseEnabled ?? true,
             updatedAt: settings.updatedAt
         )
     }
