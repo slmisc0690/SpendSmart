@@ -1,7 +1,8 @@
 // Focused regression tests for the pure/deterministic pieces of ../_shared/plaid.ts added or
-// changed for Plaid Production preparation (Phase P1A): environment loading (including the
-// now-unblocked "production" case), per-Item environment consistency, webhook URL construction,
-// and the extracted sandbox-only gate used by debug-reset-cursor.
+// changed for Plaid Production preparation (Phase P1A/P1A.1): environment loading (including the
+// now-unblocked "production" case and the fail-closed correction — no implicit Sandbox fallback),
+// per-Item environment consistency, webhook URL construction, and the extracted sandbox-only gate
+// used by debug-reset-cursor.
 //
 // Deliberately does NOT test anything that requires a live Supabase/Postgres connection or a
 // live Plaid API call (createPrivilegedClient, refreshPlaidAccounts, requireAuthenticatedUserId,
@@ -90,22 +91,39 @@ Deno.test("loadPlaidCredentials: missing PLAID_CLIENT_ID/PLAID_SECRET still thro
   });
 });
 
-Deno.test("loadPlaidCredentials: unsupported PLAID_ENV value still throws", () => {
+Deno.test("loadPlaidCredentials: unsupported PLAID_ENV value throws", () => {
   withEnv({ ...VALID_CREDS, PLAID_ENV: "staging" }, () => {
     assertThrows(() => loadPlaidCredentials(), Error, 'PLAID_ENV must be one of "sandbox", "development", "production"');
   });
 });
 
-Deno.test("loadPlaidCredentials: empty-string PLAID_ENV still throws (not silently defaulted)", () => {
-  withEnv({ ...VALID_CREDS, PLAID_ENV: "" }, () => {
-    assertThrows(() => loadPlaidCredentials(), Error, 'PLAID_ENV must be one of');
+Deno.test("loadPlaidCredentials: misspelled PLAID_ENV value throws", () => {
+  withEnv({ ...VALID_CREDS, PLAID_ENV: "prod" }, () => {
+    assertThrows(() => loadPlaidCredentials(), Error, 'PLAID_ENV must be one of "sandbox", "development", "production"');
   });
 });
 
-Deno.test("loadPlaidCredentials: missing PLAID_ENV still defaults to sandbox (pre-existing behavior, unchanged)", () => {
+Deno.test("loadPlaidCredentials: empty-string PLAID_ENV throws (no implicit environment)", () => {
+  withEnv({ ...VALID_CREDS, PLAID_ENV: "" }, () => {
+    assertThrows(() => loadPlaidCredentials(), Error, "PLAID_ENV must be explicitly set");
+  });
+});
+
+Deno.test("loadPlaidCredentials: whitespace-only PLAID_ENV throws (no implicit environment)", () => {
+  withEnv({ ...VALID_CREDS, PLAID_ENV: "   " }, () => {
+    assertThrows(() => loadPlaidCredentials(), Error, "PLAID_ENV must be explicitly set");
+  });
+});
+
+Deno.test("loadPlaidCredentials: missing PLAID_ENV FAILS CLOSED — no fallback to sandbox or any other environment", () => {
   withEnv({ ...VALID_CREDS, PLAID_ENV: undefined }, () => {
-    const creds = loadPlaidCredentials();
-    assertEquals(creds.environment, "sandbox");
+    assertThrows(() => loadPlaidCredentials(), Error, "PLAID_ENV must be explicitly set");
+  });
+});
+
+Deno.test("loadPlaidCredentials: leading/trailing whitespace around an otherwise-valid value is trimmed, not treated as invalid", () => {
+  withEnv({ ...VALID_CREDS, PLAID_ENV: "  sandbox  " }, () => {
+    assertEquals(loadPlaidCredentials().environment, "sandbox");
   });
 });
 
@@ -187,20 +205,44 @@ Deno.test("isSandboxEnvironment: true when PLAID_ENV is sandbox", () => {
   });
 });
 
-Deno.test("isSandboxEnvironment: true when PLAID_ENV is unset (defaults to sandbox)", () => {
-  withEnv({ PLAID_ENV: undefined }, () => {
+Deno.test("isSandboxEnvironment: true when PLAID_ENV has surrounding whitespace around sandbox", () => {
+  withEnv({ PLAID_ENV: "  sandbox  " }, () => {
     assertEquals(isSandboxEnvironment(), true);
   });
 });
 
-Deno.test("isSandboxEnvironment: false when PLAID_ENV is development", () => {
+Deno.test("isSandboxEnvironment: FAILS CLOSED — false (never true) when PLAID_ENV is unset", () => {
+  withEnv({ PLAID_ENV: undefined }, () => {
+    assertEquals(isSandboxEnvironment(), false);
+  });
+});
+
+Deno.test("isSandboxEnvironment: FAILS CLOSED — false when PLAID_ENV is empty", () => {
+  withEnv({ PLAID_ENV: "" }, () => {
+    assertEquals(isSandboxEnvironment(), false);
+  });
+});
+
+Deno.test("isSandboxEnvironment: FAILS CLOSED — false when PLAID_ENV is whitespace-only", () => {
+  withEnv({ PLAID_ENV: "   " }, () => {
+    assertEquals(isSandboxEnvironment(), false);
+  });
+});
+
+Deno.test("isSandboxEnvironment: false when PLAID_ENV is development — debug-reset-cursor cannot reset a Development cursor", () => {
   withEnv({ PLAID_ENV: "development" }, () => {
     assertEquals(isSandboxEnvironment(), false);
   });
 });
 
-Deno.test("isSandboxEnvironment: false when PLAID_ENV is production — debug-reset-cursor stays unavailable outside sandbox", () => {
+Deno.test("isSandboxEnvironment: false when PLAID_ENV is production — debug-reset-cursor cannot reset a Production cursor", () => {
   withEnv({ PLAID_ENV: "production" }, () => {
+    assertEquals(isSandboxEnvironment(), false);
+  });
+});
+
+Deno.test("isSandboxEnvironment: false for a misspelled value — never falls back to true", () => {
+  withEnv({ PLAID_ENV: "Sandbox" }, () => {
     assertEquals(isSandboxEnvironment(), false);
   });
 });

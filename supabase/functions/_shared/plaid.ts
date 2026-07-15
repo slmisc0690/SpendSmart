@@ -185,26 +185,40 @@ export function loadSupabaseSecretKey(): string {
  *
  * All three environments are live/usable (see `PLAID_BASE_URLS` above for why `development` and
  * `production` currently resolve to the same host — Plaid retired the separate development
- * host). `PLAID_ENV` is never defaulted to anything other than the pre-existing `"sandbox"`
- * fallback below when unset, and an unrecognized value still fails closed rather than silently
- * picking an environment.
+ * host). FAILS CLOSED: `PLAID_ENV` must be explicitly set to exactly one of the three accepted
+ * values — missing, empty, whitespace-only, and unrecognized values all throw. There is
+ * deliberately no fallback to `"sandbox"` or any other environment; a missing secret must never
+ * silently route Production-intended traffic at Sandbox (or vice versa) — it must fail instead.
+ * Leading/trailing whitespace is trimmed before comparison only (matching how every other env var
+ * in this file is read — Deno.env.get never trims on its own), never used to coerce an otherwise
+ * invalid value into a valid one.
  */
 export function loadPlaidCredentials(): PlaidCredentials {
   const clientId = Deno.env.get("PLAID_CLIENT_ID");
   const secret = Deno.env.get("PLAID_SECRET");
-  const envRaw = Deno.env.get("PLAID_ENV") ?? "sandbox";
+  const envRaw = Deno.env.get("PLAID_ENV");
 
   if (!clientId || !secret) {
     throw new Error("PLAID_CLIENT_ID and PLAID_SECRET must be set (supabase secrets set ...)");
   }
 
-  if (!isPlaidEnvironment(envRaw)) {
+  const envTrimmed = envRaw?.trim();
+  if (!envTrimmed) {
+    // Covers both "the secret was never set" (envRaw is undefined) and "the secret was set to
+    // an empty or whitespace-only string" (envRaw is "" or "   ") — neither may ever be treated
+    // as "sandbox" or any other implicit choice.
     throw new Error(
-      `PLAID_ENV must be one of "sandbox", "development", "production" (got "${envRaw}")`,
+      'PLAID_ENV must be explicitly set to one of "sandbox", "development", "production" (it is unset or empty)',
     );
   }
 
-  return { clientId, secret, baseUrl: PLAID_BASE_URLS[envRaw], environment: envRaw };
+  if (!isPlaidEnvironment(envTrimmed)) {
+    throw new Error(
+      `PLAID_ENV must be one of "sandbox", "development", "production" (got "${envTrimmed}")`,
+    );
+  }
+
+  return { clientId, secret, baseUrl: PLAID_BASE_URLS[envTrimmed], environment: envTrimmed };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -248,15 +262,17 @@ export function assertItemEnvironmentMatches(itemEnvironment: string | null): vo
 }
 
 /**
- * True when the server's active `PLAID_ENV` is `"sandbox"` (or unset, which defaults to
- * sandbox). Used by `debug-reset-cursor`'s server-side gate — extracted as a small, independently
- * testable helper rather than left inlined, so that guard can be verified without invoking a full
- * `Deno.serve` handler. Deliberately reads the raw env var directly rather than going through
- * `loadPlaidCredentials()`, so this still evaluates correctly even when `PLAID_CLIENT_ID`/
- * `PLAID_SECRET` aren't set — this check must run before those become relevant.
+ * True ONLY when the server's active `PLAID_ENV` is explicitly `"sandbox"`. Used by
+ * `debug-reset-cursor`'s server-side gate — extracted as a small, independently testable helper
+ * rather than left inlined, so that guard can be verified without invoking a full `Deno.serve`
+ * handler. FAILS CLOSED: missing, empty, whitespace-only, or unrecognized `PLAID_ENV` all return
+ * `false` here (never `true`) — debug-reset-cursor must never treat an unset/misconfigured
+ * environment as an implicit "safe to allow" sandbox. Deliberately reads the raw env var directly
+ * rather than going through `loadPlaidCredentials()`, so this still evaluates correctly even when
+ * `PLAID_CLIENT_ID`/`PLAID_SECRET` aren't set — this check must run before those become relevant.
  */
 export function isSandboxEnvironment(): boolean {
-  return (Deno.env.get("PLAID_ENV") ?? "sandbox") === "sandbox";
+  return Deno.env.get("PLAID_ENV")?.trim() === "sandbox";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -463,7 +479,12 @@ interface CachedVerificationKey {
 // extra call to Plaid per new instance/new kid, never a correctness issue.
 const verificationKeyCache = new Map<string, CachedVerificationKey>();
 
-function base64UrlDecode(value: string): Uint8Array {
+// Return type explicitly pinned to `Uint8Array<ArrayBuffer>` (not the wider `Uint8Array` /
+// `Uint8Array<ArrayBufferLike>`, which also covers `SharedArrayBuffer`) — `crypto.subtle.verify`
+// below requires a concrete `ArrayBuffer`-backed view. `new Uint8Array(binary.length)` always
+// allocates a plain `ArrayBuffer` at runtime; this annotation only makes that existing guarantee
+// visible to the type checker, it changes no behavior.
+function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
   const binary = atob(padded);
   const bytes = new Uint8Array(binary.length);
