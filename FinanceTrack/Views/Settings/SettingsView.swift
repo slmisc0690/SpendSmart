@@ -31,7 +31,7 @@ struct SettingsView: View {
     @State private var isPresentingDataBackup = false
     @State private var isPresentingAccount = false
     #if DEBUG
-    @State private var isPresentingSmartSignalsTest = false
+    @State private var isPresentingSpendSenseTest = false
     #endif
 
     private var settings: BudgetSettings {
@@ -131,8 +131,8 @@ struct SettingsView: View {
                 AccountView()
             }
             #if DEBUG
-            .sheet(isPresented: $isPresentingSmartSignalsTest) {
-                SmartSignalsTestView()
+            .sheet(isPresented: $isPresentingSpendSenseTest) {
+                SpendSenseTestView()
             }
             #endif
             .confirmationDialog(
@@ -562,14 +562,14 @@ struct SettingsView: View {
 
             CardBackground {
                 Button {
-                    isPresentingSmartSignalsTest = true
+                    isPresentingSpendSenseTest = true
                 } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Smart Signals Test")
+                            Text("Spend Sense Test")
                                 .font(Theme.bodyFont)
                                 .foregroundStyle(Theme.textPrimary)
-                            Text("DEBUG only \u{2014} exercises the real Smart Signals engine without saving data")
+                            Text("DEBUG only \u{2014} exercises the real Spend Sense engine without saving data")
                                 .font(Theme.captionFont)
                                 .foregroundStyle(Theme.textTertiary)
                         }

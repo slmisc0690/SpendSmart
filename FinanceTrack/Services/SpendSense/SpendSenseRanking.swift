@@ -1,6 +1,6 @@
 import Foundation
 
-/// Deterministic ordering for a collection of `SmartSignal`s. An initialized value type (not a
+/// Deterministic ordering for a collection of `SpendSenseSignal`s. An initialized value type (not a
 /// namespace-only static enum) so a future caller could parameterize it if ever needed, though
 /// today it takes no configuration.
 ///
@@ -14,9 +14,9 @@ import Foundation
 /// Every criterion is compared explicitly in `isOrderedBefore` rather than relied on via `sort`'s
 /// stability guarantee alone — this ranking is fully deterministic regardless of input order,
 /// `hashValue`, or dictionary iteration order, none of which it ever reads.
-struct SmartSignalRanking {
+struct SpendSenseRanking {
     /// Higher value ranks first. Raw `String` case order is deliberately never used for this.
-    private static let severityWeight: [SmartSignalSeverity: Int] = [
+    private static let severityWeight: [SpendSenseSeverity: Int] = [
         .important: 3,
         .headsUp: 2,
         .information: 1,
@@ -24,7 +24,7 @@ struct SmartSignalRanking {
     ]
 
     /// Higher value ranks first. Raw `String` case order is deliberately never used for this.
-    private static let confidenceWeight: [SmartSignalConfidence: Int] = [
+    private static let confidenceWeight: [SpendSenseConfidence: Int] = [
         .high: 2,
         .medium: 1,
         .limitedData: 0,
@@ -32,12 +32,12 @@ struct SmartSignalRanking {
 
     init() {}
 
-    func rank(_ signals: [SmartSignal]) -> [SmartSignal] {
+    func rank(_ signals: [SpendSenseSignal]) -> [SpendSenseSignal] {
         signals.sorted(by: isOrderedBefore)
     }
 
     /// `true` when `lhs` must rank strictly ahead of `rhs`.
-    func isOrderedBefore(_ lhs: SmartSignal, _ rhs: SmartSignal) -> Bool {
+    func isOrderedBefore(_ lhs: SpendSenseSignal, _ rhs: SpendSenseSignal) -> Bool {
         if lhs.priority != rhs.priority {
             return lhs.priority > rhs.priority
         }

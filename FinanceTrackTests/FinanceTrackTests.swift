@@ -3810,17 +3810,17 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(remaining.isEmpty)
     }
 
-    // MARK: - Smart Signals foundation
+    // MARK: - Spend Sense foundation
 
-    private struct FakeSmartSignalEngine: SmartSignalEngine {
-        let signals: [SmartSignal]
-        func generateSignals(context: SmartSignalContext) -> [SmartSignal] { signals }
+    private struct FakeSpendSenseEngine: SpendSenseEngine {
+        let signals: [SpendSenseSignal]
+        func generateSignals(context: SpendSenseContext) -> [SpendSenseSignal] { signals }
     }
 
-    private static let smartSignalsFixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+    private static let spendSenseFixedNow = Date(timeIntervalSince1970: 1_700_000_000)
 
-    private func makeEmptySmartSignalContext(now: Date = FinanceTrackTests.smartSignalsFixedNow) -> SmartSignalContext {
-        SmartSignalContext(
+    private func makeEmptySpendSenseContext(now: Date = FinanceTrackTests.spendSenseFixedNow) -> SpendSenseContext {
+        SpendSenseContext(
             transactions: [],
             accounts: [],
             categories: [],
@@ -3832,17 +3832,17 @@ final class FinanceTrackTests: XCTestCase {
         )
     }
 
-    private func makeSmartSignal(
+    private func makeSpendSenseSignal(
         id: String,
         deduplicationID: String? = nil,
-        category: SmartSignalCategory = .spending,
-        severity: SmartSignalSeverity = .information,
-        confidence: SmartSignalConfidence = .medium,
+        category: SpendSenseCategory = .spending,
+        severity: SpendSenseSeverity = .information,
+        confidence: SpendSenseConfidence = .medium,
         priority: Int = 0,
         relevantDate: Date? = nil,
-        evaluatedAt: Date = FinanceTrackTests.smartSignalsFixedNow
-    ) -> SmartSignal {
-        SmartSignal(
+        evaluatedAt: Date = FinanceTrackTests.spendSenseFixedNow
+    ) -> SpendSenseSignal {
+        SpendSenseSignal(
             id: id,
             deduplicationID: deduplicationID ?? id,
             category: category,
@@ -3860,127 +3860,127 @@ final class FinanceTrackTests: XCTestCase {
 
     // Coordinator combination behavior
 
-    func testSmartSignalsEngineWithNoEnginesReturnsEmptyArray() {
-        let coordinator = SmartSignalsEngine(engines: [])
-        XCTAssertTrue(coordinator.generateSignals(context: makeEmptySmartSignalContext()).isEmpty)
+    func testSpendSenseCoordinatorWithNoEnginesReturnsEmptyArray() {
+        let coordinator = SpendSenseCoordinator(engines: [])
+        XCTAssertTrue(coordinator.generateSignals(context: makeEmptySpendSenseContext()).isEmpty)
     }
 
     func testEnginesReturningNoSignalsProduceEmptyResult() {
-        let coordinator = SmartSignalsEngine(engines: [
-            FakeSmartSignalEngine(signals: []),
-            FakeSmartSignalEngine(signals: []),
+        let coordinator = SpendSenseCoordinator(engines: [
+            FakeSpendSenseEngine(signals: []),
+            FakeSpendSenseEngine(signals: []),
         ])
-        XCTAssertTrue(coordinator.generateSignals(context: makeEmptySmartSignalContext()).isEmpty)
+        XCTAssertTrue(coordinator.generateSignals(context: makeEmptySpendSenseContext()).isEmpty)
     }
 
     func testResultsFromMultipleEnginesAreCombined() {
-        let engineA = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "a")])
-        let engineB = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "b")])
-        let coordinator = SmartSignalsEngine(engines: [engineA, engineB])
-        let result = coordinator.generateSignals(context: makeEmptySmartSignalContext())
+        let engineA = FakeSpendSenseEngine(signals: [makeSpendSenseSignal(id: "a")])
+        let engineB = FakeSpendSenseEngine(signals: [makeSpendSenseSignal(id: "b")])
+        let coordinator = SpendSenseCoordinator(engines: [engineA, engineB])
+        let result = coordinator.generateSignals(context: makeEmptySpendSenseContext())
         XCTAssertEqual(Set(result.map(\.id)), Set(["a", "b"]))
     }
 
     func testOneEngineCanProduceMultipleSignals() {
-        let engine = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "a"), makeSmartSignal(id: "b")])
-        let coordinator = SmartSignalsEngine(engines: [engine])
-        XCTAssertEqual(coordinator.generateSignals(context: makeEmptySmartSignalContext()).count, 2)
+        let engine = FakeSpendSenseEngine(signals: [makeSpendSenseSignal(id: "a"), makeSpendSenseSignal(id: "b")])
+        let coordinator = SpendSenseCoordinator(engines: [engine])
+        XCTAssertEqual(coordinator.generateSignals(context: makeEmptySpendSenseContext()).count, 2)
     }
 
     // Ranking determinism
 
     func testRankingIsDeterministic() {
-        let signals = [makeSmartSignal(id: "a", priority: 1), makeSmartSignal(id: "b", priority: 2)]
-        let ranking = SmartSignalRanking()
+        let signals = [makeSpendSenseSignal(id: "a", priority: 1), makeSpendSenseSignal(id: "b", priority: 2)]
+        let ranking = SpendSenseRanking()
         XCTAssertEqual(ranking.rank(signals).map(\.id), ranking.rank(signals).map(\.id))
     }
 
     func testRankingUnaffectedByEngineInjectionOrder() {
-        let engineA = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "a", priority: 1)])
-        let engineB = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "b", priority: 2)])
-        let resultAB = SmartSignalsEngine(engines: [engineA, engineB]).generateSignals(context: makeEmptySmartSignalContext())
-        let resultBA = SmartSignalsEngine(engines: [engineB, engineA]).generateSignals(context: makeEmptySmartSignalContext())
+        let engineA = FakeSpendSenseEngine(signals: [makeSpendSenseSignal(id: "a", priority: 1)])
+        let engineB = FakeSpendSenseEngine(signals: [makeSpendSenseSignal(id: "b", priority: 2)])
+        let resultAB = SpendSenseCoordinator(engines: [engineA, engineB]).generateSignals(context: makeEmptySpendSenseContext())
+        let resultBA = SpendSenseCoordinator(engines: [engineB, engineA]).generateSignals(context: makeEmptySpendSenseContext())
         XCTAssertEqual(resultAB.map(\.id), resultBA.map(\.id))
         XCTAssertEqual(resultAB.map(\.id), ["b", "a"])
     }
 
     func testHigherPrioritySortsBeforeLowerPriority() {
-        let low = makeSmartSignal(id: "low", priority: 1)
-        let high = makeSmartSignal(id: "high", priority: 5)
-        XCTAssertEqual(SmartSignalRanking().rank([low, high]).map(\.id), ["high", "low"])
+        let low = makeSpendSenseSignal(id: "low", priority: 1)
+        let high = makeSpendSenseSignal(id: "high", priority: 5)
+        XCTAssertEqual(SpendSenseRanking().rank([low, high]).map(\.id), ["high", "low"])
     }
 
     func testSeverityOrderingIsCorrect() {
-        let positive = makeSmartSignal(id: "positive", severity: .positive)
-        let information = makeSmartSignal(id: "information", severity: .information)
-        let headsUp = makeSmartSignal(id: "headsUp", severity: .headsUp)
-        let important = makeSmartSignal(id: "important", severity: .important)
-        let ranked = SmartSignalRanking().rank([positive, information, headsUp, important])
+        let positive = makeSpendSenseSignal(id: "positive", severity: .positive)
+        let information = makeSpendSenseSignal(id: "information", severity: .information)
+        let headsUp = makeSpendSenseSignal(id: "headsUp", severity: .headsUp)
+        let important = makeSpendSenseSignal(id: "important", severity: .important)
+        let ranked = SpendSenseRanking().rank([positive, information, headsUp, important])
         XCTAssertEqual(ranked.map(\.id), ["important", "headsUp", "information", "positive"])
     }
 
     func testConfidenceOrderingIsCorrect() {
-        let limited = makeSmartSignal(id: "limited", confidence: .limitedData)
-        let medium = makeSmartSignal(id: "medium", confidence: .medium)
-        let high = makeSmartSignal(id: "high", confidence: .high)
-        let ranked = SmartSignalRanking().rank([limited, medium, high])
+        let limited = makeSpendSenseSignal(id: "limited", confidence: .limitedData)
+        let medium = makeSpendSenseSignal(id: "medium", confidence: .medium)
+        let high = makeSpendSenseSignal(id: "high", confidence: .high)
+        let ranked = SpendSenseRanking().rank([limited, medium, high])
         XCTAssertEqual(ranked.map(\.id), ["high", "medium", "limited"])
     }
 
     func testMoreRecentRelevantDateSortsFirstWhenPreviousFieldsTie() {
-        let older = makeSmartSignal(id: "older", relevantDate: Date(timeIntervalSince1970: 1_000))
-        let newer = makeSmartSignal(id: "newer", relevantDate: Date(timeIntervalSince1970: 2_000))
-        XCTAssertEqual(SmartSignalRanking().rank([older, newer]).map(\.id), ["newer", "older"])
+        let older = makeSpendSenseSignal(id: "older", relevantDate: Date(timeIntervalSince1970: 1_000))
+        let newer = makeSpendSenseSignal(id: "newer", relevantDate: Date(timeIntervalSince1970: 2_000))
+        XCTAssertEqual(SpendSenseRanking().rank([older, newer]).map(\.id), ["newer", "older"])
     }
 
     func testEvaluatedAtIsUsedWhenRelevantDateIsNil() {
-        let early = makeSmartSignal(id: "early", relevantDate: nil, evaluatedAt: Date(timeIntervalSince1970: 1_000))
-        let late = makeSmartSignal(id: "late", relevantDate: nil, evaluatedAt: Date(timeIntervalSince1970: 2_000))
-        XCTAssertEqual(SmartSignalRanking().rank([early, late]).map(\.id), ["late", "early"])
+        let early = makeSpendSenseSignal(id: "early", relevantDate: nil, evaluatedAt: Date(timeIntervalSince1970: 1_000))
+        let late = makeSpendSenseSignal(id: "late", relevantDate: nil, evaluatedAt: Date(timeIntervalSince1970: 2_000))
+        XCTAssertEqual(SpendSenseRanking().rank([early, late]).map(\.id), ["late", "early"])
     }
 
     func testEqualRankedSignalsUseStableLexicalIdOrdering() {
-        let z = makeSmartSignal(id: "z-signal")
-        let a = makeSmartSignal(id: "a-signal")
-        XCTAssertEqual(SmartSignalRanking().rank([z, a]).map(\.id), ["a-signal", "z-signal"])
+        let z = makeSpendSenseSignal(id: "z-signal")
+        let a = makeSpendSenseSignal(id: "a-signal")
+        XCTAssertEqual(SpendSenseRanking().rank([z, a]).map(\.id), ["a-signal", "z-signal"])
     }
 
     // Deduplication behavior
 
     func testDuplicateDeduplicationIDValuesProduceOneResult() {
-        let engine = FakeSmartSignalEngine(signals: [
-            makeSmartSignal(id: "a1", deduplicationID: "dup"),
-            makeSmartSignal(id: "a2", deduplicationID: "dup"),
+        let engine = FakeSpendSenseEngine(signals: [
+            makeSpendSenseSignal(id: "a1", deduplicationID: "dup"),
+            makeSpendSenseSignal(id: "a2", deduplicationID: "dup"),
         ])
-        let result = SmartSignalsEngine(engines: [engine]).generateSignals(context: makeEmptySmartSignalContext())
+        let result = SpendSenseCoordinator(engines: [engine]).generateSignals(context: makeEmptySpendSenseContext())
         XCTAssertEqual(result.count, 1)
     }
 
     func testSelectedDuplicateIsTheHighestRanked() {
-        let low = makeSmartSignal(id: "low", deduplicationID: "dup", priority: 1)
-        let high = makeSmartSignal(id: "high", deduplicationID: "dup", priority: 5)
-        let engine = FakeSmartSignalEngine(signals: [low, high])
-        let result = SmartSignalsEngine(engines: [engine]).generateSignals(context: makeEmptySmartSignalContext())
+        let low = makeSpendSenseSignal(id: "low", deduplicationID: "dup", priority: 1)
+        let high = makeSpendSenseSignal(id: "high", deduplicationID: "dup", priority: 5)
+        let engine = FakeSpendSenseEngine(signals: [low, high])
+        let result = SpendSenseCoordinator(engines: [engine]).generateSignals(context: makeEmptySpendSenseContext())
         XCTAssertEqual(result.map(\.id), ["high"])
     }
 
     func testDuplicateSelectionIsIndependentOfEngineOrder() {
-        let low = makeSmartSignal(id: "low", deduplicationID: "dup", priority: 1)
-        let high = makeSmartSignal(id: "high", deduplicationID: "dup", priority: 5)
-        let lowFirstEngine = FakeSmartSignalEngine(signals: [low, high])
-        let highFirstEngine = FakeSmartSignalEngine(signals: [high, low])
-        let resultA = SmartSignalsEngine(engines: [lowFirstEngine]).generateSignals(context: makeEmptySmartSignalContext())
-        let resultB = SmartSignalsEngine(engines: [highFirstEngine]).generateSignals(context: makeEmptySmartSignalContext())
+        let low = makeSpendSenseSignal(id: "low", deduplicationID: "dup", priority: 1)
+        let high = makeSpendSenseSignal(id: "high", deduplicationID: "dup", priority: 5)
+        let lowFirstEngine = FakeSpendSenseEngine(signals: [low, high])
+        let highFirstEngine = FakeSpendSenseEngine(signals: [high, low])
+        let resultA = SpendSenseCoordinator(engines: [lowFirstEngine]).generateSignals(context: makeEmptySpendSenseContext())
+        let resultB = SpendSenseCoordinator(engines: [highFirstEngine]).generateSignals(context: makeEmptySpendSenseContext())
         XCTAssertEqual(resultA.map(\.id), ["high"])
         XCTAssertEqual(resultB.map(\.id), ["high"])
     }
 
     func testDistinctDeduplicationIDsArePreserved() {
-        let engine = FakeSmartSignalEngine(signals: [
-            makeSmartSignal(id: "a", deduplicationID: "dup-a"),
-            makeSmartSignal(id: "b", deduplicationID: "dup-b"),
+        let engine = FakeSpendSenseEngine(signals: [
+            makeSpendSenseSignal(id: "a", deduplicationID: "dup-a"),
+            makeSpendSenseSignal(id: "b", deduplicationID: "dup-b"),
         ])
-        let result = SmartSignalsEngine(engines: [engine]).generateSignals(context: makeEmptySmartSignalContext())
+        let result = SpendSenseCoordinator(engines: [engine]).generateSignals(context: makeEmptySpendSenseContext())
         XCTAssertEqual(Set(result.map(\.id)), Set(["a", "b"]))
     }
 
@@ -3992,7 +3992,7 @@ final class FinanceTrackTests: XCTestCase {
     /// signals for these same no-budget-configured contexts (see
     /// `testBudgetSignalEngineWithNoBudgetSettingsReturnsNoSignals`).
     func testRemainingPlaceholderEnginesHandleEmptyAndSparseContextsSafely() {
-        let engines: [any SmartSignalEngine] = [
+        let engines: [any SpendSenseEngine] = [
             SpendingSignalEngine(),
             SubscriptionSignalEngine(),
             IncomeSignalEngine(),
@@ -4000,10 +4000,10 @@ final class FinanceTrackTests: XCTestCase {
             SavingsSignalEngine(),
             CreditCardSignalEngine(),
         ]
-        let emptyContext = makeEmptySmartSignalContext()
+        let emptyContext = makeEmptySpendSenseContext()
 
         let checking = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let sparseContext = SmartSignalContext(
+        let sparseContext = SpendSenseContext(
             transactions: [FinanceTransaction(amount: 10, type: .expense, account: checking)],
             accounts: [checking],
             categories: [],
@@ -4011,7 +4011,7 @@ final class FinanceTrackTests: XCTestCase {
             recurringExpenses: [],
             budgetSettings: nil,
             monthlyPlanSettings: nil,
-            now: FinanceTrackTests.smartSignalsFixedNow
+            now: FinanceTrackTests.spendSenseFixedNow
         )
 
         for engine in engines {
@@ -4044,8 +4044,8 @@ final class FinanceTrackTests: XCTestCase {
         transactions: [FinanceTransaction] = [],
         budgetSettings: BudgetSettings?,
         now: Date = FinanceTrackTests.budgetSignalFixedNow
-    ) -> SmartSignalContext {
-        SmartSignalContext(
+    ) -> SpendSenseContext {
+        SpendSenseContext(
             transactions: transactions,
             accounts: [],
             categories: [],
@@ -4278,33 +4278,33 @@ final class FinanceTrackTests: XCTestCase {
 
     // Model correctness
 
-    func testSmartSignalEqualityBehavesCorrectly() {
-        let a = makeSmartSignal(id: "a")
-        let sameAsA = makeSmartSignal(id: "a")
-        let different = makeSmartSignal(id: "b")
+    func testSpendSenseSignalEqualityBehavesCorrectly() {
+        let a = makeSpendSenseSignal(id: "a")
+        let sameAsA = makeSpendSenseSignal(id: "a")
+        let different = makeSpendSenseSignal(id: "b")
         XCTAssertEqual(a, sameAsA)
         XCTAssertNotEqual(a, different)
     }
 
-    func testSmartSignalCodableRoundTripSucceeds() throws {
-        let original = makeSmartSignal(id: "codable-test", relevantDate: Date(timeIntervalSince1970: 1_650_000_000))
+    func testSpendSenseSignalCodableRoundTripSucceeds() throws {
+        let original = makeSpendSenseSignal(id: "codable-test", relevantDate: Date(timeIntervalSince1970: 1_650_000_000))
         let data = try JSONEncoder().encode(original)
-        let decoded = try JSONDecoder().decode(SmartSignal.self, from: data)
+        let decoded = try JSONDecoder().decode(SpendSenseSignal.self, from: data)
         XCTAssertEqual(original, decoded)
     }
 
-    func testSmartSignalActionCodableRoundTripSucceeds() throws {
-        let withDescription = SmartSignalAction(id: "action-1", title: "Review Category", description: "See the breakdown.")
+    func testSpendSenseActionCodableRoundTripSucceeds() throws {
+        let withDescription = SpendSenseAction(id: "action-1", title: "Review Category", description: "See the breakdown.")
         let withDescriptionData = try JSONEncoder().encode(withDescription)
-        XCTAssertEqual(withDescription, try JSONDecoder().decode(SmartSignalAction.self, from: withDescriptionData))
+        XCTAssertEqual(withDescription, try JSONDecoder().decode(SpendSenseAction.self, from: withDescriptionData))
 
-        let withoutDescription = SmartSignalAction(id: "action-2", title: "Review", description: nil)
+        let withoutDescription = SpendSenseAction(id: "action-2", title: "Review", description: nil)
         let withoutDescriptionData = try JSONEncoder().encode(withoutDescription)
-        XCTAssertEqual(withoutDescription, try JSONDecoder().decode(SmartSignalAction.self, from: withoutDescriptionData))
+        XCTAssertEqual(withoutDescription, try JSONDecoder().decode(SpendSenseAction.self, from: withoutDescriptionData))
     }
 
-    func testEverySmartSignalMetricValueCaseSurvivesEqualityAndCodableRoundTrip() throws {
-        let values: [SmartSignalMetric.Value] = [
+    func testEverySpendSenseMetricValueCaseSurvivesEqualityAndCodableRoundTrip() throws {
+        let values: [SpendSenseMetric.Value] = [
             .currency(Decimal(string: "42.75")!),
             .percentage(0.65),
             .count(3),
@@ -4312,9 +4312,9 @@ final class FinanceTrackTests: XCTestCase {
             .text("Groceries"),
         ]
         for value in values {
-            let metric = SmartSignalMetric(id: "metric", label: "Test Metric", value: value)
+            let metric = SpendSenseMetric(id: "metric", label: "Test Metric", value: value)
             let data = try JSONEncoder().encode(metric)
-            let decoded = try JSONDecoder().decode(SmartSignalMetric.self, from: data)
+            let decoded = try JSONDecoder().decode(SpendSenseMetric.self, from: data)
             XCTAssertEqual(metric, decoded, "Value \(value) must survive a Codable round trip")
         }
     }
@@ -4322,12 +4322,12 @@ final class FinanceTrackTests: XCTestCase {
     // Dependency injection isolation
 
     func testFakeEnginesCanBeInjectedWithoutGlobalMutation() {
-        let fake = FakeSmartSignalEngine(signals: [makeSmartSignal(id: "fake-only")])
-        let coordinatorWithFake = SmartSignalsEngine(engines: [fake])
-        let coordinatorWithoutFake = SmartSignalsEngine(engines: [])
+        let fake = FakeSpendSenseEngine(signals: [makeSpendSenseSignal(id: "fake-only")])
+        let coordinatorWithFake = SpendSenseCoordinator(engines: [fake])
+        let coordinatorWithoutFake = SpendSenseCoordinator(engines: [])
 
-        let resultWithFake = coordinatorWithFake.generateSignals(context: makeEmptySmartSignalContext())
-        let resultWithoutFake = coordinatorWithoutFake.generateSignals(context: makeEmptySmartSignalContext())
+        let resultWithFake = coordinatorWithFake.generateSignals(context: makeEmptySpendSenseContext())
+        let resultWithoutFake = coordinatorWithoutFake.generateSignals(context: makeEmptySpendSenseContext())
 
         XCTAssertEqual(resultWithFake.map(\.id), ["fake-only"])
         XCTAssertTrue(resultWithoutFake.isEmpty, "Injecting a fake engine into one coordinator instance must never affect another")
@@ -4362,8 +4362,8 @@ final class FinanceTrackTests: XCTestCase {
         transactions: [FinanceTransaction] = [],
         budgetSettings: BudgetSettings? = nil,
         now: Date
-    ) -> SmartSignalContext {
-        SmartSignalContext(
+    ) -> SpendSenseContext {
+        SpendSenseContext(
             transactions: transactions,
             accounts: [],
             categories: [],
@@ -5143,7 +5143,7 @@ final class FinanceTrackTests: XCTestCase {
             makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
         ]
         let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: settings, now: now)
-        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), SpendingSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [BudgetSignalEngine(), SpendingSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
         XCTAssertTrue(signals.contains { $0.id == "budget.weekly.exceeded" })
@@ -5160,7 +5160,7 @@ final class FinanceTrackTests: XCTestCase {
             makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
         ]
         let context = makeSpendingSignalContext(transactions: transactions, budgetSettings: settings, now: now)
-        let coordinator = SmartSignalsEngine(engines: [SpendingSignalEngine(), BudgetSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [SpendingSignalEngine(), BudgetSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(signals.first?.id, "budget.weekly.exceeded", "Priority 400 must outrank the spending signal's priority 250 regardless of injection order")
     }
@@ -5191,8 +5191,8 @@ final class FinanceTrackTests: XCTestCase {
         recurringExpenses: [RecurringExpense] = [],
         incomeSources: [IncomeSource] = [],
         now: Date = FinanceTrackTests.spendingSignalAnchor
-    ) -> SmartSignalContext {
-        SmartSignalContext(
+    ) -> SpendSenseContext {
+        SpendSenseContext(
             transactions: [],
             accounts: [],
             categories: [],
@@ -5449,7 +5449,7 @@ final class FinanceTrackTests: XCTestCase {
             makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
             makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
         ]
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: transactions,
             accounts: [],
             categories: [],
@@ -5459,7 +5459,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: spendingNow
         )
-        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), SpendingSignalEngine(), SubscriptionSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [BudgetSignalEngine(), SpendingSignalEngine(), SubscriptionSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
         XCTAssertTrue(signals.contains { $0.id == "subscription.fixed-expense-ratio" })
@@ -5473,7 +5473,7 @@ final class FinanceTrackTests: XCTestCase {
             makeSpendingTransaction(amount: 1_000, date: previousMonthStart.addingTimeInterval(3600)),
             makeSpendingTransaction(amount: 1_500, date: monthStart.addingTimeInterval(3600)),
         ]
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: transactions,
             accounts: [],
             categories: [],
@@ -5483,7 +5483,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: now
         )
-        let coordinator = SmartSignalsEngine(engines: [SubscriptionSignalEngine(), SpendingSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [SubscriptionSignalEngine(), SpendingSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(signals.first?.id, "spending.month.higher-than-previous", "Priority 220 must outrank the subscription signal's priority 150 regardless of injection order")
     }
@@ -5493,8 +5493,8 @@ final class FinanceTrackTests: XCTestCase {
     private func makeIncomeContext(
         incomeSources: [IncomeSource] = [],
         now: Date = FinanceTrackTests.spendingSignalAnchor
-    ) -> SmartSignalContext {
-        SmartSignalContext(
+    ) -> SpendSenseContext {
+        SpendSenseContext(
             transactions: [],
             accounts: [],
             categories: [],
@@ -5902,7 +5902,7 @@ final class FinanceTrackTests: XCTestCase {
     func testIncomeConcentrationCoexistsWithBudgetSignalEngineWithoutDeduplicationCollision() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let expense = makeWeeklyExpense(amount: 142, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: [expense],
             accounts: [],
             categories: [],
@@ -5915,7 +5915,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: FinanceTrackTests.budgetSignalFixedNow
         )
-        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
         XCTAssertTrue(signals.contains { $0.id == "budget.weekly.exceeded" })
@@ -5931,7 +5931,7 @@ final class FinanceTrackTests: XCTestCase {
             makeSpendingTransaction(amount: 200, date: previousStart.addingTimeInterval(3600)),
             makeSpendingTransaction(amount: 300, date: weekStart.addingTimeInterval(3600)),
         ]
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: transactions,
             accounts: [],
             categories: [],
@@ -5944,7 +5944,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: now
         )
-        let coordinator = SmartSignalsEngine(engines: [SpendingSignalEngine(), IncomeSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [SpendingSignalEngine(), IncomeSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
         XCTAssertEqual(signals.first?.id, "spending.week.higher-than-previous", "Priority 250 must outrank Income's priority 110")
@@ -5955,7 +5955,7 @@ final class FinanceTrackTests: XCTestCase {
             IncomeSource(name: "Job", amount: 900, frequency: .monthly),
             IncomeSource(name: "Side Gig", amount: 100, frequency: .monthly),
         ]
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: [],
             accounts: [],
             categories: [],
@@ -5965,7 +5965,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: FinanceTrackTests.spendingSignalAnchor
         )
-        let coordinator = SmartSignalsEngine(engines: [IncomeSignalEngine(), SubscriptionSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [IncomeSignalEngine(), SubscriptionSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(Set(signals.map(\.deduplicationID)).count, signals.count, "No deduplication collision should occur")
         XCTAssertEqual(signals.first?.id, "subscription.fixed-expense-ratio", "Priority 150 must outrank Income's priority 110")
@@ -5975,7 +5975,7 @@ final class FinanceTrackTests: XCTestCase {
     func testBudgetNearlyReachedRanksAheadOfIncome() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let expense = makeWeeklyExpense(amount: 85, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: [expense],
             accounts: [],
             categories: [],
@@ -5988,7 +5988,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: FinanceTrackTests.budgetSignalFixedNow
         )
-        let coordinator = SmartSignalsEngine(engines: [IncomeSignalEngine(), BudgetSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [IncomeSignalEngine(), BudgetSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(signals.first?.id, "budget.weekly.nearly-reached", "Priority 300 must outrank Income's priority 110")
     }
@@ -5996,7 +5996,7 @@ final class FinanceTrackTests: XCTestCase {
     func testBudgetHalfwayRanksAheadOfIncome() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let expense = makeWeeklyExpense(amount: 60, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: [expense],
             accounts: [],
             categories: [],
@@ -6009,7 +6009,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: FinanceTrackTests.budgetSignalFixedNow
         )
-        let coordinator = SmartSignalsEngine(engines: [IncomeSignalEngine(), BudgetSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [IncomeSignalEngine(), BudgetSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(signals.first?.id, "budget.weekly.halfway", "Priority 200 must outrank Income's priority 110")
     }
@@ -6017,7 +6017,7 @@ final class FinanceTrackTests: XCTestCase {
     func testIncomeRanksAheadOfBudgetOnTrack() {
         let settings = makeBudgetSettings(weeklyLimit: 200)
         let expense = makeWeeklyExpense(amount: 50, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: [expense],
             accounts: [],
             categories: [],
@@ -6030,7 +6030,7 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: FinanceTrackTests.budgetSignalFixedNow
         )
-        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
         let signals = coordinator.generateSignals(context: context)
         XCTAssertEqual(signals.first?.id, "income.concentration", "Income's priority 110 must outrank Budget on-track's priority 100")
         XCTAssertEqual(signals.last?.id, "budget.weekly.on-track")
@@ -6039,7 +6039,7 @@ final class FinanceTrackTests: XCTestCase {
     func testIncomeConcentrationCoordinatorRepeatedGenerationRemainsDeterministic() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let expense = makeWeeklyExpense(amount: 142, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
-        let context = SmartSignalContext(
+        let context = SpendSenseContext(
             transactions: [expense],
             accounts: [],
             categories: [],
@@ -6052,53 +6052,53 @@ final class FinanceTrackTests: XCTestCase {
             monthlyPlanSettings: nil,
             now: FinanceTrackTests.budgetSignalFixedNow
         )
-        let coordinator = SmartSignalsEngine(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
+        let coordinator = SpendSenseCoordinator(engines: [BudgetSignalEngine(), IncomeSignalEngine()])
         XCTAssertEqual(coordinator.generateSignals(context: context), coordinator.generateSignals(context: context))
     }
 
     #if DEBUG
-    // MARK: - SmartSignalsTestScenarioFactory (DEBUG physical-device harness)
+    // MARK: - SpendSenseTestScenarioFactory (DEBUG physical-device harness)
 
     func testNoSignalsScenarioProducesNoSignals() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .noSignals)
-        XCTAssertTrue(SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context).isEmpty)
+        let context = SpendSenseTestScenarioFactory.context(for: .noSignals)
+        XCTAssertTrue(SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context).isEmpty)
     }
 
     func testBudgetExceededScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .budgetExceeded)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .budgetExceeded)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         XCTAssertEqual(signals.first?.id, "budget.weekly.exceeded")
         XCTAssertEqual(signals.first?.priority, 400)
     }
 
     func testBudgetNearlyReachedScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .budgetNearlyReached)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .budgetNearlyReached)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         XCTAssertEqual(signals.first?.id, "budget.weekly.nearly-reached")
         XCTAssertEqual(signals.first?.priority, 300)
     }
 
     func testBudgetHalfwayScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .budgetHalfway)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .budgetHalfway)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         XCTAssertEqual(signals.first?.id, "budget.weekly.halfway")
         XCTAssertEqual(signals.first?.priority, 200)
     }
 
     func testBudgetOnTrackScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .budgetOnTrack)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .budgetOnTrack)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         XCTAssertEqual(signals.first?.id, "budget.weekly.on-track")
         XCTAssertEqual(signals.first?.priority, 100)
     }
 
     func testWeeklySpendingIncreaseScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .weeklySpendingIncrease)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .weeklySpendingIncrease)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         XCTAssertEqual(signals.first?.id, "spending.week.higher-than-previous")
         XCTAssertEqual(signals.first?.title, "Spending Up This Week")
@@ -6106,8 +6106,8 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testMonthlySpendingIncreaseScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .monthlySpendingIncrease)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .monthlySpendingIncrease)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         XCTAssertEqual(signals.first?.id, "spending.month.higher-than-previous")
         XCTAssertEqual(signals.first?.title, "Spending Up This Month")
@@ -6115,8 +6115,8 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testSubscriptionFixedExpenseRatioScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .subscriptionFixedExpenseRatio)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .subscriptionFixedExpenseRatio)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         guard let signal = signals.first else { return XCTFail("Expected a signal") }
         XCTAssertEqual(signal.title, "Fixed Expenses Are a Large Share of Income")
@@ -6132,8 +6132,8 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testIncomeConcentrationScenarioProducesExpectedSignal() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .incomeConcentration)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .incomeConcentration)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.count, 1)
         guard let signal = signals.first else { return XCTFail("Expected a signal") }
         XCTAssertEqual(signal.title, "Most of Your Income Comes From One Source")
@@ -6145,8 +6145,8 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testAllSignalsScenarioProducesExpectedSignalsInPriorityOrder() {
-        let context = SmartSignalsTestScenarioFactory.context(for: .allSignals)
-        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        let context = SpendSenseTestScenarioFactory.context(for: .allSignals)
+        let signals = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines).generateSignals(context: context)
         XCTAssertEqual(signals.map(\.id), [
             "budget.weekly.exceeded",
             "spending.week.higher-than-previous",
@@ -6158,9 +6158,9 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testScenarioFactoryRepeatedGenerationRemainsDeterministic() {
-        for scenario in SmartSignalsTestScenario.allCases {
-            let context = SmartSignalsTestScenarioFactory.context(for: scenario)
-            let engine = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines)
+        for scenario in SpendSenseTestScenario.allCases {
+            let context = SpendSenseTestScenarioFactory.context(for: scenario)
+            let engine = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines)
             XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context), "\(scenario.rawValue) must be deterministic")
         }
     }
@@ -6255,7 +6255,7 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     @MainActor
-    func testDepositDoesNotCauseABudgetSmartSignalWhenNoQualifyingExpenseExists() {
+    func testDepositDoesNotCauseABudgetSpendSenseSignalWhenNoQualifyingExpenseExists() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let week = DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true)
         // Placed very early in the period so an on-track positive signal (which only requires
@@ -6271,7 +6271,7 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     @MainActor
-    func testAddingADepositDoesNotChangeAnExistingExpenseDrivenBudgetSmartSignalResult() {
+    func testAddingADepositDoesNotChangeAnExistingExpenseDrivenBudgetSpendSenseSignalResult() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let expense = makeWeeklyExpense(amount: 90, fractionIntoWeek: 0.5, now: FinanceTrackTests.budgetSignalFixedNow)
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
@@ -6915,7 +6915,7 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(account.currentBalance, 80, "Adding a description text has no bearing on which direction a balance mutation moves")
     }
 
-    func testSavingADescriptionDoesNotChangeBudgetSmartSignals() {
+    func testSavingADescriptionDoesNotChangeBudgetSpendSenseSignals() {
         // `BudgetSignalEngine` operates purely on transaction amounts/flags/dates via
         // `BudgetCalculator` — it has no dependency on `note`/description text at all (confirmed
         // by inspection: `BudgetSignalEngine.swift` was not touched by this task).
@@ -7096,7 +7096,7 @@ final class FinanceTrackTests: XCTestCase {
     //       and `DescriptionPickerCard` internals were not touched by this task; only
     //       `ManualAccountDetailView`'s action row and `AddExpenseView`'s amount card changed).
     //   11. Recent Activity behavior — the `"Show in Recent Activity"` test block below.
-    //   12. Budget Smart Signals — `testSavingADescriptionDoesNotChangeBudgetSmartSignals` and the
+    //   12. Budget Spend Sense — `testSavingADescriptionDoesNotChangeBudgetSpendSenseSignals` and the
     //       `BudgetSignalEngine` test suite; that engine file has an empty diff for this task.
 
     // MARK: - "Show in Recent Activity"
@@ -7161,7 +7161,7 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     @MainActor
-    func testHidingFromRecentActivityDoesNotAlterBudgetSmartSignals() {
+    func testHidingFromRecentActivityDoesNotAlterBudgetSpendSenseSignals() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let hiddenAccount = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
         let expense = FinanceTransaction(
@@ -7314,7 +7314,7 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     @MainActor
-    func testDepositRemainsExcludedFromBudgetSmartSignalsAfterAllFourImprovements() {
+    func testDepositRemainsExcludedFromBudgetSpendSenseSignalsAfterAllFourImprovements() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
         let week = DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true)
         let tooEarlyNow = week.start.addingTimeInterval(3_600)

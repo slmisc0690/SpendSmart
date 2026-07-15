@@ -4,7 +4,7 @@ import Foundation
 /// recurring bills are consuming an outsized share of income. Every monthly-equivalent total
 /// comes from `MonthlyPlanCalculator`; this engine never sums `RecurringExpense`/`IncomeSource`
 /// amounts or reimplements the frequency-to-monthly conversion itself.
-struct SubscriptionSignalEngine: SmartSignalEngine {
+struct SubscriptionSignalEngine: SpendSenseEngine {
 
     // MARK: - Tunables
 
@@ -12,14 +12,14 @@ struct SubscriptionSignalEngine: SmartSignalEngine {
     /// the boundary comparison (`>=`) is never affected by binary floating-point imprecision.
     private static let fixedExpenseRatioThreshold = Decimal(60) / Decimal(100)
 
-    func generateSignals(context: SmartSignalContext) -> [SmartSignal] {
+    func generateSignals(context: SpendSenseContext) -> [SpendSenseSignal] {
         guard let signal = generateFixedExpenseRatioSignal(context: context) else { return [] }
         return [signal]
     }
 
     // MARK: - Fixed-expense-ratio rule
 
-    private func generateFixedExpenseRatioSignal(context: SmartSignalContext) -> SmartSignal? {
+    private func generateFixedExpenseRatioSignal(context: SpendSenseContext) -> SpendSenseSignal? {
         let calendar = Calendar.current
         let month = DateRangeHelper.monthRangeContaining(context.now, calendar: calendar)
 
@@ -35,7 +35,7 @@ struct SubscriptionSignalEngine: SmartSignalEngine {
         let annualizedFixedExpenses = fixedExpenses * 12
         let ratioAsDouble = NSDecimalNumber(decimal: ratio).doubleValue
 
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "subscription.fixed-expense-ratio",
             deduplicationID: "subscription.fixed-expense-ratio",
             category: .subscriptions,
@@ -45,10 +45,10 @@ struct SubscriptionSignalEngine: SmartSignalEngine {
             title: "Fixed Expenses Are a Large Share of Income",
             explanation: "Your recurring fixed expenses are \(formatCurrency(fixedExpenses)) per month against \(formatCurrency(income)) in estimated monthly income — \(formatPercentage(ratioAsDouble)) of your income.",
             metrics: [
-                SmartSignalMetric(id: "subscription.fixed.monthly", label: "Monthly Fixed Expenses", value: .currency(fixedExpenses)),
-                SmartSignalMetric(id: "subscription.income.monthly", label: "Monthly Income", value: .currency(income)),
-                SmartSignalMetric(id: "subscription.fixed.ratio", label: "Percent of Income", value: .percentage(ratioAsDouble)),
-                SmartSignalMetric(id: "subscription.fixed.annualized", label: "Annualized Fixed Expenses", value: .currency(annualizedFixedExpenses)),
+                SpendSenseMetric(id: "subscription.fixed.monthly", label: "Monthly Fixed Expenses", value: .currency(fixedExpenses)),
+                SpendSenseMetric(id: "subscription.income.monthly", label: "Monthly Income", value: .currency(income)),
+                SpendSenseMetric(id: "subscription.fixed.ratio", label: "Percent of Income", value: .percentage(ratioAsDouble)),
+                SpendSenseMetric(id: "subscription.fixed.annualized", label: "Annualized Fixed Expenses", value: .currency(annualizedFixedExpenses)),
             ],
             action: nil,
             relevantDate: month.start,

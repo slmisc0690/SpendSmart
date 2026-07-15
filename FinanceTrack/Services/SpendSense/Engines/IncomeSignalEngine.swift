@@ -5,7 +5,7 @@ import Foundation
 /// equivalent total comes from `MonthlyPlanCalculator.estimatedMonthlyIncome`; this engine never
 /// sums `IncomeSource` amounts, converts frequencies, or reimplements one-time-date inclusion
 /// itself.
-struct IncomeSignalEngine: SmartSignalEngine {
+struct IncomeSignalEngine: SpendSenseEngine {
 
     // MARK: - Tunables
 
@@ -13,14 +13,14 @@ struct IncomeSignalEngine: SmartSignalEngine {
     /// the boundary comparison (`>=`) is never affected by binary floating-point imprecision.
     private static let concentrationThreshold = Decimal(80) / Decimal(100)
 
-    func generateSignals(context: SmartSignalContext) -> [SmartSignal] {
+    func generateSignals(context: SpendSenseContext) -> [SpendSenseSignal] {
         guard let signal = generateConcentrationSignal(context: context) else { return [] }
         return [signal]
     }
 
     // MARK: - Income-concentration rule
 
-    private func generateConcentrationSignal(context: SmartSignalContext) -> SmartSignal? {
+    private func generateConcentrationSignal(context: SpendSenseContext) -> SpendSenseSignal? {
         guard !context.incomeSources.isEmpty else { return nil }
 
         let calendar = Calendar.current
@@ -40,7 +40,7 @@ struct IncomeSignalEngine: SmartSignalEngine {
         let annualizedIncome = totalMonthlyIncome * Decimal(12)
         let ratioAsDouble = NSDecimalNumber(decimal: concentrationRatio).doubleValue
 
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "income.concentration",
             deduplicationID: "income.concentration",
             category: .income,
@@ -50,10 +50,10 @@ struct IncomeSignalEngine: SmartSignalEngine {
             title: "Most of Your Income Comes From One Source",
             explanation: "Your largest estimated income source represents \(formatPercentage(ratioAsDouble)) of your estimated monthly income (\(formatCurrency(largestMonthlyIncome)) of \(formatCurrency(totalMonthlyIncome))).",
             metrics: [
-                SmartSignalMetric(id: "income.total.monthly", label: "Monthly Income", value: .currency(totalMonthlyIncome)),
-                SmartSignalMetric(id: "income.largest-source.monthly", label: "Largest Income Source", value: .currency(largestMonthlyIncome)),
-                SmartSignalMetric(id: "income.concentration.ratio", label: "Income Concentration", value: .percentage(ratioAsDouble)),
-                SmartSignalMetric(id: "income.total.annualized", label: "Annualized Income", value: .currency(annualizedIncome)),
+                SpendSenseMetric(id: "income.total.monthly", label: "Monthly Income", value: .currency(totalMonthlyIncome)),
+                SpendSenseMetric(id: "income.largest-source.monthly", label: "Largest Income Source", value: .currency(largestMonthlyIncome)),
+                SpendSenseMetric(id: "income.concentration.ratio", label: "Income Concentration", value: .percentage(ratioAsDouble)),
+                SpendSenseMetric(id: "income.total.annualized", label: "Annualized Income", value: .currency(annualizedIncome)),
             ],
             action: nil,
             relevantDate: currentMonth.start,

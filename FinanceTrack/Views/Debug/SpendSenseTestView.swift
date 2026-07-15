@@ -2,9 +2,9 @@
 import SwiftUI
 import SwiftData
 
-/// One built-in scenario `SmartSignalsTestView` can drive the real `SmartSignalsEngine` against.
+/// One built-in scenario `SpendSenseTestView` can drive the real `SpendSenseCoordinator` against.
 /// Purely a DEBUG identifier list — carries no data itself.
-enum SmartSignalsTestScenario: String, CaseIterable, Identifiable {
+enum SpendSenseTestScenario: String, CaseIterable, Identifiable {
     case noSignals = "No Signals"
     case budgetExceeded = "Budget Exceeded"
     case budgetNearlyReached = "Budget Nearly Reached"
@@ -19,19 +19,19 @@ enum SmartSignalsTestScenario: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Builds a deterministic, in-memory-only `SmartSignalContext` for each `SmartSignalsTestScenario`
+/// Builds a deterministic, in-memory-only `SpendSenseContext` for each `SpendSenseTestScenario`
 /// — never inserts into a `ModelContext`, never saves, never touches the user's real data. Every
 /// model value here is a plain, un-persisted Swift object; nothing in this type has a code path
-/// that reaches SwiftData. DEBUG-only, exists solely to drive `SmartSignalsTestView` (and its
-/// factory-level unit tests) against the real `SmartSignalsEngine` and real calculators — it
-/// never fabricates a `SmartSignal` directly.
-enum SmartSignalsTestScenarioFactory {
-    /// `SmartSignalsEngine` has no parameterless initializer — this mirrors the project's own
-    /// established default engine composition and order (see `SmartSignalsEngine`'s doc comments
+/// that reaches SwiftData. DEBUG-only, exists solely to drive `SpendSenseTestView` (and its
+/// factory-level unit tests) against the real `SpendSenseCoordinator` and real calculators — it
+/// never fabricates a `SpendSenseSignal` directly.
+enum SpendSenseTestScenarioFactory {
+    /// `SpendSenseCoordinator` has no parameterless initializer — this mirrors the project's own
+    /// established default engine composition and order (see `SpendSenseCoordinator`'s doc comments
     /// and `testRemainingPlaceholderEnginesHandleEmptyAndSparseContextsSafely`), so both the DEBUG
     /// harness and its tests exercise the exact same real coordinator setup a production call
     /// site would use.
-    static var defaultEngines: [any SmartSignalEngine] {
+    static var defaultEngines: [any SpendSenseEngine] {
         [
             BudgetSignalEngine(),
             SpendingSignalEngine(),
@@ -83,8 +83,8 @@ enum SmartSignalsTestScenarioFactory {
         incomeSources: [IncomeSource] = [],
         recurringExpenses: [RecurringExpense] = [],
         budgetSettings: BudgetSettings? = nil
-    ) -> SmartSignalContext {
-        SmartSignalContext(
+    ) -> SpendSenseContext {
+        SpendSenseContext(
             transactions: transactions,
             accounts: [],
             categories: [],
@@ -96,7 +96,7 @@ enum SmartSignalsTestScenarioFactory {
         )
     }
 
-    static func context(for scenario: SmartSignalsTestScenario) -> SmartSignalContext {
+    static func context(for scenario: SpendSenseTestScenario) -> SpendSenseContext {
         switch scenario {
         case .noSignals:
             return makeContext()
@@ -168,11 +168,11 @@ enum SmartSignalsTestScenarioFactory {
     }
 }
 
-/// DEBUG-only physical-device harness for exercising the real, completed `SmartSignalsEngine`.
+/// DEBUG-only physical-device harness for exercising the real, completed `SpendSenseCoordinator`.
 /// Never writes to SwiftData in either mode: Live Data only *reads* the current `@Query` arrays,
-/// and Test Scenarios builds entirely in-memory contexts via `SmartSignalsTestScenarioFactory`.
+/// and Test Scenarios builds entirely in-memory contexts via `SpendSenseTestScenarioFactory`.
 /// Excluded from Release by the `#if DEBUG` wrapping this entire file.
-struct SmartSignalsTestView: View {
+struct SpendSenseTestView: View {
     private enum Mode: String, CaseIterable, Identifiable {
         case liveData = "Live Data"
         case testScenarios = "Test Scenarios"
@@ -190,8 +190,8 @@ struct SmartSignalsTestView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var mode: Mode = .liveData
-    @State private var selectedScenario: SmartSignalsTestScenario = .noSignals
-    @State private var signals: [SmartSignal] = []
+    @State private var selectedScenario: SpendSenseTestScenario = .noSignals
+    @State private var signals: [SpendSenseSignal] = []
     @State private var lastRefreshDate: Date?
 
     var body: some View {
@@ -209,7 +209,7 @@ struct SmartSignalsTestView: View {
                 .padding(Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
-            .navigationTitle("Smart Signals Test")
+            .navigationTitle("Spend Sense Test")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -250,7 +250,7 @@ struct SmartSignalsTestView: View {
 
     private var scenarioPicker: some View {
         Menu {
-            ForEach(SmartSignalsTestScenario.allCases) { scenario in
+            ForEach(SpendSenseTestScenario.allCases) { scenario in
                 Button {
                     selectedScenario = scenario
                 } label: {
@@ -295,7 +295,7 @@ struct SmartSignalsTestView: View {
     @ViewBuilder
     private var signalList: some View {
         if signals.isEmpty {
-            Text("No Smart Signals qualified for this data.")
+            Text("No Spend Sense qualified for this data.")
                 .font(Theme.bodyFont)
                 .foregroundStyle(Theme.textTertiary)
         } else {
@@ -307,7 +307,7 @@ struct SmartSignalsTestView: View {
         }
     }
 
-    private func signalCard(_ signal: SmartSignal) -> some View {
+    private func signalCard(_ signal: SpendSenseSignal) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(signal.title)
                 .font(Theme.headlineFont)
@@ -361,7 +361,7 @@ struct SmartSignalsTestView: View {
     /// `BudgetSignalEngine`/`SpendingSignalEngine`/`SubscriptionSignalEngine`/`IncomeSignalEngine`'s
     /// private helpers): `en_US` currency style, and a percentage fraction (`0.60`) rendered as a
     /// rounded whole percent (`60%`).
-    private func formattedMetricValue(_ value: SmartSignalMetric.Value) -> String {
+    private func formattedMetricValue(_ value: SpendSenseMetric.Value) -> String {
         switch value {
         case .currency(let amount):
             let formatter = NumberFormatter()
@@ -381,14 +381,14 @@ struct SmartSignalsTestView: View {
 
     /// `Date()` is allowed only here, only for Live Data mode, only because the user explicitly
     /// tapped Refresh (or the screen just appeared) to evaluate against the current moment on
-    /// their own device — never inside a Smart Signal engine, which always takes its evaluation
+    /// their own device — never inside a Spend Sense engine, which always takes its evaluation
     /// date from the caller-supplied `context.now`.
     private func refresh() {
-        let context: SmartSignalContext
+        let context: SpendSenseContext
         switch mode {
         case .liveData:
             let evaluationDate = Date()
-            context = SmartSignalContext(
+            context = SpendSenseContext(
                 transactions: transactions,
                 accounts: accounts,
                 categories: categories,
@@ -400,16 +400,16 @@ struct SmartSignalsTestView: View {
             )
             lastRefreshDate = evaluationDate
         case .testScenarios:
-            context = SmartSignalsTestScenarioFactory.context(for: selectedScenario)
+            context = SpendSenseTestScenarioFactory.context(for: selectedScenario)
             lastRefreshDate = context.now
         }
-        let engine = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines)
+        let engine = SpendSenseCoordinator(engines: SpendSenseTestScenarioFactory.defaultEngines)
         signals = engine.generateSignals(context: context)
     }
 }
 
 #Preview {
-    SmartSignalsTestView()
+    SpendSenseTestView()
         .modelContainer(SampleData.previewContainer)
 }
 #endif

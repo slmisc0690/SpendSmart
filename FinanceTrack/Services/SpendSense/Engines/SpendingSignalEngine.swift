@@ -11,7 +11,7 @@ import Foundation
 /// comparable period (never the full previous period) — see `comparableIntervals`. This keeps an
 /// early-in-the-period comparison fair: three days into this week is compared against the first
 /// three days of last week, not all seven.
-struct SpendingSignalEngine: SmartSignalEngine {
+struct SpendingSignalEngine: SpendSenseEngine {
 
     // MARK: - Tunables
 
@@ -27,12 +27,12 @@ struct SpendingSignalEngine: SmartSignalEngine {
     private static let monthlyPercentageThreshold = Decimal(30) / Decimal(100)
     private static let monthlyAbsoluteThreshold: Decimal = 100
 
-    func generateSignals(context: SmartSignalContext) -> [SmartSignal] {
+    func generateSignals(context: SpendSenseContext) -> [SpendSenseSignal] {
         let calendar = Calendar.current
         let weekStartsOnSunday = context.budgetSettings?.weekStartsOnSunday ?? true
         let includePending = context.budgetSettings?.includePendingTransactions ?? true
 
-        var signals: [SmartSignal] = []
+        var signals: [SpendSenseSignal] = []
         if let weekly = generateWeeklySignal(context: context, calendar: calendar, weekStartsOnSunday: weekStartsOnSunday, includePending: includePending) {
             signals.append(weekly)
         }
@@ -45,11 +45,11 @@ struct SpendingSignalEngine: SmartSignalEngine {
     // MARK: - Weekly rule
 
     private func generateWeeklySignal(
-        context: SmartSignalContext,
+        context: SpendSenseContext,
         calendar: Calendar,
         weekStartsOnSunday: Bool,
         includePending: Bool
-    ) -> SmartSignal? {
+    ) -> SpendSenseSignal? {
         let currentWeek = DateRangeHelper.weekRangeContaining(context.now, weekStartsOnSunday: weekStartsOnSunday, calendar: calendar)
 
         let elapsed = context.now.timeIntervalSince(currentWeek.start)
@@ -69,10 +69,10 @@ struct SpendingSignalEngine: SmartSignalEngine {
         let percentageIncrease = absoluteIncrease / previousSpend
         guard percentageIncrease >= Self.weeklyPercentageThreshold, absoluteIncrease >= Self.weeklyAbsoluteThreshold else { return nil }
 
-        let confidence: SmartSignalConfidence = elapsed >= Self.weeklyHighConfidenceElapsedSeconds ? .high : .medium
+        let confidence: SpendSenseConfidence = elapsed >= Self.weeklyHighConfidenceElapsedSeconds ? .high : .medium
         let percentageIncreaseAsDouble = NSDecimalNumber(decimal: percentageIncrease).doubleValue
 
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "spending.week.higher-than-previous",
             deduplicationID: "spending.week.higher-than-previous",
             category: .spending,
@@ -82,9 +82,9 @@ struct SpendingSignalEngine: SmartSignalEngine {
             title: "Spending Up This Week",
             explanation: "You've spent \(formatCurrency(currentSpend)) so far this week, compared to \(formatCurrency(previousSpend)) during the same portion of last week — an increase of \(formatPercentage(percentageIncreaseAsDouble)).",
             metrics: [
-                SmartSignalMetric(id: "spending.week.current", label: "This Week", value: .currency(currentSpend)),
-                SmartSignalMetric(id: "spending.week.previous", label: "Previous Week", value: .currency(previousSpend)),
-                SmartSignalMetric(id: "spending.week.increase", label: "Increase", value: .percentage(percentageIncreaseAsDouble)),
+                SpendSenseMetric(id: "spending.week.current", label: "This Week", value: .currency(currentSpend)),
+                SpendSenseMetric(id: "spending.week.previous", label: "Previous Week", value: .currency(previousSpend)),
+                SpendSenseMetric(id: "spending.week.increase", label: "Increase", value: .percentage(percentageIncreaseAsDouble)),
             ],
             action: nil,
             relevantDate: currentWeek.start,
@@ -95,10 +95,10 @@ struct SpendingSignalEngine: SmartSignalEngine {
     // MARK: - Monthly rule
 
     private func generateMonthlySignal(
-        context: SmartSignalContext,
+        context: SpendSenseContext,
         calendar: Calendar,
         includePending: Bool
-    ) -> SmartSignal? {
+    ) -> SpendSenseSignal? {
         let currentMonth = DateRangeHelper.monthRangeContaining(context.now, calendar: calendar)
 
         let elapsed = context.now.timeIntervalSince(currentMonth.start)
@@ -117,10 +117,10 @@ struct SpendingSignalEngine: SmartSignalEngine {
         let percentageIncrease = absoluteIncrease / previousSpend
         guard percentageIncrease >= Self.monthlyPercentageThreshold, absoluteIncrease >= Self.monthlyAbsoluteThreshold else { return nil }
 
-        let confidence: SmartSignalConfidence = elapsed >= Self.monthlyHighConfidenceElapsedSeconds ? .high : .medium
+        let confidence: SpendSenseConfidence = elapsed >= Self.monthlyHighConfidenceElapsedSeconds ? .high : .medium
         let percentageIncreaseAsDouble = NSDecimalNumber(decimal: percentageIncrease).doubleValue
 
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "spending.month.higher-than-previous",
             deduplicationID: "spending.month.higher-than-previous",
             category: .spending,
@@ -130,9 +130,9 @@ struct SpendingSignalEngine: SmartSignalEngine {
             title: "Spending Up This Month",
             explanation: "You've spent \(formatCurrency(currentSpend)) so far this month, compared to \(formatCurrency(previousSpend)) during the same portion of last month — an increase of \(formatPercentage(percentageIncreaseAsDouble)).",
             metrics: [
-                SmartSignalMetric(id: "spending.month.current", label: "This Month", value: .currency(currentSpend)),
-                SmartSignalMetric(id: "spending.month.previous", label: "Previous Month", value: .currency(previousSpend)),
-                SmartSignalMetric(id: "spending.month.increase", label: "Increase", value: .percentage(percentageIncreaseAsDouble)),
+                SpendSenseMetric(id: "spending.month.current", label: "This Month", value: .currency(currentSpend)),
+                SpendSenseMetric(id: "spending.month.previous", label: "Previous Month", value: .currency(previousSpend)),
+                SpendSenseMetric(id: "spending.month.increase", label: "Increase", value: .percentage(percentageIncreaseAsDouble)),
             ],
             action: nil,
             relevantDate: currentMonth.start,
@@ -177,7 +177,7 @@ struct SpendingSignalEngine: SmartSignalEngine {
     }
 
     /// Mirrors `BudgetSignalEngine`'s private percentage formatting exactly (same rounding, same
-    /// `%` suffix), taking the same `Double` fraction shape `SmartSignalMetric.Value.percentage`
+    /// `%` suffix), taking the same `Double` fraction shape `SpendSenseMetric.Value.percentage`
     /// already requires.
     private func formatPercentage(_ fraction: Double) -> String {
         "\(Int((fraction * 100).rounded()))%"

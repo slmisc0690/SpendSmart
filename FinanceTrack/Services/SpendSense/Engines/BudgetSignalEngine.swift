@@ -14,7 +14,7 @@ import Foundation
 ///
 /// Because these are independent, this engine may return one signal for each — never more than
 /// one PRIMARY status signal per period, per the precedence in `signal(for:context:)`.
-struct BudgetSignalEngine: SmartSignalEngine {
+struct BudgetSignalEngine: SpendSenseEngine {
 
     // MARK: - Tunables
 
@@ -30,7 +30,7 @@ struct BudgetSignalEngine: SmartSignalEngine {
     /// confidence rather than medium.
     private static let highConfidenceElapsedFraction = 0.40
 
-    func generateSignals(context: SmartSignalContext) -> [SmartSignal] {
+    func generateSignals(context: SpendSenseContext) -> [SpendSenseSignal] {
         [
             signal(for: .weekly, context: context),
             signal(for: .monthly, context: context),
@@ -51,7 +51,7 @@ struct BudgetSignalEngine: SmartSignalEngine {
 
     /// `nil` when this period's budget is absent, zero, or otherwise not configured — the engine
     /// must produce no signal in every one of those cases, never guess at intent.
-    private func resolvePeriod(_ period: BudgetPeriod, context: SmartSignalContext) -> ResolvedPeriod? {
+    private func resolvePeriod(_ period: BudgetPeriod, context: SpendSenseContext) -> ResolvedPeriod? {
         guard let settings = context.budgetSettings else { return nil }
         switch period {
         case .weekly:
@@ -67,7 +67,7 @@ struct BudgetSignalEngine: SmartSignalEngine {
 
     // MARK: - Per-period evaluation
 
-    private func signal(for period: BudgetPeriod, context: SmartSignalContext) -> SmartSignal? {
+    private func signal(for period: BudgetPeriod, context: SpendSenseContext) -> SpendSenseSignal? {
         guard let resolved = resolvePeriod(period, context: context) else { return nil }
 
         let includePending = context.budgetSettings?.includePendingTransactions ?? true
@@ -106,10 +106,10 @@ struct BudgetSignalEngine: SmartSignalEngine {
         spent: Decimal,
         overage: Decimal,
         progress: Double,
-        context: SmartSignalContext
-    ) -> SmartSignal {
+        context: SpendSenseContext
+    ) -> SpendSenseSignal {
         let noun = periodBudgetNoun(period)
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "budget.\(period.rawValue).exceeded",
             deduplicationID: "budget.\(period.rawValue).exceeded",
             category: .budget,
@@ -119,9 +119,9 @@ struct BudgetSignalEngine: SmartSignalEngine {
             title: "\(periodAdjective(period)) \(noun.capitalizedNoun) Exceeded",
             explanation: "You've spent \(formatCurrency(spent)) against your \(formatCurrency(resolved.limit)) \(noun.lowercaseNoun) — \(formatCurrency(overage)) over.",
             metrics: [
-                SmartSignalMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
-                SmartSignalMetric(id: "budget.overage", label: "Over Budget", value: .currency(overage)),
-                SmartSignalMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
+                SpendSenseMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
+                SpendSenseMetric(id: "budget.overage", label: "Over Budget", value: .currency(overage)),
+                SpendSenseMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
             ],
             action: nil,
             relevantDate: resolved.interval.start,
@@ -135,10 +135,10 @@ struct BudgetSignalEngine: SmartSignalEngine {
         spent: Decimal,
         remaining: Decimal,
         progress: Double,
-        context: SmartSignalContext
-    ) -> SmartSignal {
+        context: SpendSenseContext
+    ) -> SpendSenseSignal {
         let noun = periodBudgetNoun(period)
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "budget.\(period.rawValue).nearly-reached",
             deduplicationID: "budget.\(period.rawValue).nearly-reached",
             category: .budget,
@@ -148,9 +148,9 @@ struct BudgetSignalEngine: SmartSignalEngine {
             title: "\(periodAdjective(period)) \(noun.capitalizedNoun) Nearly Reached",
             explanation: "You've used \(formatPercentage(progress)) of your \(periodAdjective(period).lowercased()) \(noun.lowercaseNoun), with \(formatCurrency(remaining)) remaining.",
             metrics: [
-                SmartSignalMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
-                SmartSignalMetric(id: "budget.remaining", label: "Remaining", value: .currency(remaining)),
-                SmartSignalMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
+                SpendSenseMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
+                SpendSenseMetric(id: "budget.remaining", label: "Remaining", value: .currency(remaining)),
+                SpendSenseMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
             ],
             action: nil,
             relevantDate: resolved.interval.start,
@@ -164,10 +164,10 @@ struct BudgetSignalEngine: SmartSignalEngine {
         spent: Decimal,
         remaining: Decimal,
         progress: Double,
-        context: SmartSignalContext
-    ) -> SmartSignal {
+        context: SpendSenseContext
+    ) -> SpendSenseSignal {
         let noun = periodBudgetNoun(period)
-        return SmartSignal(
+        return SpendSenseSignal(
             id: "budget.\(period.rawValue).halfway",
             deduplicationID: "budget.\(period.rawValue).halfway",
             category: .budget,
@@ -177,9 +177,9 @@ struct BudgetSignalEngine: SmartSignalEngine {
             title: "\(periodAdjective(period)) Spending Update",
             explanation: "You've used \(formatPercentage(progress)) of your \(periodAdjective(period).lowercased()) \(noun.lowercaseNoun), with \(formatCurrency(remaining)) remaining.",
             metrics: [
-                SmartSignalMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
-                SmartSignalMetric(id: "budget.remaining", label: "Remaining", value: .currency(remaining)),
-                SmartSignalMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
+                SpendSenseMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
+                SpendSenseMetric(id: "budget.remaining", label: "Remaining", value: .currency(remaining)),
+                SpendSenseMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
             ],
             action: nil,
             relevantDate: resolved.interval.start,
@@ -196,14 +196,14 @@ struct BudgetSignalEngine: SmartSignalEngine {
         spent: Decimal,
         remaining: Decimal,
         progress: Double,
-        context: SmartSignalContext
-    ) -> SmartSignal? {
+        context: SpendSenseContext
+    ) -> SpendSenseSignal? {
         let elapsed = elapsedFraction(of: resolved.interval, now: context.now)
         guard elapsed >= Self.minimumElapsedFractionForOnTrackSignal else { return nil }
 
         let noun = periodBudgetNoun(period)
-        let confidence: SmartSignalConfidence = elapsed >= Self.highConfidenceElapsedFraction ? .high : .medium
-        return SmartSignal(
+        let confidence: SpendSenseConfidence = elapsed >= Self.highConfidenceElapsedFraction ? .high : .medium
+        return SpendSenseSignal(
             id: "budget.\(period.rawValue).on-track",
             deduplicationID: "budget.\(period.rawValue).on-track",
             category: .positive,
@@ -213,9 +213,9 @@ struct BudgetSignalEngine: SmartSignalEngine {
             title: "\(periodAdjective(period)) Spending On Track",
             explanation: "You're currently using less than half of your \(periodAdjective(period).lowercased()) \(noun.lowercaseNoun), with \(formatCurrency(remaining)) remaining.",
             metrics: [
-                SmartSignalMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
-                SmartSignalMetric(id: "budget.remaining", label: "Remaining", value: .currency(remaining)),
-                SmartSignalMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
+                SpendSenseMetric(id: "budget.progress", label: "Progress", value: .percentage(progress)),
+                SpendSenseMetric(id: "budget.remaining", label: "Remaining", value: .currency(remaining)),
+                SpendSenseMetric(id: "budget.spent", label: "Spent", value: .currency(spent)),
             ],
             action: nil,
             relevantDate: resolved.interval.start,

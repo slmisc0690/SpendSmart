@@ -77,7 +77,7 @@ final class Account {
 
     /// Whether this account's transactions may appear in the Dashboard's Recent Activity list —
     /// purely a display filter; never affects the account balance, spending eligibility, budget
-    /// calculations, or Budget Smart Signals. `true` is the schema-level default so every
+    /// calculations, or Budget Spend Sense. `true` is the schema-level default so every
     /// pre-existing account (whose activity already appeared in Recent Activity before this
     /// setting existed) keeps that exact behavior after a lightweight SwiftData migration
     /// backfills this field, and so a brand-new account also starts visible — same pattern as
