@@ -6056,6 +6056,116 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(coordinator.generateSignals(context: context), coordinator.generateSignals(context: context))
     }
 
+    #if DEBUG
+    // MARK: - SmartSignalsTestScenarioFactory (DEBUG physical-device harness)
+
+    func testNoSignalsScenarioProducesNoSignals() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .noSignals)
+        XCTAssertTrue(SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context).isEmpty)
+    }
+
+    func testBudgetExceededScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .budgetExceeded)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.exceeded")
+        XCTAssertEqual(signals.first?.priority, 400)
+    }
+
+    func testBudgetNearlyReachedScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .budgetNearlyReached)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.nearly-reached")
+        XCTAssertEqual(signals.first?.priority, 300)
+    }
+
+    func testBudgetHalfwayScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .budgetHalfway)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.halfway")
+        XCTAssertEqual(signals.first?.priority, 200)
+    }
+
+    func testBudgetOnTrackScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .budgetOnTrack)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals.first?.id, "budget.weekly.on-track")
+        XCTAssertEqual(signals.first?.priority, 100)
+    }
+
+    func testWeeklySpendingIncreaseScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .weeklySpendingIncrease)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals.first?.id, "spending.week.higher-than-previous")
+        XCTAssertEqual(signals.first?.title, "Spending Up This Week")
+        XCTAssertEqual(signals.first?.priority, 250)
+    }
+
+    func testMonthlySpendingIncreaseScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .monthlySpendingIncrease)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals.first?.id, "spending.month.higher-than-previous")
+        XCTAssertEqual(signals.first?.title, "Spending Up This Month")
+        XCTAssertEqual(signals.first?.priority, 220)
+    }
+
+    func testSubscriptionFixedExpenseRatioScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .subscriptionFixedExpenseRatio)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        guard let signal = signals.first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.title, "Fixed Expenses Are a Large Share of Income")
+        XCTAssertEqual(signal.priority, 150)
+        guard case .percentage(let ratio) = signal.metrics.first(where: { $0.id == "subscription.fixed.ratio" })?.value else {
+            return XCTFail("Expected a percentage metric")
+        }
+        XCTAssertEqual(ratio, 0.6, accuracy: 0.0001)
+        guard case .currency(let annualized) = signal.metrics.first(where: { $0.id == "subscription.fixed.annualized" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(annualized, 28_800)
+    }
+
+    func testIncomeConcentrationScenarioProducesExpectedSignal() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .incomeConcentration)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.count, 1)
+        guard let signal = signals.first else { return XCTFail("Expected a signal") }
+        XCTAssertEqual(signal.title, "Most of Your Income Comes From One Source")
+        XCTAssertEqual(signal.priority, 110)
+        guard case .currency(let annualized) = signal.metrics.first(where: { $0.id == "income.total.annualized" })?.value else {
+            return XCTFail("Expected a currency metric")
+        }
+        XCTAssertEqual(annualized, 60_000)
+    }
+
+    func testAllSignalsScenarioProducesExpectedSignalsInPriorityOrder() {
+        let context = SmartSignalsTestScenarioFactory.context(for: .allSignals)
+        let signals = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines).generateSignals(context: context)
+        XCTAssertEqual(signals.map(\.id), [
+            "budget.weekly.exceeded",
+            "spending.week.higher-than-previous",
+            "spending.month.higher-than-previous",
+            "subscription.fixed-expense-ratio",
+            "income.concentration",
+        ])
+        XCTAssertEqual(signals.map(\.priority), [400, 250, 220, 150, 110])
+    }
+
+    func testScenarioFactoryRepeatedGenerationRemainsDeterministic() {
+        for scenario in SmartSignalsTestScenario.allCases {
+            let context = SmartSignalsTestScenarioFactory.context(for: scenario)
+            let engine = SmartSignalsEngine(engines: SmartSignalsTestScenarioFactory.defaultEngines)
+            XCTAssertEqual(engine.generateSignals(context: context), engine.generateSignals(context: context), "\(scenario.rawValue) must be deterministic")
+        }
+    }
+    #endif
+
     // MARK: - Manual Account deposits
 
     func testExpenseSaveBehaviorRemainsUnchanged() {

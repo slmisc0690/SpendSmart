@@ -30,6 +30,9 @@ struct SettingsView: View {
     @State private var isPresentingInsights = false
     @State private var isPresentingDataBackup = false
     @State private var isPresentingAccount = false
+    #if DEBUG
+    @State private var isPresentingSmartSignalsTest = false
+    #endif
 
     private var settings: BudgetSettings {
         if let existing = settingsList.first {
@@ -76,6 +79,9 @@ struct SettingsView: View {
                     securitySection
                     categoriesSection
                     dataSection
+                    #if DEBUG
+                    debugSection
+                    #endif
                     aboutSection
                 }
                 .padding(.vertical, Theme.Spacing.lg)
@@ -124,6 +130,11 @@ struct SettingsView: View {
             .sheet(isPresented: $isPresentingAccount) {
                 AccountView()
             }
+            #if DEBUG
+            .sheet(isPresented: $isPresentingSmartSignalsTest) {
+                SmartSignalsTestView()
+            }
+            #endif
             .confirmationDialog(
                 "Reset All Data?",
                 isPresented: $isPresentingResetConfirmation,
@@ -541,6 +552,39 @@ struct SettingsView: View {
             .padding(.horizontal, Theme.Spacing.lg)
         }
     }
+
+    // MARK: - E2. Debug (DEBUG builds only — never present in Release/TestFlight/App Store)
+
+    #if DEBUG
+    private var debugSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Debug")
+
+            CardBackground {
+                Button {
+                    isPresentingSmartSignalsTest = true
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Smart Signals Test")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("DEBUG only \u{2014} exercises the real Smart Signals engine without saving data")
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+    #endif
 
     // MARK: - F. About
 

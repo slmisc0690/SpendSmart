@@ -87,6 +87,7 @@
 		89B25CB32B22A52B89B3FA91 /* AmountText.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03BB75866DB8851C08F0FD4 /* AmountText.swift */; };
 		8B657528068098B350CCBA1E /* SpendSmartLogo.jpg in Resources */ = {isa = PBXBuildFile; fileRef = B1CC778D0D787A09E1B1D546 /* SpendSmartLogo.jpg */; };
 		8E865ECE128EE599A83B1B44 /* TransactionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A679BB76D8D2E20520E7CCC /* TransactionRow.swift */; };
+		945081ADE53160E9AA7F2A37 /* SmartSignalsTestView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7E5DD7DB715A15E603FF554 /* SmartSignalsTestView.swift */; };
 		9898DFD317439CB56240B0C6 /* LabeledPickerRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB0FEB88F317B1405E32857 /* LabeledPickerRow.swift */; };
 		9B1BF03FA6375A830F24E50C /* SpendingSignalEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B977EC9A67E8279667B544 /* SpendingSignalEngine.swift */; };
 		A4C88AD2200F5DA233E1293E /* FinanceTrackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A24401D381085E1EB8FF0371 /* FinanceTrackTests.swift */; };
@@ -258,6 +259,7 @@
 		C529927E29105333BC1C9141 /* AppLockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockView.swift; sourceTree = "<group>"; };
 		C68CBFE364E205A3AF240CB1 /* MonthlyPlanHeroCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonthlyPlanHeroCard.swift; sourceTree = "<group>"; };
 		C6B6979DB6C9A05A6D425FFC /* ConnectedAccountsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectedAccountsView.swift; sourceTree = "<group>"; };
+		C7E5DD7DB715A15E603FF554 /* SmartSignalsTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartSignalsTestView.swift; sourceTree = "<group>"; };
 		C89D36371B802ECDAD1CA3F0 /* CreditCardPaymentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreditCardPaymentView.swift; sourceTree = "<group>"; };
 		C8A0868033FCD294FA0FC093 /* EmptyStateCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateCard.swift; sourceTree = "<group>"; };
 		C8B61A30FB32BE57567FBB0D /* FinanceTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinanceTransaction.swift; sourceTree = "<group>"; };
@@ -372,6 +374,7 @@
 				D064DE16636B706F27BC867D /* Accounts */,
 				1C13BFE9E0DD193E1DF8A4FF /* Components */,
 				CBD12D60F6FC7CED31682991 /* Dashboard */,
+				46E3BB4FA857B93769206DA2 /* Debug */,
 				2EDDC4DDAD4CDC79ECB831AD /* Expenses */,
 				DEFC71790CA2383A60ED2BEB /* Monthly */,
 				40FC47BFD5BAF093284240E4 /* MonthlyPlan */,
@@ -420,6 +423,14 @@
 				7DFE3079FF8189C02742006A /* FinanceTrackTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		46E3BB4FA857B93769206DA2 /* Debug */ = {
+			isa = PBXGroup;
+			children = (
+				C7E5DD7DB715A15E603FF554 /* SmartSignalsTestView.swift */,
+			);
+			path = Debug;
 			sourceTree = "<group>";
 		};
 		485C9BA3F06E049E56DF7CF7 /* App */ = {
@@ -831,6 +842,7 @@
 				C1F621F9C1B470982ED7EF9D /* SmartSignalRanking.swift in Sources */,
 				1F1DAA097E2DEE576DD76A02 /* SmartSignalSeverity.swift in Sources */,
 				A712EF8F57332B70513C4448 /* SmartSignalsEngine.swift in Sources */,
+				945081ADE53160E9AA7F2A37 /* SmartSignalsTestView.swift in Sources */,
 				6746679D56B60CC7277D19F6 /* SpendSmartBackupService.swift in Sources */,
 				493CA94586D7DEA8B1FFA6F5 /* SpendSmartQueryEngine.swift in Sources */,
 				6BEC2460FF0BE9D10B35CFE1 /* SpendingCardView.swift in Sources */,
