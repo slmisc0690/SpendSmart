@@ -14,6 +14,7 @@ import {
   createPrivilegedClient,
   jsonResponse,
   loadPlaidCredentials,
+  logPlaidOperation,
   logSafeError,
   plaidFetch,
   requireAuthenticatedUserId,
@@ -25,6 +26,8 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
+
+  console.log("[delete-account] handler entered");
 
   const supabase = createPrivilegedClient();
 
@@ -45,6 +48,9 @@ Deno.serve(async (req) => {
       .eq("user_id", userId);
     if (fetchError) throw fetchError;
 
+    let revokedCount = 0;
+    let skippedCount = 0;
+
     // Read once — an Item created under a different Plaid environment than the one this server is
     // currently active under must never have its access_token sent to the CURRENT host (see
     // assertItemEnvironmentMatches's doc comment). Account deletion itself must still proceed
@@ -58,10 +64,12 @@ Deno.serve(async (req) => {
           "delete-account: skipped revoking a Plaid item created under a different environment",
           new SafeError(`item environment="${item.environment ?? "unknown"}" active="${activeEnvironment}"`),
         );
+        skippedCount += 1;
         continue;
       }
       try {
         await plaidFetch("/item/remove", { access_token: item.access_token });
+        revokedCount += 1;
       } catch (revokeError) {
         logSafeError("delete-account: failed to revoke a Plaid item", revokeError);
       }
@@ -76,6 +84,15 @@ Deno.serve(async (req) => {
 
     const { error: adminDeleteError } = await supabase.auth.admin.deleteUser(userId);
     if (adminDeleteError) throw adminDeleteError;
+
+    console.log("[delete-account] account deleted:", true);
+    logPlaidOperation({
+      operation: "delete-account",
+      outcome: "success",
+      environment: activeEnvironment,
+      accountCount: (items ?? []).length,
+    });
+    console.log("[delete-account] plaid items revoked:", revokedCount, "skipped (environment mismatch):", skippedCount);
 
     return jsonResponse({ deleted: true });
   } catch (error) {

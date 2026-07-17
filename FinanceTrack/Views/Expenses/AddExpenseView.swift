@@ -8,6 +8,7 @@ struct AddExpenseView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(PrivacyModeManager.self) private var privacyMode
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @Query(sort: \Category.name) private var allCategories: [Category]
@@ -17,6 +18,12 @@ struct AddExpenseView: View {
     @State private var date: Date = .now
     @State private var type: TransactionType = .expense
     @State private var selectedAccount: Account?
+    /// Only used when `isManualAccountEntry` is false — the Plaid `account_id` this general Manual
+    /// Transaction optionally identifies as "the card/account used." Never a Manual Account, never
+    /// written to `FinanceTransaction.account`; stored on `plaidAccountId` instead (see
+    /// `ConnectedAccountOptionPresenter`'s own doc comment for why that field is safe to reuse
+    /// here without confusing this transaction for a Plaid-imported one).
+    @State private var selectedConnectedAccountId: String?
     @State private var selectedCategory: Category?
     @State private var countsTowardWeeklyBudget: Bool
     @State private var countsTowardMonthlySpending: Bool
@@ -54,6 +61,15 @@ struct AddExpenseView: View {
         )
     }
 
+    /// True when this screen was opened from a specific Manual Account's own detail/register
+    /// screen (`preselectedAccount` was passed) — that flow keeps its exact existing behavior
+    /// unchanged: a required `Account`, the full `AccountPickerCard`, and an
+    /// `AccountBalanceManager` balance update on save. `false` means this is the general
+    /// Dashboard/Activity "Add Expense" flow, where no Manual Account can be selected at all (see
+    /// `connectedAccountSection`) — set once at `init` and never changed afterward, so which mode
+    /// this screen is in can never drift from how it was actually opened.
+    private let isManualAccountEntry: Bool
+
     /// Opening "Add Expense" from a specific account's own detail/register screen preselects
     /// that account. The four option toggles start from that account's own remembered
     /// preferences for the initial type (`.expense`) if any exist (see
@@ -62,6 +78,7 @@ struct AddExpenseView: View {
     /// performs on every later account/type change, kept inline here since `init` runs before
     /// `self` exists and can't call an instance method yet.
     init(preselectedAccount: Account? = nil) {
+        isManualAccountEntry = preselectedAccount != nil
         _selectedAccount = State(initialValue: preselectedAccount)
         let resolved = TransactionPreferenceStore().resolvedPreferences(
             accountID: preselectedAccount?.id,
@@ -121,7 +138,10 @@ struct AddExpenseView: View {
         } else if (amount ?? 0) <= 0 {
             messages.append("Amount must be greater than 0.")
         }
-        if selectedAccount == nil {
+        // Only the Manual Account flow requires an account — the general Dashboard/Activity flow
+        // never requires one; a connected account is an optional reference tag, never mandatory
+        // (see Phase 6's "No connected account selected" requirement).
+        if isManualAccountEntry, selectedAccount == nil {
             messages.append("Account is required.")
         }
         return messages
@@ -155,6 +175,7 @@ struct AddExpenseView: View {
         amount != nil
             || !note.trimmingCharacters(in: .whitespaces).isEmpty
             || selectedAccount != nil
+            || selectedConnectedAccountId != nil
             || selectedCategory != nil
     }
     private var shouldConfirmDiscard: Bool { hasMeaningfulInput }
@@ -172,22 +193,30 @@ struct AddExpenseView: View {
                     dateSection
                         .padding(.horizontal, Theme.Spacing.lg)
 
-                    if activeAccounts.isEmpty {
-                        EmptyStateCard(
-                            systemIconName: "creditcard.fill",
-                            message: "Add a manually tracked account before logging an expense. Connected banks and credit cards are managed in Connected Accounts.",
-                            actionTitle: "Add Manual Tracked Account"
-                        ) {
-                            isPresentingAddAccount = true
+                    if isManualAccountEntry {
+                        if activeAccounts.isEmpty {
+                            EmptyStateCard(
+                                systemIconName: "creditcard.fill",
+                                message: "Add a manually tracked account before logging an expense. Connected banks and credit cards are managed in Connected Accounts.",
+                                actionTitle: "Add Manual Tracked Account"
+                            ) {
+                                isPresentingAddAccount = true
+                            }
+                            .padding(.horizontal, Theme.Spacing.lg)
+                        } else {
+                            AccountPickerCard(
+                                accounts: activeAccounts,
+                                selectedAccount: $selectedAccount,
+                                isPrivacyModeEnabled: privacyMode.isEnabled
+                            )
+                            .padding(.horizontal, Theme.Spacing.lg)
                         }
-                        .padding(.horizontal, Theme.Spacing.lg)
                     } else {
-                        AccountPickerCard(
-                            accounts: activeAccounts,
-                            selectedAccount: $selectedAccount,
-                            isPrivacyModeEnabled: privacyMode.isEnabled
-                        )
-                        .padding(.horizontal, Theme.Spacing.lg)
+                        // General Dashboard/Activity flow — never lists a Manual Account (see
+                        // `isManualAccountEntry`'s own doc comment); optionally tags this
+                        // transaction with a connected Plaid account instead.
+                        connectedAccountSection
+                            .padding(.horizontal, Theme.Spacing.lg)
                     }
 
                     categoryAndDescriptionRow
@@ -348,6 +377,61 @@ struct AddExpenseView: View {
         }
     }
 
+    // MARK: - Connected account tag (general Dashboard/Activity flow only)
+
+    private var connectedAccountOptions: [ConnectedAccountOption] {
+        ConnectedAccountOptionPresenter.options(for: plaidConnection.connections)
+    }
+
+    /// Optional "which card/account did you use" tag for a general Manual Transaction — never a
+    /// Manual Account (those are never listed here), never required. Hidden entirely when nothing
+    /// is connected yet, so a household with no Plaid connections sees no empty/dead section.
+    @ViewBuilder
+    private var connectedAccountSection: some View {
+        if !connectedAccountOptions.isEmpty {
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    Text("Paid With")
+                        .font(Theme.headlineFont)
+                        .foregroundStyle(Theme.textPrimary)
+
+                    VStack(spacing: Theme.Spacing.sm) {
+                        connectedAccountOptionRow(id: nil, label: "No connected account selected")
+                        ForEach(connectedAccountOptions) { option in
+                            connectedAccountOptionRow(id: option.id, label: option.label)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func connectedAccountOptionRow(id: String?, label: String) -> some View {
+        let isSelected = selectedConnectedAccountId == id
+        Button {
+            selectedConnectedAccountId = id
+        } label: {
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: id == nil ? "minus.circle" : "creditcard.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.textTertiary)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill((isSelected ? Theme.accent : Theme.textTertiary).opacity(0.16)))
+                Text(label)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private var categoryAndDescriptionRow: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
             CategoryPickerCard(categories: activeCategories, selectedCategory: $selectedCategory)
@@ -489,7 +573,11 @@ struct AddExpenseView: View {
 
     private func attemptSave() {
         hasAttemptedSave = true
-        guard isValid, let amount, let selectedAccount else { return }
+        guard isValid, let amount else { return }
+        // Only the Manual Account flow requires selectedAccount (enforced by `validationMessages`
+        // above); the general flow never sets it, by construction (no Manual Account is ever
+        // offered — see `connectedAccountSection`).
+        guard !isManualAccountEntry || selectedAccount != nil else { return }
 
         let transaction = FinanceTransaction(
             amount: amount,
@@ -501,6 +589,11 @@ struct AddExpenseView: View {
             countsTowardMonthlySpending: countsTowardMonthlySpending,
             isExcludedFromReports: isExcludedFromReports,
             isPending: isPending,
+            // `plaidAccountId` here is only ever the optional "card/account used" reference tag
+            // from `connectedAccountSection` (nil in the Manual Account flow) — never confused
+            // with a Plaid-imported transaction's own `plaidAccountId`, since `source` stays
+            // `.manual` regardless.
+            plaidAccountId: isManualAccountEntry ? nil : selectedConnectedAccountId,
             account: selectedAccount,
             category: selectedCategory
         )
@@ -521,49 +614,74 @@ struct AddExpenseView: View {
         #endif
         modelContext.insert(transaction)
 
-        switch type {
-        case .expense:
-            AccountBalanceManager.applyExpense(amount: amount, to: selectedAccount)
-        case .refund:
-            AccountBalanceManager.applyRefund(amount: amount, to: selectedAccount)
-        case .income:
-            AccountBalanceManager.applyIncome(amount: amount, to: selectedAccount)
-        case .transfer, .creditCardPayment, .balanceAdjustment:
-            break
-        }
+        // Only the Manual Account flow ever has a local Account to update — the general flow's
+        // optional connected-account tag is a reference-only identifier, never a local balance to
+        // mutate (that already happens server-side, via Plaid, for the real connected account).
+        if isManualAccountEntry, let selectedAccount {
+            switch type {
+            case .expense:
+                AccountBalanceManager.applyExpense(amount: amount, to: selectedAccount)
+            case .refund:
+                AccountBalanceManager.applyRefund(amount: amount, to: selectedAccount)
+            case .income:
+                AccountBalanceManager.applyIncome(amount: amount, to: selectedAccount)
+            case .transfer, .creditCardPayment, .balanceAdjustment:
+                break
+            }
 
-        // Only remembered after every step above has succeeded — a cancel, a dismiss, or a
-        // validation failure (which returns before reaching this point) must never update what
-        // the next visit to this account/type combination starts from.
-        preferenceStore.save(
-            TransactionEntryPreferences(
-                countsTowardWeeklyBudget: countsTowardWeeklyBudget,
-                countsTowardMonthlySpending: countsTowardMonthlySpending,
-                isExcludedFromReports: isExcludedFromReports,
-                isPending: isPending
-            ),
-            accountID: selectedAccount.id,
-            type: type
-        )
+            // Only remembered after every step above has succeeded — a cancel, a dismiss, or a
+            // validation failure (which returns before reaching this point) must never update
+            // what the next visit to this account/type combination starts from. Only meaningful
+            // for the Manual Account flow, which is the only one `TransactionPreferenceStore` has
+            // ever keyed by account.
+            preferenceStore.save(
+                TransactionEntryPreferences(
+                    countsTowardWeeklyBudget: countsTowardWeeklyBudget,
+                    countsTowardMonthlySpending: countsTowardMonthlySpending,
+                    isExcludedFromReports: isExcludedFromReports,
+                    isPending: isPending
+                ),
+                accountID: selectedAccount.id,
+                type: type
+            )
+        }
 
         dismiss()
     }
 }
 
-#Preview("Populated") {
+#Preview("General Flow (Dashboard/Activity)") {
     AddExpenseView()
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }
 
-#Preview("No Accounts") {
-    AddExpenseView()
+#Preview("Manual Account Flow — Populated") {
+    AddExpenseView(preselectedAccount: {
+        let account = Account(name: "Everyday Checking", type: .checking, currentBalance: 4231.55)
+        return account
+    }())
+        .modelContainer(SampleData.previewContainer)
+        .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
+}
+
+#Preview("No Accounts (Manual Account Flow Empty State)") {
+    // Not inserted into the container — exercises the "no accounts exist yet" empty state
+    // (isManualAccountEntry stays true because a preselectedAccount was passed, even though it
+    // isn't a real persisted row in this preview's container).
+    AddExpenseView(preselectedAccount: Account(name: "Preview Only", type: .checking))
         .modelContainer(SampleData.emptyPreviewContainer())
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }
 
 #Preview("No Categories") {
-    AddExpenseView()
+    AddExpenseView(preselectedAccount: {
+        let checking = Account(name: "Everyday Checking", type: .checking, currentBalance: 4231.55)
+        return checking
+    }())
         .modelContainer({
             let container = SampleData.emptyPreviewContainer()
             let checking = Account(name: "Everyday Checking", type: .checking, currentBalance: 4231.55)
@@ -571,4 +689,5 @@ struct AddExpenseView: View {
             return container
         }())
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }

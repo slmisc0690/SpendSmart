@@ -33,6 +33,7 @@ import {
   EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
+  logPlaidOperation,
   logSafeError,
   plaidFetch,
   requireAuthenticatedUserId,
@@ -61,6 +62,10 @@ Deno.serve(async (req) => {
   if (connection_id !== undefined && !isValidUuid(connection_id)) {
     return jsonResponse({ error: "connection_id (a valid UUID) is required" }, 400);
   }
+
+  // Populated as soon as the connection is resolved, purely so the catch-all below can log it —
+  // never used for anything else.
+  let connectionIdForLogging: string | undefined;
 
   try {
     let item: { id: string; access_token: string; cursor: string | null; requires_reauth: boolean; environment: string | null } | null;
@@ -101,6 +106,7 @@ Deno.serve(async (req) => {
     if (!item) {
       return jsonResponse({ error: "No such connection for this account" }, 404);
     }
+    connectionIdForLogging = item.id;
     // Must be checked BEFORE calling Plaid — see assertItemEnvironmentMatches's doc comment.
     assertItemEnvironmentMatches(item.environment);
     if (item.requires_reauth) {
@@ -121,6 +127,7 @@ Deno.serve(async (req) => {
     let cursor: string | undefined = item.cursor ?? undefined;
     let hasMore = true;
     let pageCount = 0;
+    let lastRequestId: string | undefined;
     const added: Record<string, unknown>[] = [];
     const modified: Record<string, unknown>[] = [];
     const removed: Record<string, unknown>[] = [];
@@ -128,6 +135,7 @@ Deno.serve(async (req) => {
     while (hasMore) {
       const data = await plaidFetch("/transactions/sync", { access_token: item.access_token, cursor });
       pageCount += 1;
+      lastRequestId = typeof data.request_id === "string" ? data.request_id : lastRequestId;
       added.push(...((data.added as Record<string, unknown>[] | undefined) ?? []));
       modified.push(...((data.modified as Record<string, unknown>[] | undefined) ?? []));
       removed.push(...((data.removed as Record<string, unknown>[] | undefined) ?? []));
@@ -177,6 +185,15 @@ Deno.serve(async (req) => {
       .eq("user_id", userId);
     console.log("[sync-transactions] final cursor saved:", !cursorUpdateError);
     console.log("[sync-transactions] response transaction count:", transactions.length);
+    logPlaidOperation({
+      operation: "sync-transactions",
+      outcome: "success",
+      connectionId: item.id,
+      requestId: lastRequestId,
+      addedCount: added.length,
+      modifiedCount: modified.length,
+      removedCount: removed.length,
+    });
 
     return jsonResponse({
       connection_id: item.id,
@@ -188,7 +205,7 @@ Deno.serve(async (req) => {
       removed_count: removed.length,
     });
   } catch (error) {
-    logSafeError("sync-transactions failed", error);
+    logSafeError(`sync-transactions failed connection_id=${connectionIdForLogging ?? "unknown"}`, error);
 
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);

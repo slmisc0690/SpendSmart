@@ -458,9 +458,5 @@ verify_jwt = false
 [functions.plaid-webhook]
 verify_jwt = false
 
-# Sandbox/testing-only. Remove or disable this function entirely in any Production deployment.
-[functions.debug-reset-cursor]
-verify_jwt = false
-
 [functions.delete-account]
 verify_jwt = false

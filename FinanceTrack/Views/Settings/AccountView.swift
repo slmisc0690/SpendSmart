@@ -182,6 +182,8 @@ struct AccountView: View {
 private struct DeleteAccountConfirmationView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AuthenticationService.self) private var authService
+    @Environment(\.modelContext) private var modelContext
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     @State private var confirmationText = ""
     @State private var isDeleting = false
@@ -264,12 +266,19 @@ private struct DeleteAccountConfirmationView: View {
         .preferredColorScheme(.dark)
     }
 
+    /// Local cleanup ONLY runs after `authService.deleteAccount()` has already succeeded — the
+    /// server-side account is unrecoverable at that point, so there's no scenario where deleting
+    /// local data first and having the server call fail could leave the user in a worse spot.
+    /// Never reversed: if `deleteAccount()` throws, execution never reaches the cleanup below,
+    /// and the user's local data is untouched.
     private func delete() async {
         errorMessage = nil
         isDeleting = true
         defer { isDeleting = false }
         do {
             try await authService.deleteAccount()
+            PlaidLocalDataCleanupService.deleteAllLocalData(context: modelContext)
+            plaidConnection.clearAllConnections()
             dismiss()
             // RootView switches to the auth flow automatically once sessionState flips to
             // .signedOut — nothing further to do here.

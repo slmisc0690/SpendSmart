@@ -28,8 +28,8 @@ struct SecurityNotesView: View {
 
                     noteCard(
                         icon: "lock.iphone",
-                        title: "Manual & Local Only",
-                        body: "Version 1 of SpendSmart is fully manual. Every account, balance, and transaction is entered by you and stored only on this device."
+                        title: "Manual-First",
+                        body: "Every account, balance, and transaction can be entered by you and stored only on this device. Connecting a financial institution through Plaid is entirely optional."
                     )
                     noteCard(
                         icon: "key.slash",
@@ -38,8 +38,8 @@ struct SecurityNotesView: View {
                     )
                     noteCard(
                         icon: "network.slash",
-                        title: "No Active Bank Connection",
-                        body: "American Express isn't connected until you complete the connect flow yourself in Connected Accounts. All of your manual accounts, balances, and transactions never leave this device regardless — only the optional Amex sync talks to a server at all, and only once you connect it."
+                        title: "No Bank Connection Until You Choose One",
+                        body: "No financial institution is connected until you complete the connect flow yourself in Connected Accounts. All of your manually entered accounts, balances, and transactions never leave this device regardless — only a connected institution's data ever talks to a server, and only once you connect it."
                     )
                     noteCard(
                         icon: "faceid",
@@ -53,8 +53,8 @@ struct SecurityNotesView: View {
                     )
                     noteCard(
                         icon: "checkmark.shield.fill",
-                        title: "Amex Sync Uses Plaid Sandbox",
-                        body: "American Express syncing goes through Plaid Sandbox via a secure backend — this app never talks to Plaid directly and never holds a Plaid access token or client secret. Your Amex username and password are entered only into Plaid Link's own hosted screen, never into SpendSmart."
+                        title: "Connected Institutions Sync Through Plaid",
+                        body: "Any institution you connect syncs through Plaid via a secure backend — this app never talks to Plaid directly and never holds a Plaid access token or client secret. Your bank username and password are entered only into Plaid Link's own hosted screen, never into SpendSmart."
                     )
                     noteCard(
                         icon: "eye.fill",

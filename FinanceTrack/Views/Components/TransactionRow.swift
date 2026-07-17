@@ -10,6 +10,13 @@ struct TransactionRow: View {
     /// to be scannable at a glance. Off by default so existing call sites (Dashboard, Weekly)
     /// keep their current, quieter appearance.
     var showsTypeBadge: Bool = false
+    /// The safe display label for a connected account this general Manual Transaction is
+    /// attributed to via "Paid With" (see `ConnectedAccountOptionPresenter`), resolved by the
+    /// caller — this stays a pure view with no `PlaidConnectionManager` dependency. `nil` for a
+    /// Plaid-imported row (shown via `ConnectedTransactionRow` instead), a Manual Account-owned
+    /// row, or a legacy Manual Transaction with no attribution — the extra line is simply
+    /// omitted, never a placeholder.
+    var connectedAccountLabel: String? = nil
 
     private var accentColor: Color {
         Theme.categoryColor(named: transaction.category?.colorName ?? "")
@@ -94,6 +101,13 @@ struct TransactionRow: View {
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
+
+                if let connectedAccountLabel {
+                    Text(connectedAccountLabel)
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: Theme.Spacing.sm)

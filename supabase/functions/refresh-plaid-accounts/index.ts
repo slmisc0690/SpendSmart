@@ -31,6 +31,7 @@ import {
   EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
+  logPlaidOperation,
   logSafeError,
   refreshPlaidAccounts,
   requireAuthenticatedUserId,
@@ -94,6 +95,12 @@ Deno.serve(async (req) => {
       .eq("user_id", userId);
     if (clearFlagsError) throw clearFlagsError;
     console.log("[refresh-plaid-accounts] requires_reauth/new_accounts_available cleared:", true);
+    logPlaidOperation({
+      operation: "refresh-plaid-accounts",
+      outcome: "success",
+      connectionId: item.id,
+      accountCount: accountRows.length,
+    });
 
     return jsonResponse({
       connection_id: item.id,
@@ -106,7 +113,10 @@ Deno.serve(async (req) => {
       })),
     });
   } catch (error) {
-    logSafeError("refresh-plaid-accounts failed", error);
+    logSafeError(
+      `refresh-plaid-accounts failed connection_id=${typeof connection_id === "string" ? connection_id : "unknown"}`,
+      error,
+    );
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }

@@ -26,6 +26,7 @@ import {
   EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
+  logPlaidOperation,
   logSafeError,
   plaidFetch,
   requireAuthenticatedUserId,
@@ -37,6 +38,8 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
+
+  console.log("[disconnect-account] handler entered");
 
   const supabase = createPrivilegedClient();
 
@@ -66,6 +69,7 @@ Deno.serve(async (req) => {
     if (!item) {
       // Already disconnected, or connection_id belongs to a different user — either way, treat as
       // success rather than an error (this must never delete something ELSE on a mismatch).
+      console.log("[disconnect-account] no matching plaid_items row (already disconnected?):", { connection_id });
       return jsonResponse({ disconnected: true });
     }
     // Must be checked BEFORE calling Plaid — see assertItemEnvironmentMatches's doc comment. On a
@@ -74,7 +78,7 @@ Deno.serve(async (req) => {
     // separate, deliberate action, not a side effect of a routine disconnect request.
     assertItemEnvironmentMatches(item.environment);
 
-    await plaidFetch("/item/remove", { access_token: item.access_token });
+    const removeResult = await plaidFetch("/item/remove", { access_token: item.access_token });
 
     const { error: deleteError } = await supabase
       .from("plaid_items")
@@ -83,9 +87,18 @@ Deno.serve(async (req) => {
       .eq("user_id", userId);
     if (deleteError) throw deleteError;
 
+    console.log("[disconnect-account] plaid_items row deleted:", true);
+    logPlaidOperation({
+      operation: "disconnect-account",
+      outcome: "success",
+      environment: item.environment ?? undefined,
+      connectionId: item.id,
+      requestId: typeof removeResult.request_id === "string" ? removeResult.request_id : undefined,
+    });
+
     return jsonResponse({ disconnected: true });
   } catch (error) {
-    logSafeError("disconnect-account failed", error);
+    logSafeError(`disconnect-account failed connection_id=${connection_id}`, error);
 
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);

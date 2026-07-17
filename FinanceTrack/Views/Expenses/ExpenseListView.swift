@@ -14,12 +14,15 @@ enum ActivityDateFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Transaction history: everything manually entered, grouped by day, filterable to a date range.
-/// This is a history screen, not where accounts or categories are managed.
+/// Transaction history — manual transactions and, separately, each connected Plaid account's
+/// activity, selected via a source tab (see `ActivityTabPresenter`). Grouped by day within
+/// whichever tab is selected, filterable to a date range. This is a history screen, not where
+/// accounts or categories are managed.
 struct ExpenseListView: View {
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactions: [FinanceTransaction]
     @Query private var settingsList: [BudgetSettings]
     @Environment(PrivacyModeManager.self) private var privacyMode
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
     @Environment(\.modelContext) private var modelContext
 
     @State private var isPresentingAdd = false
@@ -28,8 +31,29 @@ struct ExpenseListView: View {
     @State private var customRangeEnd: Date = .now
     @State private var transactionPendingDeletion: FinanceTransaction?
     @State private var isPresentingDeletionError = false
+    /// nil means "no explicit in-screen choice yet" — `effectiveTab` falls back to whatever was
+    /// passed in via `init(initialTab:)`, then to `ActivityTabPresenter.defaultTab`.
+    @State private var selectedTab: ActivityTab?
+    private let initialTab: ActivityTab?
+
+    /// `initialTab` lets a caller (the Dashboard's "More" action) open this screen with a
+    /// specific source already selected — never required, so every other existing call site
+    /// (the app's own Activity tab) keeps working unchanged with the deterministic default.
+    init(initialTab: ActivityTab? = nil) {
+        self.initialTab = initialTab
+    }
 
     private var settings: BudgetSettings? { settingsList.first }
+
+    private var tabs: [ActivityTab] {
+        ActivityTabPresenter.tabs(transactions: transactions, connections: plaidConnection.connections)
+    }
+
+    private var effectiveTab: ActivityTab {
+        if let selectedTab, tabs.contains(selectedTab) { return selectedTab }
+        if let initialTab, tabs.contains(initialTab) { return initialTab }
+        return ActivityTabPresenter.defaultTab(tabs: tabs)
+    }
 
     private var selectedInterval: DateInterval {
         switch selectedDateFilter {
@@ -50,31 +74,57 @@ struct ExpenseListView: View {
         }
     }
 
+    /// Scoped to the selected tab FIRST (never mixing connected and manual activity in the same
+    /// list), then to the existing date-range filter — both preserved together, neither replacing
+    /// the other.
     private var filteredTransactions: [FinanceTransaction] {
-        transactions.filter { selectedInterval.contains($0.date) }
+        ActivityTabPresenter.transactions(for: effectiveTab, in: transactions)
+            .filter { selectedInterval.contains($0.date) }
     }
 
-    /// One entry per day with at least one transaction in range, newest first. Each day's total
-    /// is net spending for that day (via `BudgetCalculator`, never reimplemented here) — the same
-    /// technique the Weekly screen's daily breakdown uses.
+    /// One entry per day with at least one transaction in range, newest first.
+    ///
+    /// For the Manual Transactions tab, each day's total is net *monthly-eligible* spending
+    /// (via `BudgetCalculator`, unchanged from before) — a Manual Transaction's total has always
+    /// meant "what counts," not merely "what's shown."
+    ///
+    /// For a connected-account tab, `BudgetCalculator` would always report $0.00 here: every
+    /// imported row has `countsTowardMonthlySpending == false` by design (see
+    /// `PlaidTransactionImportService`), so a budget-eligibility total can never reflect visible
+    /// imported activity. `DailyTransactionTotals` sums exactly the displayed rows instead, so
+    /// the heading always agrees with what's listed underneath it.
     private var dailyGroups: [(day: Date, transactions: [FinanceTransaction], total: Decimal)] {
-        let calendar = Calendar.current
-        let days = Set(filteredTransactions.map { calendar.startOfDay(for: $0.date) }).sorted(by: >)
-
-        return days.map { day in
-            let dayTransactions = filteredTransactions
-                .filter { calendar.isDate($0.date, inSameDayAs: day) }
-                .sorted { $0.date > $1.date }
-            let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day
-            let total = BudgetCalculator.monthlySpent(dayTransactions, in: DateInterval(start: day, end: dayEnd), includePending: true)
-            return (day, dayTransactions, total)
+        switch effectiveTab {
+        case .manual:
+            let calendar = Calendar.current
+            let days = Set(filteredTransactions.map { calendar.startOfDay(for: $0.date) }).sorted(by: >)
+            return days.map { day in
+                let dayTransactions = filteredTransactions
+                    .filter { calendar.isDate($0.date, inSameDayAs: day) }
+                    .sorted { $0.date > $1.date }
+                let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day
+                let total = BudgetCalculator.monthlySpent(dayTransactions, in: DateInterval(start: day, end: dayEnd), includePending: true)
+                return (day, dayTransactions, total)
+            }
+        case .connectedAccount:
+            return DailyTransactionTotals.groups(for: filteredTransactions).map { ($0.day, $0.transactions, $0.total) }
         }
+    }
+
+    /// The safe "Paid With" label for a general Manual Transaction's optional connected-account
+    /// attribution — `nil` for a Plaid-imported row, a Manual Account transaction, or a legacy
+    /// Manual Transaction with no attribution.
+    private func connectedAccountLabel(for transaction: FinanceTransaction) -> String? {
+        ConnectedAccountOptionPresenter.label(forAccountId: transaction.plaidAccountId, in: plaidConnection.connections)
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                    if tabs.count > 1 {
+                        sourceTabSection
+                    }
                     filterSection
 
                     if dailyGroups.isEmpty {
@@ -98,11 +148,16 @@ struct ExpenseListView: View {
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationTitle("Activity")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        isPresentingAdd = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
+                // Only Manual Transactions can be added from here — a connected-account tab is a
+                // read-only reference list (see `ConnectedTransactionRow`'s own doc comment), so
+                // adding a new entry from it would have nowhere correct to go.
+                if effectiveTab == .manual {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            isPresentingAdd = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                        }
                     }
                 }
             }
@@ -137,6 +192,21 @@ struct ExpenseListView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    // MARK: - Source tabs (Manual Transactions vs. each connected account)
+
+    private var sourceTabSection: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Theme.Spacing.sm) {
+                ForEach(tabs) { tab in
+                    FilterChip(title: tab.label, isSelected: tab == effectiveTab) {
+                        selectedTab = tab
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
     }
 
     // MARK: - Filters
@@ -191,23 +261,36 @@ struct ExpenseListView: View {
             CardBackground {
                 VStack(spacing: Theme.Spacing.md) {
                     ForEach(Array(group.transactions.enumerated()), id: \.element.id) { index, transaction in
-                        HStack(spacing: 0) {
-                            TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled, showsTypeBadge: true)
-                                .contextMenu {
-                                    if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
-                                        Button("Delete", systemImage: "trash", role: .destructive) {
-                                            transactionPendingDeletion = transaction
-                                        }
-                                    }
-                                }
-                            if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
-                                transactionOptionsMenu(for: transaction)
-                            }
-                        }
+                        transactionRow(for: transaction)
                         if index < group.transactions.count - 1 {
                             Divider().overlay(Theme.cardStroke)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Connected (Plaid) transactions render via the minimal, read-only `ConnectedTransactionRow`
+    /// — no context menu, no options menu, no editing surface of any kind, matching "connected
+    /// activity is a simple reference list." Manual transactions keep their exact prior
+    /// presentation and behavior (full `TransactionRow`, delete context menu/options menu).
+    @ViewBuilder
+    private func transactionRow(for transaction: FinanceTransaction) -> some View {
+        if transaction.source == .plaid {
+            ConnectedTransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
+        } else {
+            HStack(spacing: 0) {
+                TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled, showsTypeBadge: true, connectedAccountLabel: connectedAccountLabel(for: transaction))
+                    .contextMenu {
+                        if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                transactionPendingDeletion = transaction
+                            }
+                        }
+                    }
+                if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
+                    transactionOptionsMenu(for: transaction)
                 }
             }
         }
@@ -233,10 +316,12 @@ struct ExpenseListView: View {
     ExpenseListView()
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }
 
 #Preview("Empty") {
     ExpenseListView()
         .modelContainer(SampleData.emptyPreviewContainer())
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }

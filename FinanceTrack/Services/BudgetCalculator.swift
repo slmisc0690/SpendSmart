@@ -33,6 +33,9 @@ enum BudgetCalculator {
         netSpending(transactions, in: interval, includePending: includePending, context: .monthly)
     }
 
+    /// Driven by the same `spendingDelta` eligibility check `categoryTotals`/`accountTotals` use
+    /// below, so every spend total in this file is computed from one shared per-transaction rule
+    /// rather than each maintaining its own drift-prone copy of the same logic.
     private static func netSpending(
         _ transactions: [FinanceTransaction],
         in interval: DateInterval,
@@ -40,19 +43,7 @@ enum BudgetCalculator {
         context: SpendingContext
     ) -> Decimal {
         transactions.reduce(Decimal(0)) { total, transaction in
-            guard interval.contains(transaction.date), !transaction.isExcludedFromReports else { return total }
-            guard includePending || !transaction.isPending else { return total }
-
-            switch transaction.type {
-            case .expense:
-                guard countsToward(transaction, context: context) else { return total }
-                return total + transaction.amount
-            case .refund:
-                guard countsToward(transaction, context: context) else { return total }
-                return total - transaction.amount
-            case .income, .transfer, .creditCardPayment, .balanceAdjustment:
-                return total
-            }
+            total + (spendingDelta(for: transaction, in: interval, includePending: includePending, context: context) ?? 0)
         }
     }
 

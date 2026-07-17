@@ -7,6 +7,10 @@ struct DailyTransactionGroup: View {
     let transactions: [FinanceTransaction]
     let dailyTotal: Decimal
     var isPrivacyModeEnabled: Bool = false
+    /// Resolves the "Paid With" subtitle label for one transaction — defaults to always `nil` so
+    /// existing call sites (Manual Account/Credit Card registers, where this line never applies)
+    /// need no change.
+    var connectedAccountLabel: (FinanceTransaction) -> String? = { _ in nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
@@ -26,7 +30,7 @@ struct DailyTransactionGroup: View {
             CardBackground {
                 VStack(spacing: Theme.Spacing.md) {
                     ForEach(Array(transactions.enumerated()), id: \.element.id) { index, transaction in
-                        TransactionRow(transaction: transaction, isPrivacyModeEnabled: isPrivacyModeEnabled)
+                        TransactionRow(transaction: transaction, isPrivacyModeEnabled: isPrivacyModeEnabled, connectedAccountLabel: connectedAccountLabel(transaction))
                         if index < transactions.count - 1 {
                             Divider().overlay(Theme.cardStroke)
                         }

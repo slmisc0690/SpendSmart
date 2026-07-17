@@ -17,15 +17,21 @@
 // and stores it in `plaid_accounts` — this is what makes multiple-accounts-per-institution and
 // balance sync (`sync-balances`) possible; previously no account-level data was persisted at all.
 //
+// DUPLICATE-ITEM DETECTION: after a successful exchange, also checks whether this user already
+// has a DIFFERENT Item for the same institution and returns that as metadata (never blocks the
+// new connection) — see computeDuplicateInstitutionResult in ../_shared/plaid.ts.
+//
 // AUTH: `verify_jwt = false` at the gateway (required by the new sb_publishable_/sb_secret_ key
 // system — see ../_shared/plaid.ts's file header). The caller MUST send
 // `Authorization: Bearer <user access token>`; requireAuthenticatedUserId validates it in code
 // and derives user_id ONLY from that verified token — never from the request body.
 
 import {
+  computeDuplicateInstitutionResult,
   createPrivilegedClient,
   jsonResponse,
   loadPlaidCredentials,
+  logPlaidOperation,
   logSafeError,
   plaidFetch,
   refreshPlaidAccounts,
@@ -67,6 +73,11 @@ Deno.serve(async (req) => {
   // token above. The iOS app has no way to influence which user_id a plaid_items row is written
   // under.
 
+  // Populated as soon as each identifier becomes known, purely so the catch-all below can log
+  // whichever of these it managed to learn before the failure — never used for anything else.
+  let connectionIdForLogging: string | undefined;
+  let itemIdForLogging: string | undefined;
+
   try {
     // Read once, up front — this is the same active environment plaidFetch itself will use for
     // this call, and it's what gets stamped onto the plaid_items row below so this Item can never
@@ -76,6 +87,7 @@ Deno.serve(async (req) => {
     const data = await plaidFetch("/item/public_token/exchange", { public_token });
     const accessToken = data.access_token as string;
     const itemId = data.item_id as string;
+    itemIdForLogging = itemId;
     console.log("[exchange-public-token] plaid exchange completed:", true);
     console.log("[exchange-public-token] item_id received:", typeof itemId === "string" && itemId.length > 0);
     console.log("[exchange-public-token] environment:", environment);
@@ -116,6 +128,7 @@ Deno.serve(async (req) => {
 
     console.log("[exchange-public-token] plaid_items row saved:", !error);
     if (error) throw error;
+    connectionIdForLogging = savedRow.id;
 
     // Discover every account this Item covers (a single Item can be more than one physical
     // card/account at the same institution) and persist them — via the SAME shared helper
@@ -141,20 +154,62 @@ Deno.serve(async (req) => {
       logSafeError("exchange-public-token account discovery failed (connection still succeeded)", accountsError);
     }
 
+    // DUPLICATE-ITEM DETECTION: does this user already have a DIFFERENT plaid_items row for the
+    // same institution? Never blocks or rejects — see computeDuplicateInstitutionResult's own
+    // doc comment. Only meaningful when institution_id is actually known; a null institution_id
+    // can never be meaningfully compared against other rows (also potentially null), so this is
+    // skipped entirely rather than risking a false-positive match on "unknown institution".
+    // Best-effort: a failure here never blocks the connection that already succeeded above.
+    let duplicateResult = computeDuplicateInstitutionResult([]);
+    if (resolvedInstitutionId) {
+      const { data: existingRows, error: duplicateLookupError } = await supabase
+        .from("plaid_items")
+        .select("id, institution_name")
+        .eq("user_id", userId)
+        .eq("institution_id", resolvedInstitutionId)
+        .neq("id", savedRow.id)
+        .limit(1);
+      if (duplicateLookupError) {
+        logSafeError(
+          "exchange-public-token duplicate-institution lookup failed (connection still succeeded)",
+          duplicateLookupError,
+        );
+      } else {
+        duplicateResult = computeDuplicateInstitutionResult(existingRows ?? []);
+      }
+    }
+    console.log("[exchange-public-token] duplicate institution detected:", duplicateResult.duplicate_institution);
+    logPlaidOperation({
+      operation: "exchange-public-token",
+      outcome: "success",
+      environment,
+      connectionId: savedRow.id,
+      itemId,
+      requestId: typeof data.request_id === "string" ? data.request_id : undefined,
+      institutionId: resolvedInstitutionId ?? undefined,
+      accountCount: accountSummaries.length,
+      mode: "new_connection",
+    });
+
     // Returns the plaid_items row's own opaque UUID (never the Plaid item_id, never any token
     // material) so the app can later tell disconnect-account/sync-transactions/sync-balances
     // EXACTLY which connection to target, instead of guessing among however many rows this
-    // user_id has. institution_id/name and the discovered accounts are all non-sensitive
-    // identifiers, safe to return.
+    // user_id has. institution_id/name, the discovered accounts, and the duplicate-detection
+    // metadata (existing_connection_id is likewise this project's own opaque UUID, never a Plaid
+    // item_id) are all non-sensitive identifiers, safe to return.
     return jsonResponse({
       connected: true,
       connection_id: savedRow.id,
       institution_id: resolvedInstitutionId,
       institution_name: resolvedInstitutionName,
       accounts: accountSummaries,
+      ...duplicateResult,
     });
   } catch (error) {
-    logSafeError("exchange-public-token failed", error);
+    logSafeError(
+      `exchange-public-token failed connection_id=${connectionIdForLogging ?? "unknown"} item_id=${itemIdForLogging ?? "unknown"}`,
+      error,
+    );
 
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);

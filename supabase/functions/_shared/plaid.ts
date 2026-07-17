@@ -142,7 +142,11 @@ export function logSafeError(context: string, error: unknown): void {
     return;
   }
   if (error instanceof PlaidRequestError) {
-    console.error(`${context}: Plaid request failed`, { status: error.status });
+    // request_id is Plaid's own correlation identifier for this exact call — safe to log (it
+    // identifies a request, not an account or credential) and is what Plaid Support asks for
+    // first when investigating a specific failure. `error.body` (the full raw Plaid response) is
+    // deliberately never logged here, same as before.
+    console.error(`${context}: Plaid request failed`, { status: error.status, request_id: error.requestId ?? null });
     return;
   }
   if (typeof error === "object" && error !== null && "code" in error) {
@@ -294,6 +298,284 @@ export function buildPlaidWebhookUrl(): string {
   return `${supabaseUrl.replace(/\/+$/, "")}/functions/v1/plaid-webhook`;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Webhook state mapping (used by plaid-webhook)
+// ---------------------------------------------------------------------------------------------
+//
+// Extracted as pure functions of (webhook type/code, payload, now) — rather than left inlined in
+// plaid-webhook/index.ts's Deno.serve handler — so this mapping is unit-testable without a live
+// Supabase/Postgres connection, matching every other pure helper in this file. plaid-webhook
+// itself still owns signature verification, looking up the affected row, applying `updates`, and
+// all logging.
+
+export interface PlaidWebhookEventPayload {
+  // Present on PENDING_EXPIRATION — an ISO8601-ish timestamp string per Plaid's docs.
+  consent_expiration_time?: string;
+}
+
+// Every `${webhook_type}:${webhook_code}` combination this project has an actual, tested
+// response to — anything else is intentionally left unrecognized (logged only, no plaid_items
+// column changed), matching the conservative stance already documented on plaid-webhook's
+// `default:` case.
+const RECOGNIZED_WEBHOOK_KEYS: ReadonlySet<string> = new Set([
+  "ITEM:ITEM_LOGIN_REQUIRED",
+  "ITEM:PENDING_EXPIRATION",
+  "ITEM:PENDING_DISCONNECT",
+  "ITEM:LOGIN_REPAIRED",
+  "ITEM:NEW_ACCOUNTS_AVAILABLE",
+  "WEBHOOK:WEBHOOK_UPDATE_ACKNOWLEDGED",
+]);
+
+/** True for exactly the webhook type/code combinations `computePlaidWebhookUpdates` has a case
+ * for — plaid-webhook uses this to decide whether to log "unhandled webhook, logged only",
+ * independent of whether that case happens to produce an empty updates object (e.g.
+ * WEBHOOK_UPDATE_ACKNOWLEDGED is recognized but intentionally changes nothing). */
+export function isRecognizedPlaidWebhook(webhookType: string | null, webhookCode: string | null): boolean {
+  return RECOGNIZED_WEBHOOK_KEYS.has(`${webhookType}:${webhookCode}`);
+}
+
+/**
+ * Maps one verified Plaid webhook to the `plaid_items` column updates it implies. Never includes
+ * `last_webhook_code`/`last_webhook_at` — plaid-webhook sets those unconditionally for every
+ * webhook itself, this only returns the STATE-SPECIFIC fields.
+ *
+ * `nowIso` is passed in rather than computed here so callers (and tests) control the exact
+ * timestamp used, rather than this function depending on wall-clock time.
+ */
+export function computePlaidWebhookUpdates(
+  webhookType: string | null,
+  webhookCode: string | null,
+  payload: PlaidWebhookEventPayload,
+  nowIso: string,
+): Record<string, unknown> {
+  switch (`${webhookType}:${webhookCode}`) {
+    case "ITEM:ITEM_LOGIN_REQUIRED":
+      // The access_token can no longer be used until the user re-authenticates via Link update
+      // mode (see create-link-token's connection_id branch). sync-transactions/sync-balances
+      // both check this flag and fail fast with a distinct error rather than hitting Plaid with
+      // a call that's guaranteed to fail.
+      return { requires_reauth: true };
+
+    case "ITEM:PENDING_EXPIRATION":
+      // Mainly OAuth institutions whose consent expires on a schedule — this is an early
+      // warning before ITEM_LOGIN_REQUIRED actually fires. Store Plaid's own expiration
+      // timestamp if provided so the app can show "reconnect before <date>" instead of just a
+      // generic warning; fall back to "now" (i.e. treat it as immediately actionable) if Plaid
+      // didn't include one, since the webhook firing at all means expiration is imminent either
+      // way.
+      return { pending_expiration_at: payload.consent_expiration_time ?? nowIso };
+
+    case "ITEM:PENDING_DISCONNECT":
+      // Plaid expects this Item to stop working soon. Recorded only — never triggers an
+      // automatic disconnect (see the accompanying migration's comment); the user is prompted
+      // via the app reading this flag, same as the other at-risk states.
+      return { pending_disconnect_at: nowIso };
+
+    case "ITEM:LOGIN_REPAIRED":
+      // The user successfully re-authenticated (via Link update mode or otherwise) and Plaid
+      // confirms the Item is healthy again — clear every at-risk flag this project tracks, not
+      // just requires_reauth, since a repaired login also supersedes an earlier
+      // pending-expiration or pending-disconnect warning for the same Item.
+      return { requires_reauth: false, pending_expiration_at: null, pending_disconnect_at: null };
+
+    case "ITEM:NEW_ACCOUNTS_AVAILABLE":
+      // The institution has accounts this Item doesn't cover yet. The app can prompt the user
+      // to reconnect (update mode) to add them; exchange-public-token's/refresh-plaid-accounts'
+      // account-discovery step re-runs and clears this flag the next time that happens.
+      return { new_accounts_available: true };
+
+    case "WEBHOOK:WEBHOOK_UPDATE_ACKNOWLEDGED":
+      // Plaid's confirmation that a prior POST /webhook/update call took effect — nothing to
+      // change beyond the last_webhook_code/at bookkeeping the caller already applies.
+      return {};
+
+    default:
+      // Every other webhook type/code (including the pre-existing SYNC_UPDATES_AVAILABLE, which
+      // the app currently discovers via its own polling/pull-to-refresh instead) is left
+      // unrecognized — intentionally conservative: only flip a flag for webhook codes this
+      // project has an actual, tested response to.
+      return {};
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Duplicate-Item detection (used by exchange-public-token)
+// ---------------------------------------------------------------------------------------------
+//
+// Plaid's own guidance on duplicate-Item detection is about WARNING the user, never about making
+// a second legitimate Item impossible — a user can genuinely have two different logins at the
+// same institution. So this only ever produces metadata for the caller to act on; it never
+// blocks, rejects, or merges anything itself. See migration 0007_plaid_items_institution_index.sql
+// for the matching (deliberately non-unique) index this lookup relies on.
+
+/** The shape exchange-public-token's duplicate lookup selects — deliberately narrow (never
+ * `access_token`, never Plaid's own `item_id`) so there is nothing sensitive to leak even if a
+ * caller passed a richer row through by mistake. */
+export interface DuplicateInstitutionMatch {
+  id: string;
+  institution_name: string;
+}
+
+export interface DuplicateInstitutionResult {
+  duplicate_institution: boolean;
+  existing_connection_id: string | null;
+  existing_institution_name: string | null;
+}
+
+/**
+ * Pure mapping from "what did the duplicate-institution DB lookup find" to the exact fields
+ * exchange-public-token includes in its response — extracted so this shape is unit-testable
+ * without a live Supabase call. Only ever reads `.id`/`.institution_name` off the first match, so
+ * it structurally cannot echo any other field (e.g. `access_token`) even if the caller's query
+ * accidentally selected more than it should have. Multiple matches are possible (a user can have
+ * more than one prior connection to the same institution) — only the first is surfaced, since the
+ * caller only needs one existing connection to point the user at, not an exhaustive list.
+ */
+export function computeDuplicateInstitutionResult(
+  matches: DuplicateInstitutionMatch[],
+): DuplicateInstitutionResult {
+  const [first] = matches;
+  if (!first) {
+    return { duplicate_institution: false, existing_connection_id: null, existing_institution_name: null };
+  }
+  return {
+    duplicate_institution: true,
+    existing_connection_id: first.id,
+    existing_institution_name: first.institution_name,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Link conversion logging (used by create-link-token)
+// ---------------------------------------------------------------------------------------------
+//
+// Plaid's "Implement Link conversion logging" onboarding item — this is the one safe success-path
+// log line create-link-token emits per successful /link/token/create call. Extracted as a pure
+// function so its shape (in particular, that it structurally cannot carry a token/credential
+// field) is unit-testable without a live Plaid/Supabase call.
+
+export interface LinkTokenCreatedLogFields {
+  mode: "update_mode" | "new_connection";
+  environment: string;
+  webhook_included: boolean;
+  redirect_uri_included: boolean;
+}
+
+/**
+ * Builds the exact fields create-link-token logs after a successful `/link/token/create` call —
+ * never the link_token itself, never a credential. `webhookIncluded`/`redirectUriIncluded` are
+ * passed as explicit booleans (not hardcoded `true`) so this stays accurate if either input ever
+ * becomes conditional in the future, even though both are unconditionally set on every call site
+ * today.
+ */
+export function buildLinkTokenCreatedLogFields(
+  isUpdateMode: boolean,
+  environment: string,
+  webhookIncluded: boolean,
+  redirectUriIncluded: boolean,
+): LinkTokenCreatedLogFields {
+  return {
+    mode: isUpdateMode ? "update_mode" : "new_connection",
+    environment,
+    webhook_included: webhookIncluded,
+    redirect_uri_included: redirectUriIncluded,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Structured operation/correlation logging (used by every Edge Function)
+// ---------------------------------------------------------------------------------------------
+//
+// Plaid onboarding's "Logging" item — every function's success/failure logging previously carried
+// only booleans/counts, never the identifiers Supabase log search or a Plaid Support case actually
+// needs to correlate a specific request: the internal `connection_id`, Plaid's own `item_id`, and
+// Plaid's `request_id` (see `PlaidRequestError.requestId`/`extractPlaidRequestId` above). This is
+// the ONE shape every function's operation log goes through, so every log line has the same
+// fields available and none can accidentally carry anything beyond this closed set — there is no
+// field here for a token, secret, account number, balance, or transaction content, so nothing
+// sensitive can reach it even by a future copy-paste mistake at a call site.
+
+export interface PlaidOperationLogFields {
+  /** The function name, e.g. "exchange-public-token" — matches this project's existing
+   * `[function-name]` log-prefix convention. */
+  operation: string;
+  outcome: "success" | "failure";
+  environment?: string;
+  /** This project's own `plaid_items.id` — never Plaid's `item_id` (see `itemId` below). */
+  connectionId?: string;
+  /** Plaid's own Item id — logged only where it's already in scope (e.g. right after an
+   * exchange/webhook), never fetched solely to log it. */
+  itemId?: string;
+  /** Plaid's per-request correlation id — see `PlaidRequestError.requestId`'s doc comment. */
+  requestId?: string;
+  institutionId?: string;
+  webhookType?: string;
+  webhookCode?: string;
+  accountCount?: number;
+  addedCount?: number;
+  modifiedCount?: number;
+  removedCount?: number;
+  mode?: "update_mode" | "new_connection";
+}
+
+/**
+ * Pure mapping from `PlaidOperationLogFields` to the exact plain object `logPlaidOperation` logs —
+ * separated out so the shape (in particular, that it can never carry a key beyond this closed set)
+ * is unit-testable without capturing `console.log` output.
+ */
+export function buildPlaidOperationLogFields(fields: PlaidOperationLogFields): PlaidOperationLogFields {
+  return { ...fields };
+}
+
+/** Logs one structured, safe operation outcome line — the side-effecting half of
+ * `buildPlaidOperationLogFields`, verified by code review same as every other `console.log` call
+ * site in this project (see plaid.test.ts's own header comment for why). */
+export function logPlaidOperation(fields: PlaidOperationLogFields): void {
+  console.log(`[${fields.operation}] operation outcome:`, buildPlaidOperationLogFields(fields));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Update-mode Link token params (used by create-link-token)
+// ---------------------------------------------------------------------------------------------
+
+export interface UpdateModeLinkTokenParams {
+  client_name: string;
+  language: string;
+  country_codes: string[];
+  user: { client_user_id: string };
+  access_token: string;
+  update: { account_selection_enabled: boolean };
+  webhook: string;
+  redirect_uri: string;
+}
+
+/**
+ * Builds the exact `/link/token/create` request body for an UPDATE MODE reconnect (i.e.
+ * create-link-token's `connection_id` branch) — extracted as a pure function of
+ * (userId, accessToken) so this shape, in particular that `update.account_selection_enabled` is
+ * set, is unit-testable without a live Supabase/Plaid call. `account_selection_enabled: true`
+ * tells Plaid's own Link UI to let the user pick up any accounts the institution now offers that
+ * this Item doesn't yet cover — Plaid's account-selection surface for update mode, distinct from
+ * (and in addition to) this project's own `refresh-plaid-accounts` server-side account discovery.
+ */
+export function buildUpdateModeLinkTokenParams(userId: string, accessToken: string): UpdateModeLinkTokenParams {
+  return {
+    client_name: "SpendSmart",
+    language: "en",
+    country_codes: ["US"],
+    user: { client_user_id: userId },
+    access_token: accessToken,
+    update: { account_selection_enabled: true },
+    // Re-asserts the correct webhook URL on every reconnect, which also backfills it for any
+    // Item created before this project started passing one — see buildPlaidWebhookUrl's doc
+    // comment.
+    webhook: buildPlaidWebhookUrl(),
+    // A reconnect can equally require OAuth re-authentication (e.g. the institution's consent
+    // expired) — see PLAID_OAUTH_REDIRECT_URI's doc comment.
+    redirect_uri: PLAID_OAUTH_REDIRECT_URI,
+  };
+}
+
 /**
  * The single, trusted OAuth redirect URI every `/link/token/create` call must pass (Phase P1B,
  * moved to this dedicated Cloudflare-hosted subdomain in Phase P1B.1 because the root domain
@@ -322,18 +604,40 @@ export async function plaidFetch(
 
   const data = await response.json();
   if (!response.ok) {
-    throw new PlaidRequestError(response.status, data);
+    throw new PlaidRequestError(response.status, data, extractPlaidRequestId(response, data));
   }
   return data;
+}
+
+/**
+ * Plaid includes `request_id` in nearly every response body (success and error alike) — the one
+ * identifier Plaid Support asks for first when investigating a specific call, and the correlation
+ * identifier this project was previously discarding entirely. Some Plaid responses also echo it
+ * in an `x-request-id`-style header; checked as a fallback only, since the body field is Plaid's
+ * documented location for it. Never throws — a response Plaid didn't attach a request_id to
+ * simply yields `undefined`, same as before this existed.
+ */
+function extractPlaidRequestId(response: Response, body: unknown): string | undefined {
+  if (typeof body === "object" && body !== null && "request_id" in body) {
+    const requestId = (body as { request_id?: unknown }).request_id;
+    if (typeof requestId === "string" && requestId.length > 0) return requestId;
+  }
+  const headerRequestId = response.headers.get("x-request-id");
+  return headerRequestId && headerRequestId.length > 0 ? headerRequestId : undefined;
 }
 
 export class PlaidRequestError extends Error {
   status: number;
   body: unknown;
-  constructor(status: number, body: unknown) {
+  /** Plaid's own correlation id for this exact call, when Plaid supplied one — see
+   * `extractPlaidRequestId`. Safe to log and safe to hand to Plaid Support; never derived from or
+   * containing any credential/token material. */
+  requestId?: string;
+  constructor(status: number, body: unknown, requestId?: string) {
     super(`Plaid request failed with status ${status}`);
     this.status = status;
     this.body = body;
+    this.requestId = requestId;
   }
 }
 

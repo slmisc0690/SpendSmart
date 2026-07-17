@@ -9,12 +9,17 @@ struct DashboardView: View {
     @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
 
     @Environment(PrivacyModeManager.self) private var privacyMode
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     @State private var isPresentingSetBudget = false
     @State private var isPresentingAddExpense = false
     @State private var isPresentingSettings = false
     @State private var isPresentingMonthlySummary = false
+    @State private var isPresentingActivity = false
     @State private var selectedWeekIndex: Int?
+    /// nil means "no explicit choice yet" — `effectiveActivityTab` below falls back to
+    /// `ActivityTabPresenter.defaultTab`, same pattern as `selectedWeekIndex`/`effectiveWeekIndex`.
+    @State private var selectedActivityTab: ActivityTab?
 
     private var settings: BudgetSettings? { settingsList.first }
 
@@ -59,13 +64,32 @@ struct DashboardView: View {
         BudgetCalculator.remaining(limit: weeklyLimit, spent: spentThisWeek)
     }
 
-    /// The single source of truth for what Recent Activity shows — opted-out Manual Accounts are
-    /// filtered out FIRST, then the 5-item limit is applied to what remains, so a hidden
-    /// account's transactions never silently consume a slot that an eligible transaction should
-    /// have gotten. `transactions` is already date-descending (see the `@Query` sort above), so
-    /// filtering preserves that order.
+    /// Every selectable Recent Activity source — one per connected Plaid account actually
+    /// referenced by a locally stored transaction, plus Manual Transactions. See
+    /// `ActivityTabPresenter` for why this reads only persisted state, never Plaid.
+    private var activityTabs: [ActivityTab] {
+        ActivityTabPresenter.tabs(transactions: transactions, connections: plaidConnection.connections)
+    }
+
+    /// Same fallback pattern as `effectiveWeekIndex` below: `selectedActivityTab` is nil until the
+    /// user explicitly picks one, and falls back to `ActivityTabPresenter.defaultTab` — which also
+    /// covers the case where a previously selected connected account was since disconnected.
+    private var effectiveActivityTab: ActivityTab {
+        if let selectedActivityTab, activityTabs.contains(selectedActivityTab) { return selectedActivityTab }
+        return ActivityTabPresenter.defaultTab(tabs: activityTabs)
+    }
+
+    /// The single source of truth for what Recent Activity shows — scoped to `effectiveActivityTab`
+    /// FIRST, then opted-out Manual Accounts are filtered out, then the 5-item limit is applied to
+    /// what remains, so a hidden account's transactions never silently consume a slot an eligible
+    /// transaction should have gotten. `transactions` is already date-descending (see the `@Query`
+    /// sort above), so filtering preserves that order.
     private var recentTransactions: [FinanceTransaction] {
-        Array(transactions.filter(isEligibleForRecentActivity).prefix(5))
+        Array(
+            ActivityTabPresenter.transactions(for: effectiveActivityTab, in: transactions)
+                .filter(isEligibleForRecentActivity)
+                .prefix(5)
+        )
     }
 
     /// A transaction with no account, or one belonging to a Plaid-linked account (no opt-out
@@ -109,6 +133,7 @@ struct DashboardView: View {
 
                     weeklyCardSection
                     quickStatsSection
+                    connectedAccountsSection
                     monthlyOutlookSection
                     weekByWeekSection
                     recentActivitySection
@@ -128,6 +153,12 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $isPresentingMonthlySummary) {
                 MonthlySummaryView()
+            }
+            .sheet(isPresented: $isPresentingActivity) {
+                // Reuses the existing full Activity screen (ExpenseListView) rather than building
+                // a second one — presented modally, matching every other Dashboard destination in
+                // this file, and opened with whatever tab is currently selected here.
+                ExpenseListView(initialTab: effectiveActivityTab)
             }
         }
         .preferredColorScheme(.dark)
@@ -215,6 +246,34 @@ struct DashboardView: View {
         }
     }
 
+    // MARK: - Connected accounts (locally cached balances only — never a live Plaid call)
+
+    /// See `ConnectedAccountsDashboardPresenter` for the actual mapping logic — kept out of this
+    /// view entirely so it's unit-testable without SwiftUI/environment involvement.
+    private var connectedAccountBalanceDisplays: [ConnectedAccountsDashboardPresenter.Display] {
+        ConnectedAccountsDashboardPresenter.displays(for: plaidConnection.connections)
+    }
+
+    @ViewBuilder
+    private var connectedAccountsSection: some View {
+        if !connectedAccountBalanceDisplays.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                DashboardSectionHeader(title: "Connected Accounts")
+                CardBackground {
+                    VStack(spacing: Theme.Spacing.sm) {
+                        ForEach(Array(connectedAccountBalanceDisplays.enumerated()), id: \.element.id) { index, display in
+                            ConnectedAccountBalanceRow(display: display, isPrivacyModeEnabled: privacyMode.isEnabled)
+                            if index < connectedAccountBalanceDisplays.count - 1 {
+                                Divider().overlay(Theme.cardStroke)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
+        }
+    }
+
     // MARK: - Monthly outlook
 
     private var monthlyOutlookSection: some View {
@@ -297,10 +356,25 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Recent Activity")
 
+            // Only shown once there's more than one source to choose between — a household with
+            // no connected accounts yet never sees a single-option "Manual Transactions" tab.
+            if activityTabs.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        ForEach(activityTabs) { tab in
+                            FilterChip(title: tab.label, isSelected: tab == effectiveActivityTab) {
+                                selectedActivityTab = tab
+                            }
+                        }
+                    }
+                    .padding(.horizontal, Theme.Spacing.lg)
+                }
+            }
+
             if recentTransactions.isEmpty {
                 EmptyStateCard(
                     systemIconName: "list.bullet.rectangle.portrait.fill",
-                    message: "No expenses added yet."
+                    message: emptyActivityMessage
                 )
                 .padding(.horizontal, Theme.Spacing.lg)
             } else {
@@ -316,7 +390,26 @@ struct DashboardView: View {
                 }
                 .padding(.horizontal, Theme.Spacing.lg)
             }
+
+            Button {
+                isPresentingActivity = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text("More")
+                        .font(Theme.captionFont)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+    }
+
+    private var emptyActivityMessage: String {
+        if case .manual = effectiveActivityTab { return "No expenses added yet." }
+        return "No connected transactions yet."
     }
 }
 
@@ -375,6 +468,55 @@ private struct RecentActivityRow: View {
     }
 }
 
+/// One connected Plaid account's cached balance on the Dashboard — reads only what
+/// `ConnectedAccountsDashboardPresenter` already computed from persisted `PlaidConnectionManager`
+/// state; this view has no networking of its own.
+private struct ConnectedAccountBalanceRow: View {
+    let display: ConnectedAccountsDashboardPresenter.Display
+    var isPrivacyModeEnabled: Bool = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+            Image(systemName: "creditcard.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(Theme.accent.opacity(0.16)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(display.institutionName)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Text(subtitleText)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+
+            Spacer()
+
+            if let row = display.primaryRow {
+                VStack(alignment: .trailing, spacing: 2) {
+                    PrivacyAmountView(
+                        amount: row.amount,
+                        isPrivacyModeEnabled: isPrivacyModeEnabled,
+                        font: Theme.bodyFont,
+                        color: Theme.textPrimary
+                    )
+                    Text(row.label)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var subtitleText: String {
+        guard let updatedAt = display.updatedAt else { return "Balance not refreshed yet" }
+        return "Last updated \(updatedAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+}
+
 /// Small circular icon button used in the dashboard header (privacy toggle, settings).
 private struct HeaderIconButton: View {
     let systemName: String
@@ -423,16 +565,19 @@ private struct NoBudgetCard: View {
     DashboardView()
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }
 
 #Preview("Privacy Mode") {
     DashboardView()
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager(isEnabled: true))
+        .environment(PlaidConnectionManager())
 }
 
 #Preview("Empty") {
     DashboardView()
         .modelContainer(SampleData.emptyPreviewContainer())
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }

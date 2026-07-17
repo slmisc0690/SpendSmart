@@ -23,8 +23,11 @@
 // a plain idempotent UPDATE.
 
 import {
+  computePlaidWebhookUpdates,
   createPrivilegedClient,
+  isRecognizedPlaidWebhook,
   jsonResponse,
+  logPlaidOperation,
   logSafeError,
   verifyPlaidWebhookSignature,
 } from "../_shared/plaid.ts";
@@ -83,7 +86,10 @@ Deno.serve(async (req) => {
 
   // Deliberately logs only a small, known-safe summary — never the raw payload, since Plaid
   // webhook bodies aren't guaranteed never to carry anything sensitive in future webhook types.
-  console.log("[plaid-webhook] verified webhook received:", { webhook_type: webhookType, webhook_code: webhookCode });
+  // item_id is Plaid's own Item identifier, safe to log (it's how Plaid Support correlates a
+  // webhook delivery back to a specific Item) and distinct from any of this project's own
+  // internal ids.
+  console.log("[plaid-webhook] verified webhook received:", { webhook_type: webhookType, webhook_code: webhookCode, item_id: itemId });
 
   if (!itemId) {
     // WEBHOOK_UPDATE_ACKNOWLEDGED (sent after you call /webhook/update) and a few other
@@ -108,7 +114,7 @@ Deno.serve(async (req) => {
       // A webhook for an Item this project doesn't have a row for (already disconnected, or a
       // stale/duplicate delivery after a disconnect) — acknowledge, don't error. Plaid retries on
       // non-2xx, and retrying forever for an Item that will never exist here again helps no one.
-      console.log("[plaid-webhook] no matching plaid_items row (already disconnected?):", { item_id_known: true });
+      console.log("[plaid-webhook] no matching plaid_items row (already disconnected?):", { item_id: itemId, matched: false });
       return jsonResponse({ received: true });
     }
 
@@ -116,46 +122,17 @@ Deno.serve(async (req) => {
     const updates: Record<string, unknown> = {
       last_webhook_code: webhookCode,
       last_webhook_at: nowIso,
+      // See computePlaidWebhookUpdates's own doc comment for the full list of webhook
+      // type/codes this handles and why the mapping lives there instead of inline here.
+      ...computePlaidWebhookUpdates(webhookType, webhookCode, payload, nowIso),
     };
 
-    switch (`${webhookType}:${webhookCode}`) {
-      case "ITEM:ITEM_LOGIN_REQUIRED":
-        // The access_token can no longer be used until the user re-authenticates via Link update
-        // mode (see create-link-token's connection_id branch). sync-transactions/sync-balances
-        // both check this flag and fail fast with a distinct error rather than hitting Plaid with
-        // a call that's guaranteed to fail.
-        updates.requires_reauth = true;
-        break;
-
-      case "ITEM:PENDING_EXPIRATION":
-        // Mainly OAuth institutions whose consent expires on a schedule — this is an early
-        // warning before ITEM_LOGIN_REQUIRED actually fires. Store Plaid's own expiration
-        // timestamp if provided so the app can show "reconnect before <date>" instead of just a
-        // generic warning; fall back to "now" (i.e. treat it as immediately actionable) if Plaid
-        // didn't include one, since the webhook firing at all means expiration is imminent either
-        // way.
-        updates.pending_expiration_at = payload.consent_expiration_time ?? nowIso;
-        break;
-
-      case "ITEM:NEW_ACCOUNTS_AVAILABLE":
-        // The institution has accounts this Item doesn't cover yet. The app can prompt the user
-        // to reconnect (update mode) to add them; exchange-public-token's account-discovery step
-        // re-runs and clears this flag the next time that happens.
-        updates.new_accounts_available = true;
-        break;
-
-      case "WEBHOOK:WEBHOOK_UPDATE_ACKNOWLEDGED":
-        // Plaid's confirmation that a prior POST /webhook/update call took effect — nothing to
-        // change here beyond the last_webhook_code/at bookkeeping already in `updates`.
-        break;
-
-      default:
-        // Every other webhook type/code (including the pre-existing SYNC_UPDATES_AVAILABLE,
-        // which the app currently discovers via its own polling/pull-to-refresh instead) is
-        // logged but not acted on — intentionally conservative: only flip a flag for webhook
-        // codes this project has an actual, tested response to.
-        console.log("[plaid-webhook] unhandled webhook type/code, logged only:", { webhook_type: webhookType, webhook_code: webhookCode });
-        break;
+    if (!isRecognizedPlaidWebhook(webhookType, webhookCode)) {
+      // Every other webhook type/code (including the pre-existing SYNC_UPDATES_AVAILABLE, which
+      // the app currently discovers via its own polling/pull-to-refresh instead) is logged but
+      // not acted on — intentionally conservative: only flip a flag for webhook codes this
+      // project has an actual, tested response to.
+      console.log("[plaid-webhook] unhandled webhook type/code, logged only:", { webhook_type: webhookType, webhook_code: webhookCode });
     }
 
     const { error: updateError } = await supabase
@@ -165,9 +142,17 @@ Deno.serve(async (req) => {
     if (updateError) throw updateError;
 
     console.log("[plaid-webhook] plaid_items row updated:", true);
+    logPlaidOperation({
+      operation: "plaid-webhook",
+      outcome: "success",
+      connectionId: item.id,
+      itemId,
+      webhookType: webhookType ?? undefined,
+      webhookCode: webhookCode ?? undefined,
+    });
     return jsonResponse({ received: true });
   } catch (error) {
-    logSafeError("plaid-webhook processing failed", error);
+    logSafeError(`plaid-webhook processing failed item_id=${itemId}`, error);
     // Still 200 — Plaid retries on non-2xx, and a transient Postgres error here shouldn't cause
     // Plaid to hammer this endpoint; the webhook's effect (e.g. reauth prompt) is best-effort,
     // not the sole mechanism the app depends on (the user will also eventually hit a failed sync

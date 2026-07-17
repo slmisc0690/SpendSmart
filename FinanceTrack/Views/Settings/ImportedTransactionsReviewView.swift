@@ -2,16 +2,16 @@ import SwiftUI
 import SwiftData
 
 /// Shows transactions persisted to SwiftData by `PlaidTransactionImportService.applySync` (called
-/// from Connected Accounts' Manual Refresh / initial sync-after-connect) — read-only, clearly
-/// marked as not counted toward any total yet. This view does NOT call `syncTransactions()`
-/// itself: Plaid's `/transactions/sync` is a stateful, cursor-advancing endpoint, and having two
-/// independent call sites (this view and Manual Refresh) both hit it was exactly the bug that lost
-/// transactions — Manual Refresh would consume and discard the diff, and this view's own
-/// subsequent call would then correctly get nothing back. Reading from the `@Query` below instead
-/// means this view has nothing to fetch — it just reflects whatever's already been persisted, and
-/// updates automatically (SwiftData's `@Query` re-runs whenever the model context saves).
-/// "Add to Budget", "Match", "Ignore", and "Exclude" remain disabled placeholders until that
-/// approval flow is built.
+/// from Connected Accounts' Manual Refresh / initial sync-after-connect) — a simple, read-only
+/// reference list for comparing against manually entered transactions, using the same minimal
+/// `ConnectedTransactionRow` presentation (description, date, amount) shown on the Dashboard and
+/// Activity screen's connected tabs. This view does NOT call `syncTransactions()` itself: Plaid's
+/// `/transactions/sync` is a stateful, cursor-advancing endpoint, and having two independent call
+/// sites (this view and Manual Refresh) both hit it was exactly the bug that lost transactions —
+/// Manual Refresh would consume and discard the diff, and this view's own subsequent call would
+/// then correctly get nothing back. Reading from the `@Query` below instead means this view has
+/// nothing to fetch — it just reflects whatever's already been persisted, and updates
+/// automatically (SwiftData's `@Query` re-runs whenever the model context saves).
 struct ImportedTransactionsReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(PrivacyModeManager.self) private var privacyMode
@@ -66,7 +66,7 @@ struct ImportedTransactionsReviewView: View {
     }
 
     private var header: some View {
-        Text("Imported transactions are read-only and not counted in your weekly or monthly totals until you review and approve them here.")
+        Text("Imported transactions are read-only and never counted in your weekly or monthly totals — this is a simple reference list for comparing against what you've manually entered.")
             .font(Theme.captionFont)
             .foregroundStyle(Theme.textSecondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -110,14 +110,7 @@ struct ImportedTransactionsReviewView: View {
             VStack(spacing: Theme.Spacing.md) {
                 ForEach(importedTransactions, id: \.id) { transaction in
                     CardBackground {
-                        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                            HStack(spacing: 6) {
-                                TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
-                            }
-                            notCountedBadge
-                            Divider().overlay(Theme.cardStroke)
-                            ImportedTransactionActionsRow()
-                        }
+                        ConnectedTransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
                     }
                 }
             }
@@ -145,47 +138,6 @@ struct ImportedTransactionsReviewView: View {
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }
-    }
-
-    private var notCountedBadge: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "eye.slash.fill")
-                .font(.system(size: 9, weight: .semibold))
-            Text("Not counted yet")
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-        }
-        .foregroundStyle(Theme.statusWarning)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(Theme.statusWarning.opacity(0.15)))
-    }
-}
-
-/// Disabled placeholder row for the four actions a future approval flow will support. Every
-/// button here is inert — tapping does nothing — until that flow is built.
-private struct ImportedTransactionActionsRow: View {
-    var body: some View {
-        HStack(spacing: Theme.Spacing.sm) {
-            actionButton(icon: "plus.circle", title: "Add")
-            actionButton(icon: "link", title: "Match")
-            actionButton(icon: "minus.circle", title: "Ignore")
-            actionButton(icon: "eye.slash", title: "Exclude")
-        }
-    }
-
-    @ViewBuilder
-    private func actionButton(icon: String, title: String) -> some View {
-        VStack(spacing: 2) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-            Text(title)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-        }
-        .foregroundStyle(Theme.textTertiary)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.cardSurface))
-        .opacity(0.6)
     }
 }
 

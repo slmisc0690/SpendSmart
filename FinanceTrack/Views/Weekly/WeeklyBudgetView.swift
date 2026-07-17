@@ -7,9 +7,13 @@ struct WeeklyBudgetView: View {
 
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(\.modelContext) private var modelContext
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     @State private var isPresentingEditLimit = false
-    @State private var selectedFilter: TransactionListFilter = .allCounted
+    @State private var selectedFilter: WeeklyBreakdownFilter = .manualTransactions
+    /// nil means "no explicit choice yet" — falls back to the first available connected account,
+    /// same pattern `ExpenseListView`/`DashboardView` use for their own tab selection.
+    @State private var selectedConnectedAccountId: String?
 
     private var settings: BudgetSettings? { settingsList.first }
 
@@ -49,34 +53,69 @@ struct WeeklyBudgetView: View {
         transactions.filter { weekInterval.contains($0.date) }
     }
 
-    /// This week's transactions matching the selected display filter — rows only, never used
-    /// to compute totals.
-    private var filteredTransactions: [FinanceTransaction] {
-        switch selectedFilter {
-        case .allCounted: return transactionsThisWeek.filter { BudgetCalculator.isCounted($0, includePending: includePending, context: .weekly) }
-        case .pending: return transactionsThisWeek.filter { $0.isPending }
-        case .excluded: return transactionsThisWeek.filter { $0.isExcludedFromReports }
-        }
+    /// This week's qualifying general Manual Transactions — locally entered (`source != .plaid`),
+    /// never owned by a manually created Manual Account (`account == nil`, the same rule
+    /// `ActivityTabPresenter` uses), and eligible per the existing weekly budget rules. Preserves
+    /// the population/behavior the former "All Counted" filter represented, corrected to exclude
+    /// Manual Account-owned rows (which `isCounted` alone never filtered out).
+    private var manualTransactionsThisWeek: [FinanceTransaction] {
+        transactionsThisWeek.filter { $0.account == nil && BudgetCalculator.isCounted($0, includePending: includePending, context: .weekly) }
     }
 
-    /// One entry per day that has at least one row matching the current filter. Each day's total
-    /// is always computed from *all* of that day's transactions (via `BudgetCalculator`), never
-    /// just the filtered rows, so the figure shown is always the true counted total regardless
-    /// of which filter chip is active.
+    /// Every connected-account tab actually represented by this week's transactions — reuses
+    /// `ActivityTabPresenter` rather than re-deriving the same account list a second way.
+    private var connectedAccountTabs: [ActivityTab] {
+        ActivityTabPresenter.tabs(transactions: transactionsThisWeek, connections: plaidConnection.connections)
+            .filter { if case .connectedAccount = $0 { return true }; return false }
+    }
+
+    /// The connected account Account Pending/Account All currently show — the user's explicit
+    /// choice if it's still valid, otherwise the first available connected account, otherwise
+    /// `nil` (no connected activity this week at all).
+    private var effectiveConnectedAccountTab: ActivityTab? {
+        if let selectedConnectedAccountId, let match = connectedAccountTabs.first(where: { $0.id == selectedConnectedAccountId }) {
+            return match
+        }
+        return connectedAccountTabs.first
+    }
+
+    /// This week's imported transactions for the currently selected connected account only —
+    /// never another connected account, never a locally entered Manual Transaction (even one
+    /// "Paid With" this same account — that's attribution metadata, not account membership).
+    private var accountAllTransactionsThisWeek: [FinanceTransaction] {
+        guard let tab = effectiveConnectedAccountTab else { return [] }
+        return ActivityTabPresenter.transactions(for: tab, in: transactionsThisWeek)
+    }
+
+    private var accountPendingTransactionsThisWeek: [FinanceTransaction] {
+        accountAllTransactionsThisWeek.filter { $0.isPending }
+    }
+
+    /// One entry per day for the selected filter's population.
+    ///
+    /// Manual Transactions keeps the existing `BudgetCalculator`-derived total (net
+    /// expense-minus-refund, gated by the weekly budget flag) — its sign/eligibility behavior is
+    /// unchanged. Account Pending/Account All use `DailyTransactionTotals` instead: imported rows
+    /// always have `countsTowardWeeklyBudget == false` by design, so a `BudgetCalculator` total
+    /// over them is always $0.00 regardless of how many rows are visible — these two use an exact
+    /// sum of the displayed rows instead, so the heading can never disagree with what's listed.
     private var dailyGroups: [(day: Date, transactions: [FinanceTransaction], total: Decimal)] {
-        let calendar = Calendar.current
-        let days = Set(filteredTransactions.map { calendar.startOfDay(for: $0.date) }).sorted(by: >)
-
-        return days.map { day in
-            let rows = filteredTransactions
-                .filter { calendar.isDate($0.date, inSameDayAs: day) }
-                .sorted { $0.date > $1.date }
-
-            let allDayTransactions = transactionsThisWeek.filter { calendar.isDate($0.date, inSameDayAs: day) }
-            let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day
-            let total = BudgetCalculator.weeklySpent(allDayTransactions, in: DateInterval(start: day, end: dayEnd), includePending: includePending)
-
-            return (day, rows, total)
+        switch selectedFilter {
+        case .manualTransactions:
+            let calendar = Calendar.current
+            let days = Set(manualTransactionsThisWeek.map { calendar.startOfDay(for: $0.date) }).sorted(by: >)
+            return days.map { day in
+                let rows = manualTransactionsThisWeek
+                    .filter { calendar.isDate($0.date, inSameDayAs: day) }
+                    .sorted { $0.date > $1.date }
+                let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day
+                let total = BudgetCalculator.weeklySpent(rows, in: DateInterval(start: day, end: dayEnd), includePending: includePending)
+                return (day, rows, total)
+            }
+        case .accountPending:
+            return DailyTransactionTotals.groups(for: accountPendingTransactionsThisWeek).map { ($0.day, $0.transactions, $0.total) }
+        case .accountAll:
+            return DailyTransactionTotals.groups(for: accountAllTransactionsThisWeek).map { ($0.day, $0.transactions, $0.total) }
         }
     }
 
@@ -231,7 +270,7 @@ struct WeeklyBudgetView: View {
             DashboardSectionHeader(title: "Daily Breakdown")
 
             HStack(spacing: Theme.Spacing.sm) {
-                ForEach(TransactionListFilter.allCases) { filter in
+                ForEach(WeeklyBreakdownFilter.allCases) { filter in
                     FilterChip(title: filter.rawValue, isSelected: selectedFilter == filter) {
                         selectedFilter = filter
                     }
@@ -239,7 +278,16 @@ struct WeeklyBudgetView: View {
             }
             .padding(.horizontal, Theme.Spacing.lg)
 
-            if dailyGroups.isEmpty {
+            if selectedFilter != .manualTransactions, connectedAccountTabs.count > 1 {
+                connectedAccountSelector
+            }
+
+            if selectedFilter != .manualTransactions, connectedAccountTabs.isEmpty {
+                Text("No connected account activity this week yet")
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.horizontal, Theme.Spacing.lg)
+            } else if dailyGroups.isEmpty {
                 Text("No transactions this week yet")
                     .font(Theme.bodyFont)
                     .foregroundStyle(Theme.textTertiary)
@@ -251,12 +299,30 @@ struct WeeklyBudgetView: View {
                             day: group.day,
                             transactions: group.transactions,
                             dailyTotal: group.total,
-                            isPrivacyModeEnabled: privacyMode.isEnabled
+                            isPrivacyModeEnabled: privacyMode.isEnabled,
+                            connectedAccountLabel: selectedFilter == .manualTransactions
+                                ? { ConnectedAccountOptionPresenter.label(forAccountId: $0.plaidAccountId, in: plaidConnection.connections) }
+                                : { _ in nil }
                         )
                     }
                 }
                 .padding(.horizontal, Theme.Spacing.lg)
             }
+        }
+    }
+
+    /// Only shown for Account Pending/Account All when more than one connected account has
+    /// activity this week — with a single connected account there's nothing to choose between.
+    private var connectedAccountSelector: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Theme.Spacing.sm) {
+                ForEach(connectedAccountTabs) { tab in
+                    FilterChip(title: tab.label, isSelected: tab.id == effectiveConnectedAccountTab?.id) {
+                        selectedConnectedAccountId = tab.id
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 }
@@ -265,6 +331,7 @@ struct WeeklyBudgetView: View {
     WeeklyBudgetView()
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }
 
 #Preview("No Budget") {
@@ -276,10 +343,12 @@ struct WeeklyBudgetView: View {
             return container
         }())
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }
 
 #Preview("No Accounts") {
     WeeklyBudgetView()
         .modelContainer(SampleData.emptyPreviewContainer())
         .environment(PrivacyModeManager())
+        .environment(PlaidConnectionManager())
 }

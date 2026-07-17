@@ -28,6 +28,31 @@ enum PlaidOAuthReturn {
     }
 }
 
+/// A non-sensitive, locally cached snapshot of one connected Plaid account's balance, as of the
+/// last successful `sync-balances` response for that account — never a token, never an account or
+/// routing number. Exists so the Dashboard can show a balance without ever contacting Plaid itself
+/// (see `PlaidConnectionManager.updateCachedBalances`); `ConnectedAccountsView` remains the only
+/// place that actually calls `sync-balances` live.
+struct CachedPlaidAccountBalance: Codable, Equatable {
+    /// Plaid's own `account_id` — stable across syncs, the same identifier
+    /// `PlaidAccountBalance.accountId` already carries. Never a Plaid `item_id`/`access_token`.
+    let accountId: String
+    var name: String?
+    var mask: String?
+    var type: String?
+    var subtype: String?
+    var currentBalance: Decimal?
+    var availableBalance: Decimal?
+    var creditLimit: Decimal?
+    var isoCurrencyCode: String?
+    var unofficialCurrencyCode: String?
+    /// When SpendSmart itself successfully received this balance response — `sync-balances`'s own
+    /// response carries no timestamp, so this is always stamped by the app at receipt time, never
+    /// fabricated for a balance that hasn't actually been fetched. See
+    /// `PlaidConnectionManager.updateCachedBalances`, the only place this is ever set.
+    let updatedAt: Date
+}
+
 /// One linked institution's local UI-state snapshot — mirrors a `plaid_items` row's non-sensitive
 /// fields. `id` is the row's own opaque UUID (`connection_id` in every backend response), never a
 /// Plaid `item_id`/`access_token`, neither of which this device ever holds.
@@ -46,10 +71,23 @@ struct PlaidConnection: Codable, Identifiable, Equatable {
     /// Mirrors `plaid_items.pending_expiration_at` — set once Plaid sends a `PENDING_EXPIRATION`
     /// webhook (mainly OAuth institutions with a scheduled consent expiry).
     var pendingExpirationAt: Date?
+    /// Mirrors `plaid_items.pending_disconnect_at` — set once Plaid sends a `PENDING_DISCONNECT`
+    /// webhook (this Item is expected to stop working soon). Never causes any automatic action on
+    /// this device — same "record only" stance as the backend column it mirrors.
+    var pendingDisconnectAt: Date?
     /// Mirrors `plaid_items.new_accounts_available` — set once Plaid sends a
     /// `NEW_ACCOUNTS_AVAILABLE` webhook; cleared the next time this connection is reconnected via
     /// Link update mode (which re-runs account discovery).
     var newAccountsAvailable: Bool
+    /// The last successfully retrieved balance for each account this connection covers, keyed by
+    /// Plaid's own `account_id` (a single Item/connection can cover more than one physical
+    /// account). Only ever set by `PlaidConnectionManager.updateCachedBalances`, called after a
+    /// SUCCESSFUL `sync-balances` response — never on failure, so a transient error can never wipe
+    /// out a previously-known-good balance. Deliberately `Optional` rather than defaulting to an
+    /// empty dictionary: Swift's synthesized `Decodable` treats a missing key for an `Optional`
+    /// property as `nil` automatically, so a `PlaidConnection` persisted before this field existed
+    /// decodes cleanly with no custom migration logic required.
+    var cachedBalances: [String: CachedPlaidAccountBalance]? = nil
 
     init(
         id: String,
@@ -58,7 +96,9 @@ struct PlaidConnection: Codable, Identifiable, Equatable {
         lastSyncedAt: Date? = nil,
         requiresReauth: Bool = false,
         pendingExpirationAt: Date? = nil,
-        newAccountsAvailable: Bool = false
+        pendingDisconnectAt: Date? = nil,
+        newAccountsAvailable: Bool = false,
+        cachedBalances: [String: CachedPlaidAccountBalance]? = nil
     ) {
         self.id = id
         self.institutionId = institutionId
@@ -66,7 +106,9 @@ struct PlaidConnection: Codable, Identifiable, Equatable {
         self.lastSyncedAt = lastSyncedAt
         self.requiresReauth = requiresReauth
         self.pendingExpirationAt = pendingExpirationAt
+        self.pendingDisconnectAt = pendingDisconnectAt
         self.newAccountsAvailable = newAccountsAvailable
+        self.cachedBalances = cachedBalances
     }
 }
 
@@ -250,6 +292,7 @@ final class PlaidConnectionManager {
         institutionName: String,
         requiresReauth: Bool,
         pendingExpirationAt: Date?,
+        pendingDisconnectAt: Date?,
         newAccountsAvailable: Bool
     ) {
         guard let index = connections.firstIndex(where: { $0.id == connectionId }) else { return }
@@ -257,6 +300,7 @@ final class PlaidConnectionManager {
         connections[index].institutionName = institutionName
         connections[index].requiresReauth = requiresReauth
         connections[index].pendingExpirationAt = pendingExpirationAt
+        connections[index].pendingDisconnectAt = pendingDisconnectAt
         connections[index].newAccountsAvailable = newAccountsAvailable
     }
 
@@ -271,6 +315,14 @@ final class PlaidConnectionManager {
         connections.removeAll { $0.id == connectionId }
     }
 
+    /// Clears every stored connection at once — used only for full account deletion (never for
+    /// disconnecting a single institution, which must always go through `remove(connectionId:)`
+    /// so it can never affect a connection the user didn't ask to remove). Persists immediately
+    /// via the same `didSet`-triggered `persist()` every other mutation here already uses.
+    func clearAllConnections() {
+        connections.removeAll()
+    }
+
     /// Reconciles the local connection list against a SUCCESSFUL `list-connections` response —
     /// the only way this device can recover a connection it never locally recorded (e.g. the
     /// server-side Item was established through a different device/session, so this device has
@@ -282,16 +334,54 @@ final class PlaidConnectionManager {
     /// local state must be left untouched by simply not calling this at all.
     func restoreFromServer(_ statuses: [PlaidConnectionStatus]) {
         connections = statuses.map { status in
-            let existingLastSyncedAt = connections.first(where: { $0.id == status.connectionId })?.lastSyncedAt
+            let existing = connections.first(where: { $0.id == status.connectionId })
             return PlaidConnection(
                 id: status.connectionId,
                 institutionId: status.institutionId,
                 institutionName: status.institutionName,
-                lastSyncedAt: existingLastSyncedAt,
+                lastSyncedAt: existing?.lastSyncedAt,
                 requiresReauth: status.requiresReauth,
                 pendingExpirationAt: status.pendingExpirationAt,
-                newAccountsAvailable: status.newAccountsAvailable
+                pendingDisconnectAt: status.pendingDisconnectAt,
+                newAccountsAvailable: status.newAccountsAvailable,
+                // Same reasoning as `lastSyncedAt` just above — the server has no concept of this
+                // device's locally cached balances, so a server-authoritative reconcile must
+                // preserve whatever was already cached rather than wiping it back to nil.
+                cachedBalances: existing?.cachedBalances
             )
         }
+    }
+
+    /// Updates the locally cached balance for every account in `balances`, keyed by Plaid's own
+    /// `account_id` — called ONLY after `ConnectedAccountsView.refreshBalances` receives a
+    /// SUCCESSFUL `sync-balances` response (see that call site). Never called on failure, which is
+    /// what actually preserves the previous cached balance across a transient error: this method
+    /// simply isn't invoked, rather than containing its own failure-handling branch.
+    ///
+    /// Merges into whatever this connection already had cached rather than replacing the whole
+    /// dictionary — an account this particular call didn't report (e.g. Plaid returned fewer
+    /// accounts than a prior call, or a caller passes a partial list) keeps its last known cached
+    /// balance instead of being dropped, since a stale-but-real balance is more useful on the
+    /// Dashboard than none at all.
+    func updateCachedBalances(connectionId: String, balances: [PlaidAccountBalance]) {
+        guard let index = connections.firstIndex(where: { $0.id == connectionId }) else { return }
+        var updated = connections[index].cachedBalances ?? [:]
+        let fetchedAt = Date.now
+        for balance in balances {
+            updated[balance.accountId] = CachedPlaidAccountBalance(
+                accountId: balance.accountId,
+                name: balance.name,
+                mask: balance.mask,
+                type: balance.type,
+                subtype: balance.subtype,
+                currentBalance: balance.currentBalance,
+                availableBalance: balance.availableBalance,
+                creditLimit: balance.creditLimit,
+                isoCurrencyCode: balance.isoCurrencyCode,
+                unofficialCurrencyCode: balance.unofficialCurrencyCode,
+                updatedAt: fetchedAt
+            )
+        }
+        connections[index].cachedBalances = updated
     }
 }

@@ -20,6 +20,16 @@ struct PlaidExchangeResult: Equatable {
     let institutionId: String?
     let institutionName: String
     let accounts: [PlaidAccountSummary]
+    /// True when, at the moment this Item was created, the authenticated user already had a
+    /// DIFFERENT connection for the same institution — see `exchange-public-token`'s duplicate-
+    /// Item detection (`computeDuplicateInstitutionResult` in `_shared/plaid.ts`). Never blocks
+    /// or invalidates the new connection by itself; this is metadata only, for the call site to
+    /// act on (see `ConnectedAccountsView.handleLinkSuccess`).
+    let duplicateInstitution: Bool
+    /// The OTHER connection's opaque id — never this new one's, never a Plaid item_id. Only
+    /// meaningful when `duplicateInstitution` is true.
+    let existingConnectionId: String?
+    let existingInstitutionName: String?
 }
 
 /// One account's current balance, as of the last `syncBalances` call — never persisted into
@@ -58,6 +68,11 @@ struct PlaidConnectionStatus: Equatable {
     let institutionName: String
     let requiresReauth: Bool
     let pendingExpirationAt: Date?
+    /// Mirrors `plaid_items.pending_disconnect_at` — set once Plaid sends a `PENDING_DISCONNECT`
+    /// webhook (this Item is expected to stop working soon). Never causes any automatic action;
+    /// see the `pending_disconnect_at` column's own comment in
+    /// `0006_plaid_items_pending_disconnect.sql`.
+    let pendingDisconnectAt: Date?
     let newAccountsAvailable: Bool
 }
 
@@ -257,7 +272,10 @@ struct SupabasePlaidBackendService: PlaidBackendService {
             connectionId: response.connectionId,
             institutionId: response.institutionId,
             institutionName: response.institutionName,
-            accounts: response.accounts.map(\.asPlaidAccountSummary)
+            accounts: response.accounts.map(\.asPlaidAccountSummary),
+            duplicateInstitution: response.duplicateInstitution,
+            existingConnectionId: response.existingConnectionId,
+            existingInstitutionName: response.existingInstitutionName
         )
     }
 
@@ -456,10 +474,16 @@ private struct ExchangeResponse: Decodable {
     let institutionId: String?
     let institutionName: String
     let accounts: [BackendAccountSummaryDTO]
+    let duplicateInstitution: Bool
+    let existingConnectionId: String?
+    let existingInstitutionName: String?
     enum CodingKeys: String, CodingKey {
         case connected, connectionId = "connection_id"
         case institutionId = "institution_id", institutionName = "institution_name"
         case accounts
+        case duplicateInstitution = "duplicate_institution"
+        case existingConnectionId = "existing_connection_id"
+        case existingInstitutionName = "existing_institution_name"
     }
 }
 
@@ -559,12 +583,14 @@ private struct BackendConnectionStatusDTO: Decodable {
     let institutionName: String
     let requiresReauth: Bool
     let pendingExpirationAt: Date?
+    let pendingDisconnectAt: Date?
     let newAccountsAvailable: Bool
     enum CodingKeys: String, CodingKey {
         case connectionId = "connection_id"
         case institutionId = "institution_id", institutionName = "institution_name"
         case requiresReauth = "requires_reauth"
         case pendingExpirationAt = "pending_expiration_at"
+        case pendingDisconnectAt = "pending_disconnect_at"
         case newAccountsAvailable = "new_accounts_available"
     }
 
@@ -575,6 +601,7 @@ private struct BackendConnectionStatusDTO: Decodable {
             institutionName: institutionName,
             requiresReauth: requiresReauth,
             pendingExpirationAt: pendingExpirationAt,
+            pendingDisconnectAt: pendingDisconnectAt,
             newAccountsAvailable: newAccountsAvailable
         )
     }

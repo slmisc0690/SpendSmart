@@ -24,6 +24,7 @@ import {
   EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
+  logPlaidOperation,
   logSafeError,
   refreshPlaidAccounts,
   requireAuthenticatedUserId,
@@ -73,6 +74,12 @@ Deno.serve(async (req) => {
 
     const accountRows = await refreshPlaidAccounts(supabase, item.id, item.access_token);
     console.log("[sync-balances] plaid_accounts rows saved:", accountRows.length);
+    logPlaidOperation({
+      operation: "sync-balances",
+      outcome: "success",
+      connectionId: item.id,
+      accountCount: accountRows.length,
+    });
 
     // Sanitized response — account identifiers + balances only, never access_token. Money-valued
     // fields (balances AND credit_limit) are sent as STRINGS, not JSON numbers — same reasoning
@@ -96,7 +103,7 @@ Deno.serve(async (req) => {
       })),
     });
   } catch (error) {
-    logSafeError("sync-balances failed", error);
+    logSafeError(`sync-balances failed connection_id=${typeof connection_id === "string" ? connection_id : "unknown"}`, error);
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }

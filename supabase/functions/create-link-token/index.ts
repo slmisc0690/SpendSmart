@@ -15,11 +15,15 @@
 
 import {
   assertItemEnvironmentMatches,
+  buildLinkTokenCreatedLogFields,
   buildPlaidWebhookUrl,
+  buildUpdateModeLinkTokenParams,
   createPrivilegedClient,
   EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
+  loadPlaidCredentials,
+  logPlaidOperation,
   logSafeError,
   PLAID_OAUTH_REDIRECT_URI,
   plaidFetch,
@@ -78,19 +82,21 @@ Deno.serve(async (req) => {
       // the host it was originally issued under (see assertItemEnvironmentMatches's doc comment).
       assertItemEnvironmentMatches(item.environment);
 
-      const data = await plaidFetch("/link/token/create", {
-        client_name: "SpendSmart",
-        language: "en",
-        country_codes: ["US"],
-        user: { client_user_id: userId },
-        access_token: item.access_token,
-        // Re-asserts the correct webhook URL on every reconnect, which also backfills it for any
-        // Item created before this project started passing one — see buildPlaidWebhookUrl's doc
-        // comment.
-        webhook: buildPlaidWebhookUrl(),
-        // A reconnect can equally require OAuth re-authentication (e.g. the institution's consent
-        // expired) — see PLAID_OAUTH_REDIRECT_URI's doc comment.
-        redirect_uri: PLAID_OAUTH_REDIRECT_URI,
+      // See buildUpdateModeLinkTokenParams's own doc comment for exactly what this sends,
+      // including `update.account_selection_enabled` (Plaid's update-mode account-selection
+      // surface — lets the user pick up newly available accounts during this Link session).
+      const data = await plaidFetch(
+        "/link/token/create",
+        buildUpdateModeLinkTokenParams(userId, item.access_token) as unknown as Record<string, unknown>,
+      );
+      console.log("[create-link-token] link token created:", buildLinkTokenCreatedLogFields(true, item.environment, true, true));
+      logPlaidOperation({
+        operation: "create-link-token",
+        outcome: "success",
+        environment: item.environment ?? undefined,
+        connectionId: connection_id,
+        requestId: typeof data.request_id === "string" ? data.request_id : undefined,
+        mode: "update_mode",
       });
       return jsonResponse({ link_token: data.link_token, expiration: data.expiration });
     }
@@ -128,11 +134,25 @@ Deno.serve(async (req) => {
     }
 
     const data = await plaidFetch("/link/token/create", linkTokenParams);
+    console.log(
+      "[create-link-token] link token created:",
+      buildLinkTokenCreatedLogFields(false, loadPlaidCredentials().environment, true, true),
+    );
+    logPlaidOperation({
+      operation: "create-link-token",
+      outcome: "success",
+      environment: loadPlaidCredentials().environment,
+      requestId: typeof data.request_id === "string" ? data.request_id : undefined,
+      mode: "new_connection",
+    });
 
     // Only the link_token crosses back to the client — nothing else from this response.
     return jsonResponse({ link_token: data.link_token, expiration: data.expiration });
   } catch (error) {
-    logSafeError("create-link-token failed", error);
+    logSafeError(
+      `create-link-token failed${connection_id !== undefined ? ` connection_id=${connection_id}` : ""}`,
+      error,
+    );
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }

@@ -2,6 +2,17 @@ import SwiftUI
 import SwiftData
 import UIKit
 
+/// The two verified, hosted legal documents for SpendSmart — a single source of truth so
+/// `SettingsView` (About section) and `ConnectedAccountsView` (pre-Link disclosure) never risk
+/// drifting apart on the exact URL. Hosted at S&L Development LLC's own domain, not Plaid's —
+/// these are SpendSmart's own Privacy Policy/Terms; the disclosure that Plaid's own separate
+/// privacy policy/terms also apply is handled inline where it's shown, since that's a link to
+/// plaid.com, not to either of these.
+enum SpendSmartLegal {
+    static let privacyPolicyURL = URL(string: "https://legal.sldevapps.com/privacy-policy.md")!
+    static let termsOfServiceURL = URL(string: "https://legal.sldevapps.com/terms-of-service.md")!
+}
+
 struct SettingsView: View {
     /// True when presented as a sheet (e.g. from the Dashboard's gear icon), which needs an
     /// explicit way to close it. False in the normal tab context, where dismiss would be a no-op
@@ -219,7 +230,10 @@ struct SettingsView: View {
                     labeledAmountField(title: "Weekly Spending Limit", amount: $weeklyLimit, onSubmit: saveWeeklyLimit)
                     projectedSavingsRow
                     Divider().overlay(Theme.cardStroke)
-                    labeledAmountField(title: "Monthly Goal (optional)", amount: $monthlyGoal, onSubmit: saveMonthlyGoal)
+                    labeledAmountField(title: "Monthly Savings Goal (optional)", amount: $monthlyGoal, onSubmit: saveMonthlyGoal)
+                    Text("The amount you want to save each month. This doesn't change your Weekly Spending Limit or the estimate above — it's simply your own target to track against.")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
                     Divider().overlay(Theme.cardStroke)
 
                     TransactionToggleRow(
@@ -258,12 +272,12 @@ struct SettingsView: View {
     @ViewBuilder
     private var projectedSavingsRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Projected Monthly Savings")
+            Text("Estimated Savings This Month")
                 .font(Theme.captionFont)
                 .foregroundStyle(Theme.textTertiary)
 
             if !hasIncomeDataForProjection {
-                Text("Add income and bills in Monthly Plan to estimate savings.")
+                Text("Add income and bills in Monthly Plan to calculate this estimate — there isn't enough information yet.")
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
             } else if projectedSavingsFromWeeklyLimit >= 0 {
@@ -292,6 +306,12 @@ struct SettingsView: View {
                 }
                 .font(Theme.captionFont)
                 .foregroundStyle(Theme.statusOver)
+            }
+
+            if hasIncomeDataForProjection {
+                Text("Estimated income minus planned bills and your Monthly Plan buffer, minus your Weekly Spending Limit for every week this month.")
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(Theme.textTertiary)
             }
         }
     }
@@ -451,7 +471,7 @@ struct SettingsView: View {
 
                     Divider().overlay(Theme.cardStroke)
 
-                    Text("SpendSmart is local-only for now. Your data stays on this device and is never sent anywhere.")
+                    Text("Manually entered data stays on this device. Connecting a financial institution through Plaid is optional and, once connected, syncs account data through a secure backend — see Security Notes for details.")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
 
@@ -512,7 +532,7 @@ struct SettingsView: View {
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    Text("All data is stored locally on this device. SpendSmart has no bank connection yet — nothing is uploaded or synced.")
+                    Text("Manually entered data is stored locally on this device. Connecting a financial institution through Plaid is optional and syncs account data through a secure backend.")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
 
@@ -641,7 +661,7 @@ struct SettingsView: View {
                             Text("SpendSmart")
                                 .font(Theme.headlineFont)
                                 .foregroundStyle(Theme.textPrimary)
-                            Text("Manual & local-only personal finance tracker")
+                            Text("Personal finance tracker with optional Plaid-connected accounts")
                                 .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(Theme.textTertiary)
                         }
@@ -658,9 +678,35 @@ struct SettingsView: View {
                             .font(Theme.bodyFont)
                             .foregroundStyle(Theme.textTertiary)
                     }
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    legalLink(title: "Privacy Policy", url: SpendSmartLegal.privacyPolicyURL)
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    legalLink(title: "Terms of Service", url: SpendSmartLegal.termsOfServiceURL)
                 }
             }
             .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    /// One row in the About section that opens a legal document in the system browser via
+    /// standard SwiftUI `Link` behavior — never a custom in-app webview, so the user gets the
+    /// real browser chrome (address bar, share sheet, etc.) for a document this important.
+    @ViewBuilder
+    private func legalLink(title: String, url: URL) -> some View {
+        Link(destination: url) {
+            HStack {
+                Text(title)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
         }
     }
 
