@@ -447,6 +447,9 @@ verify_jwt = false
 [functions.refresh-plaid-accounts]
 verify_jwt = false
 
+[functions.refresh-connected-account]
+verify_jwt = false
+
 [functions.list-connections]
 verify_jwt = false
 

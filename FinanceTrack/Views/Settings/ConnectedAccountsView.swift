@@ -1294,6 +1294,7 @@ struct ConnectedAccountsView: View {
             case .invalidResponse: return "decoding"
             case .unauthorized: return "unauthorized"
             case .requiresReauth: return "requires_reauth"
+            case .rateLimited: return "rate_limited"
             case .server: return "server"
             }
         }

@@ -55,6 +55,10 @@ enum PlaidTransactionImportService {
         /// row got updated," which a plain re-delivery of an already-posted transaction would
         /// also report.
         let mergedFromPendingCount: Int
+        /// How many already-persisted `source == .plaid` transactions had a stale UTC-anchored
+        /// date (from before the local-midnight parser fix) corrected in place this sync — see
+        /// `repairStaleUTCMidnightDate`. Zero once every affected row has been repaired once.
+        let repairedDateCount: Int
     }
 
     /// Applies a full backend sync result to SwiftData: inserts new Plaid transactions, updates
@@ -92,6 +96,20 @@ enum PlaidTransactionImportService {
         for transaction in existingPlaidTransactions {
             if let externalId = transaction.externalTransactionId {
                 byExternalId[externalId] = transaction
+            }
+        }
+
+        // Self-healing repair for dates persisted by the OLD (UTC-anchored) bare-date parser,
+        // before `BackendTransactionDTO.parseBareDate` was fixed to build local-midnight dates —
+        // see `repairStaleUTCMidnightDate`'s own doc comment for why this is safe and why it runs
+        // on every sync rather than waiting for Plaid to redeliver the affected transaction (it
+        // usually won't: Plaid's `/transactions/sync` cursor never redelivers a transaction that
+        // hasn't itself changed, so an already-posted transaction imported with the old bug would
+        // otherwise stay wrong forever).
+        var repairedDateCount = 0
+        for transaction in existingPlaidTransactions {
+            if repairStaleUTCMidnightDate(on: transaction) {
+                repairedDateCount += 1
             }
         }
 
@@ -163,6 +181,7 @@ enum PlaidTransactionImportService {
         print("[PlaidTransactionImportService] duplicate-skipped count: \(duplicateSkippedCount)")
         print("[PlaidTransactionImportService] merged-from-pending count: \(mergedFromPendingCount)")
         print("[PlaidTransactionImportService] removed count: \(removedCount)")
+        print("[PlaidTransactionImportService] repaired stale-UTC-midnight-date count: \(repairedDateCount)")
         #endif
 
         do {
@@ -182,8 +201,76 @@ enum PlaidTransactionImportService {
             updatedCount: updatedCount,
             duplicateSkippedCount: duplicateSkippedCount,
             removedCount: removedCount,
-            mergedFromPendingCount: mergedFromPendingCount
+            mergedFromPendingCount: mergedFromPendingCount,
+            repairedDateCount: repairedDateCount
         )
+    }
+
+    /// Corrects `transaction.date`/`.authorizedDate`/`.postedDate` in place if any of them still
+    /// carry the exact UTC-midnight signature the OLD bare-date parser used to produce, before
+    /// `BackendTransactionDTO.parseBareDate` was fixed to build LOCAL-midnight dates instead (see
+    /// that function's own doc comment for the original bug). Returns whether anything changed.
+    ///
+    /// WHY THIS IS SAFE, NOT A BLIND "+1 DAY": the old parser never altered the year/month/day
+    /// Plaid sent — e.g. `"2026-07-18"` — it only anchored midnight for that calendar day to UTC
+    /// instead of the device's local time zone. That means the TRUE Plaid calendar day is still
+    /// fully recoverable from the stale `Date` itself: reading its year/month/day back through a
+    /// UTC calendar reproduces exactly the digits Plaid originally sent, with no information lost.
+    /// Reconstructing local midnight for those same digits (the same construction
+    /// `parseBareDate` now uses) is therefore an exact, lossless correction — never a guess, and
+    /// never able to shift a date that wasn't actually affected: a `Date` only reads back as
+    /// EXACTLY 00:00:00.000 in UTC when the device's local UTC offset is 0 (a real no-op — the
+    /// old and new parsers agree there) or when the old bug produced it. A transaction correctly
+    /// imported by the NEW parser on a device with any other UTC offset can never coincidentally
+    /// land on exact UTC midnight, so this can never mis-fire on an already-correct row.
+    ///
+    /// Scope: only `source == .plaid` transactions are ever passed here (see `applySync`'s
+    /// caller) — manual transactions and their user-entered dates are never touched, and this
+    /// function performs no lookup of its own that could reach one.
+    @discardableResult
+    static func repairStaleUTCMidnightDate(on transaction: FinanceTransaction, calendar: Calendar = .current) -> Bool {
+        guard transaction.source == .plaid else { return false }
+        var changed = false
+        if let corrected = Self.reconstructedLocalMidnight(from: transaction.date, calendar: calendar) {
+            transaction.date = corrected
+            changed = true
+        }
+        if let authorizedDate = transaction.authorizedDate,
+           let corrected = Self.reconstructedLocalMidnight(from: authorizedDate, calendar: calendar) {
+            transaction.authorizedDate = corrected
+            changed = true
+        }
+        if let postedDate = transaction.postedDate,
+           let corrected = Self.reconstructedLocalMidnight(from: postedDate, calendar: calendar) {
+            transaction.postedDate = corrected
+            changed = true
+        }
+        if changed {
+            transaction.updatedAt = .now
+        }
+        return changed
+    }
+
+    /// Returns a LOCAL-midnight `Date` for the same year/month/day as `date` reads back through
+    /// UTC, but ONLY when `date` is exactly UTC midnight (the old parser's signature) AND that
+    /// reconstruction would actually change the value — i.e. never returns a "corrected" value
+    /// equal to the input, so a genuine no-op (device already in a UTC-offset-0 zone) reports no
+    /// change. Returns `nil` when `date` doesn't carry the signature at all.
+    private static func reconstructedLocalMidnight(from date: Date, calendar: Calendar) -> Date? {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        let utc = utcCalendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: date)
+        guard utc.hour == 0, utc.minute == 0, utc.second == 0, (utc.nanosecond ?? 0) == 0 else {
+            return nil
+        }
+        var localComponents = DateComponents()
+        localComponents.year = utc.year
+        localComponents.month = utc.month
+        localComponents.day = utc.day
+        guard let reconstructed = calendar.date(from: localComponents), reconstructed != date else {
+            return nil
+        }
+        return reconstructed
     }
 
     /// Copies mutable, sync-safe fields from `dto` onto `existing` — never `id`, `source`,

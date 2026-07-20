@@ -47,6 +47,21 @@ final class AutoBackupManager {
         }
     }
 
+    /// Stops observing entirely and cancels any pending debounced backup — called on sign-out so
+    /// no backup for the outgoing user's `ModelContext` can fire after its owning container
+    /// reference has been (or is about to be) released elsewhere. Safe to call even if never
+    /// started. The next user's `RootView.task` calling `startObserving(context:)` re-arms this
+    /// for their own context; `deinit` mirrors this same cleanup for the (never-exercised, since
+    /// this is a single app-lifetime instance) case of the instance itself being deallocated.
+    func stopObserving() {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+            self.observer = nil
+        }
+        debounceTask?.cancel()
+        debounceTask = nil
+    }
+
     /// Cancels any pending debounced backup and restarts the debounce window — repeated saves in
     /// quick succession (e.g. typing) keep pushing the actual write back rather than firing one
     /// per keystroke.

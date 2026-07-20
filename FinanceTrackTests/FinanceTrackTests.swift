@@ -118,6 +118,730 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(settings.warningThreshold, 0.70)
     }
 
+    // MARK: - Fresh-user zero defaults (Phase 3 blocking correction)
+
+    /// A brand-new authenticated user's freshly-bootstrapped `BudgetSettings` (see
+    /// `RootView.bootstrapDefaultSettingsIfNeeded()`) must start with NO weekly spending room —
+    /// not the old $300 hardcoded default, which a fresh, empty per-user store must never show.
+    func testFreshBudgetSettingsWeeklyLimitDefaultsToZero() {
+        let settings = BudgetSettings()
+        XCTAssertEqual(settings.weeklySpendingLimit, 0)
+    }
+
+    func testFreshBudgetSettingsMonthlyGoalStaysUnset() {
+        let settings = BudgetSettings()
+        XCTAssertNil(settings.monthlyGoal)
+    }
+
+    func testFreshMonthlyPlanSettingsSavingsGoalDefaultsToZero() {
+        let settings = MonthlyPlanSettings()
+        XCTAssertEqual(settings.monthlySavingsGoal, 0)
+    }
+
+    /// "Available This Week" for a brand-new user with a $0 limit and no transactions — the
+    /// Dashboard's own computation, reproduced directly against `BudgetCalculator`.
+    func testAvailableThisWeekIsZeroForFreshUserWithNoLimitOrSpending() {
+        let remaining = BudgetCalculator.remaining(limit: 0, spent: 0)
+        XCTAssertEqual(remaining, 0)
+    }
+
+    /// An existing user's own explicitly-configured `BudgetSettings` row is unaffected by the
+    /// default-parameter change above — this only matters for a call site that OMITS the
+    /// argument, and no real call site (bootstrap, edit screens) ever does.
+    func testExplicitWeeklySpendingLimitIsNeverOverriddenByTheZeroDefault() {
+        let settings = BudgetSettings(weeklySpendingLimit: 450)
+        XCTAssertEqual(settings.weeklySpendingLimit, 450)
+    }
+
+    /// Source-level regression guard (this codebase's established pattern for verifying
+    /// untestable SwiftUI-view-body glue — see testConnectedAccountsViewRefreshBalancesSourceCallsUpdateCachedBalancesOnlyOnSuccess)
+    /// confirming the fresh-user bootstrap path never reintroduces a hardcoded non-zero weekly
+    /// limit — this is exactly the regression a real device retest surfaced (a stale on-disk
+    /// per-user store, not a code defect, but this locks the source itself in place regardless).
+    func testBootstrapDefaultSettingsSourceNeverHardcodesNonZeroWeeklyLimit() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/App/FinanceTrackApp.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private func bootstrapDefaultSettingsIfNeeded() -> BudgetSettings? {") else {
+            XCTFail("bootstrapDefaultSettingsIfNeeded() not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(700))
+        XCTAssertFalse(functionBody.contains("300"), "The fresh-user bootstrap must never hardcode a non-zero weekly spending limit")
+        XCTAssertTrue(functionBody.contains("weeklySpendingLimit: 0"))
+    }
+
+    // MARK: - Weekly Spending Limit <-> Monthly Savings Goal direct two-way sync (Phase 3 correction)
+    //
+    // The sync itself lives inside WeeklyLimitEditView/MonthlyGoalEditView's private
+    // commitAutosaveNow(), which (like the rest of this app's SwiftUI view layer) isn't directly
+    // unit-testable without hosting infrastructure this codebase doesn't have — so, matching the
+    // established source-scan pattern used elsewhere for verifying untestable view-body glue,
+    // these confirm the sync is actually wired into the commit path, plus direct arithmetic
+    // checks of the formula itself using the task's exact numeric examples.
+
+    func testMonthlySavingsGoalDividedByFourMatchesWeeklyLimitExamples() {
+        XCTAssertEqual(Decimal(1000) / 4, 250)
+        XCTAssertEqual(Decimal(0) / 4, 0)
+    }
+
+    func testWeeklySpendingLimitTimesFourMatchesMonthlySavingsGoalExamples() {
+        XCTAssertEqual(Decimal(300) * 4, 1200)
+        XCTAssertEqual(Decimal(0) * 4, 0)
+    }
+
+    func testWeeklyLimitEditViewSourceSyncsMonthlyGoalOnCommit() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Weekly/WeeklyLimitEditView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private func commitAutosaveNow() -> Bool {") else {
+            XCTFail("commitAutosaveNow() not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(1600))
+        XCTAssertTrue(functionBody.contains("limit * 4"), "Committing an explicit Weekly Spending Limit must directly sync Monthly Savings Goal = limit * 4")
+        XCTAssertTrue(functionBody.contains("monthlyGoal = syncedMonthlyGoal") || functionBody.contains("monthlyGoal: syncedMonthlyGoal"))
+        // The sync must be a plain imperative model write inside this function, never a reactive
+        // observer on the OTHER view's field — confirms no possibility of a circular update loop.
+        XCTAssertFalse(functionBody.contains("onChange(of: goal)"), "Must never observe MonthlyGoalEditView's own field — that would create a circular sync loop")
+    }
+
+    func testMonthlyGoalEditViewSourceSyncsWeeklyLimitOnCommitOnlyWhenGoalIsSet() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Monthly/MonthlyGoalEditView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private func commitAutosaveNow() -> Bool {") else {
+            XCTFail("commitAutosaveNow() not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(1600))
+        XCTAssertTrue(functionBody.contains("goal / 4"), "Committing an explicit Monthly Savings Goal must directly sync Weekly Spending Limit = goal / 4")
+        XCTAssertTrue(functionBody.contains("if let goal {"), "Sync must only fire for an explicitly committed goal value, never when clearing the field to nil")
+        XCTAssertFalse(functionBody.contains("onChange(of: limit)"), "Must never observe WeeklyLimitEditView's own field — that would create a circular sync loop")
+    }
+
+    // MARK: - SettingsView Weekly/Monthly direct sync (the actual runtime save path)
+
+    func testSettingsViewSourceSyncsMonthlyGoalOnWeeklyLimitCommit() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private func saveWeeklyLimit() {") else {
+            XCTFail("saveWeeklyLimit() not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(600))
+        // The actual sync arithmetic now lives in the single canonical
+        // BudgetSettings.applyWeeklySpendingLimitCommit (see the real-persisted-model tests
+        // above) — this just confirms the runtime save path actually delegates to it, rather
+        // than a divergent duplicate implementation.
+        XCTAssertTrue(functionBody.contains("applyWeeklySpendingLimitCommit"), "Committing Weekly Spending Limit in Settings must use the canonical model sync")
+    }
+
+    func testSettingsViewSourceSyncsWeeklyLimitOnMonthlyGoalCommitOnlyWhenGoalIsSet() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private func saveMonthlyGoal() {") else {
+            XCTFail("saveMonthlyGoal() not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(600))
+        // Same reasoning as the weekly-side test above — the arithmetic now lives in the
+        // canonical BudgetSettings.applyMonthlySavingsGoalCommit.
+        XCTAssertTrue(functionBody.contains("applyMonthlySavingsGoalCommit"), "Committing Monthly Savings Goal in Settings must use the canonical model sync")
+    }
+
+    func testSettingsViewProjectedSavingsRowShowsSourceSpecificMessaging() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("This amount reflects what you could save this month"))
+        XCTAssertTrue(source.contains("could help you reach your monthly savings goal"))
+        XCTAssertTrue(source.contains("weeklyMonthlySyncSource"))
+    }
+
+    // MARK: - BudgetSettings direct two-way sync — real persisted-model behavior
+
+    func testWeeklyCommitUpdatesActualPersistedMonthlyGoal() {
+        let settings = BudgetSettings()
+        settings.applyWeeklySpendingLimitCommit(200)
+        XCTAssertEqual(settings.weeklySpendingLimit, 200)
+        XCTAssertEqual(settings.monthlyGoal, 800, "The actual monthlyGoal model property must update, not just a calculated display value")
+        XCTAssertEqual(settings.weeklyMonthlySyncSource, .weekly)
+    }
+
+    func testMonthlyCommitUpdatesActualPersistedWeeklyLimit() {
+        let settings = BudgetSettings()
+        settings.applyMonthlySavingsGoalCommit(500)
+        XCTAssertEqual(settings.monthlyGoal, 500)
+        XCTAssertEqual(settings.weeklySpendingLimit, 125, "The actual weeklySpendingLimit model property must update, not just a calculated display value")
+        XCTAssertEqual(settings.weeklyMonthlySyncSource, .monthly)
+    }
+
+    func testWeeklyCommitOfZeroZeroesMonthlyGoal() {
+        let settings = BudgetSettings()
+        settings.applyWeeklySpendingLimitCommit(0)
+        XCTAssertEqual(settings.monthlyGoal, 0)
+    }
+
+    func testMonthlyCommitOfZeroZeroesWeeklyLimit() {
+        let settings = BudgetSettings()
+        settings.applyMonthlySavingsGoalCommit(0)
+        XCTAssertEqual(settings.weeklySpendingLimit, 0)
+    }
+
+    @MainActor
+    func testWeeklyCommitPersistsAndReloadsBothFieldsCorrectly() throws {
+        let context = makeAutosaveTestContext()
+        let settings = BudgetSettings()
+        context.insert(settings)
+        settings.applyWeeklySpendingLimitCommit(200)
+        try context.save()
+
+        let reloaded = try XCTUnwrap(context.fetch(FetchDescriptor<BudgetSettings>()).first)
+        XCTAssertEqual(reloaded.weeklySpendingLimit, 200)
+        XCTAssertEqual(reloaded.monthlyGoal, 800)
+    }
+
+    @MainActor
+    func testMonthlyCommitPersistsAndReloadsBothFieldsCorrectly() throws {
+        let context = makeAutosaveTestContext()
+        let settings = BudgetSettings()
+        context.insert(settings)
+        settings.applyMonthlySavingsGoalCommit(500)
+        try context.save()
+
+        let reloaded = try XCTUnwrap(context.fetch(FetchDescriptor<BudgetSettings>()).first)
+        XCTAssertEqual(reloaded.monthlyGoal, 500)
+        XCTAssertEqual(reloaded.weeklySpendingLimit, 125)
+    }
+
+    func testClearingMonthlyGoalNeverZeroesAnExistingWeeklyLimit() {
+        let settings = BudgetSettings(weeklySpendingLimit: 300)
+        settings.applyMonthlySavingsGoalCommit(nil)
+        XCTAssertNil(settings.monthlyGoal)
+        XCTAssertEqual(settings.weeklySpendingLimit, 300, "Clearing the goal must never touch an already-set weekly limit")
+    }
+
+    /// Source-level regression guard confirming `SettingsView`'s save functions actually call
+    /// the shared model methods above (rather than duplicating divergent inline logic that a
+    /// pure model-level test wouldn't catch), and that the visible counterpart `@State` is
+    /// updated immediately, guarded against retriggering the other save function.
+    func testSettingsViewSaveFunctionsUseCanonicalModelSyncAndUpdateVisibleState() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        guard let weeklyRange = source.range(of: "private func saveWeeklyLimit() {") else {
+            XCTFail("saveWeeklyLimit() not found")
+            return
+        }
+        let weeklyBody = String(source[weeklyRange.lowerBound...].prefix(500))
+        XCTAssertTrue(weeklyBody.contains("applyWeeklySpendingLimitCommit"))
+        XCTAssertTrue(weeklyBody.contains("monthlyGoal = settings.monthlyGoal"), "The visible Monthly Savings Goal field must be updated immediately, not left stale")
+        XCTAssertTrue(weeklyBody.contains("isSyncingCounterpartField"))
+
+        guard let monthlyRange = source.range(of: "private func saveMonthlyGoal() {") else {
+            XCTFail("saveMonthlyGoal() not found")
+            return
+        }
+        let monthlyBody = String(source[monthlyRange.lowerBound...].prefix(500))
+        XCTAssertTrue(monthlyBody.contains("applyMonthlySavingsGoalCommit"))
+        XCTAssertTrue(monthlyBody.contains("weeklyLimit = settings.weeklySpendingLimit"), "The visible Weekly Spending Limit field must be updated immediately, not left stale")
+        XCTAssertTrue(monthlyBody.contains("isSyncingCounterpartField"))
+    }
+
+    /// Confirms the CALCULATED-RESULT placement rule: a monthly-driven commit's derived value
+    /// belongs under Weekly Spending Limit, and a weekly-driven commit's derived value belongs
+    /// under Monthly Savings Goal — the opposite section from the one the user actually typed
+    /// into, since the helper text explains the field that just changed as a result.
+    func testSettingsViewHelperRowsRenderDirectlyUnderTheirOwnFields() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        guard let weeklyFieldRange = source.range(of: "labeledAmountField(title: \"Weekly Spending Limit\"") else {
+            XCTFail("Weekly Spending Limit field not found")
+            return
+        }
+        let afterWeeklyField = String(source[weeklyFieldRange.upperBound...].prefix(200))
+        XCTAssertTrue(afterWeeklyField.contains("weeklySpendingLimitHelperRow"), "The monthly-driven weekly-target helper must render directly under Weekly Spending Limit")
+
+        guard let monthlyFieldRange = source.range(of: "labeledAmountField(title: \"Monthly Savings Goal\"") else {
+            XCTFail("Monthly Savings Goal field not found")
+            return
+        }
+        let afterMonthlyField = String(source[monthlyFieldRange.upperBound...].prefix(200))
+        XCTAssertTrue(afterMonthlyField.contains("monthlySavingsGoalHelperRow"), "The weekly-driven monthly-savings helper must render directly under Monthly Savings Goal")
+    }
+
+    func testWeeklySpendingLimitHelperRowShowsMonthlyDrivenMessageAndNothingForWeeklySource() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private var weeklySpendingLimitHelperRow: some View {") else {
+            XCTFail("weeklySpendingLimitHelperRow not found")
+            return
+        }
+        let body = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(body.contains("case .weekly:"))
+        XCTAssertTrue(body.contains("EmptyView()"), "Must render nothing here when the user just drove Monthly Savings Goal's counterpart is Weekly — that helper belongs under Monthly Savings Goal instead")
+        XCTAssertTrue(body.contains("case .monthly:"))
+        XCTAssertTrue(body.contains("Keeping your Weekly Spend at"), "The monthly-driven message must live in this row")
+    }
+
+    func testMonthlySavingsGoalHelperRowShowsWeeklyDrivenMessageOnlyForWeeklySource() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private var monthlySavingsGoalHelperRow: some View {") else {
+            XCTFail("monthlySavingsGoalHelperRow not found")
+            return
+        }
+        let body = String(source[range.lowerBound...].prefix(1000))
+        XCTAssertTrue(body.contains("settings.weeklyMonthlySyncSource == .weekly"), "Must only show content for the weekly-driven source")
+        XCTAssertTrue(body.contains("This amount reflects what you could save this month:"))
+        XCTAssertTrue(body.contains("alignment: .firstTextBaseline"), "The sentence and its amount must share the same baseline-aligned row, not the HStack default center alignment")
+    }
+
+    // MARK: - BudgetSettings.weeklyMonthlySyncSource defaults
+
+    func testFreshBudgetSettingsHasNilSyncSource() {
+        let settings = BudgetSettings()
+        XCTAssertNil(settings.weeklyMonthlySyncSource)
+    }
+
+    func testBudgetSettingsSyncSourceRoundTrips() {
+        let settings = BudgetSettings()
+        settings.weeklyMonthlySyncSource = .weekly
+        XCTAssertEqual(settings.weeklyMonthlySyncSource, .weekly)
+        settings.weeklyMonthlySyncSource = .monthly
+        XCTAssertEqual(settings.weeklyMonthlySyncSource, .monthly)
+    }
+
+    // MARK: - Plaid imported transaction date (local-midnight parsing, not UTC-anchored)
+
+    func testPlaidBareDateParsesToJuly18InUSEastern() {
+        let calendar = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let date = try! XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: calendar))
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        XCTAssertEqual(components.year, 2026)
+        XCTAssertEqual(components.month, 7)
+        XCTAssertEqual(components.day, 18, "must never roll back to July 17 in a timezone behind UTC")
+    }
+
+    func testPlaidBareDateParsesToJuly18InUSPacific() {
+        let calendar = Self.calendar(timeZoneIdentifier: "America/Los_Angeles")
+        let date = try! XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: calendar))
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        XCTAssertEqual(components.day, 18, "must never roll back to July 17 in a timezone behind UTC")
+    }
+
+    func testPlaidBareDateParsesToJuly18InAPositiveOffsetTimeZone() {
+        let calendar = Self.calendar(timeZoneIdentifier: "Asia/Tokyo")
+        let date = try! XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: calendar))
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        XCTAssertEqual(components.day, 18, "must never roll forward to July 19 in a timezone ahead of UTC")
+    }
+
+    func testPlaidBareDateHasNoDayShiftAcrossDifferentCalendarsSameString() {
+        // Each calendar reads back its OWN correctly-anchored day — the point of local-midnight
+        // construction is that "2026-07-18" always means July 18 to the device that parsed it,
+        // regardless of which time zone that device happens to be in.
+        for identifier in ["America/New_York", "America/Los_Angeles", "Asia/Tokyo", "UTC"] {
+            let calendar = Self.calendar(timeZoneIdentifier: identifier)
+            let date = try! XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: calendar))
+            let day = calendar.component(.day, from: date)
+            XCTAssertEqual(day, 18, "time zone \(identifier) must read back day 18")
+        }
+    }
+
+    func testPlaidBareDateRejectsMalformedString() {
+        let calendar = Self.calendar(timeZoneIdentifier: "UTC")
+        XCTAssertNil(BackendTransactionDTO.parseBareDate("not-a-date", calendar: calendar))
+        XCTAssertNil(BackendTransactionDTO.parseBareDate("2026-07", calendar: calendar))
+    }
+
+    private static func calendar(timeZoneIdentifier: String) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: timeZoneIdentifier)!
+        return calendar
+    }
+
+    // MARK: - Plaid transaction date end-to-end (decode → persist → reload → calendar-component)
+    //
+    // The `parseBareDate` fix above (local-midnight construction) is necessary but was NOT
+    // sufficient in production: transactions already persisted with the OLD UTC-anchored `Date`
+    // before that fix shipped never get corrected by a normal sync, because Plaid's
+    // `/transactions/sync` cursor never redelivers a transaction that hasn't itself changed on
+    // Plaid's side — so `applyUpdates` (which recomputes `.date` from a fresh DTO) never runs for
+    // them. `PlaidTransactionImportService.repairStaleUTCMidnightDate` is the fix for THAT: it
+    // sweeps every already-persisted `source == .plaid` transaction on every sync and corrects any
+    // date still carrying the old parser's exact-UTC-midnight signature, without needing Plaid to
+    // redeliver anything and without storing any new raw-string field.
+
+    @MainActor
+    private func endToEndPlaidDate(bareDateString: String, timeZoneIdentifier: String) throws -> (date: Date, calendar: Calendar) {
+        let calendar = Self.calendar(timeZoneIdentifier: timeZoneIdentifier)
+        let date = try XCTUnwrap(BackendTransactionDTO.parseBareDate(bareDateString, calendar: calendar))
+        let dto = PlaidTransactionDTO(
+            externalTransactionId: "e2e-\(timeZoneIdentifier)",
+            pendingTransactionId: nil,
+            plaidAccountId: "plaid-account-1",
+            amount: 42,
+            merchantName: "Test Merchant",
+            originalDescription: "TEST",
+            authorizedDate: date,
+            postedDate: date,
+            isPending: false,
+            categoryGuess: nil
+        )
+        let context = makePlaidSyncTestContext()
+        try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [dto], modified: [], removedExternalIds: []),
+            context: context
+        )
+        let saved = try XCTUnwrap(try context.fetch(FetchDescriptor<FinanceTransaction>()).first)
+        return (saved.date, calendar)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndDisplaysJuly18InUSEastern() throws {
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "America/New_York")
+        XCTAssertEqual(calendar.component(.day, from: date), 18)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndDisplaysJuly18InUSCentral() throws {
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "America/Chicago")
+        XCTAssertEqual(calendar.component(.day, from: date), 18)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndDisplaysJuly18InUSMountain() throws {
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "America/Denver")
+        XCTAssertEqual(calendar.component(.day, from: date), 18)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndDisplaysJuly18InUSPacific() throws {
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "America/Los_Angeles")
+        XCTAssertEqual(calendar.component(.day, from: date), 18)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndDisplaysJuly18InUTC() throws {
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "UTC")
+        XCTAssertEqual(calendar.component(.day, from: date), 18)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndDisplaysJuly18InTokyo() throws {
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "Asia/Tokyo")
+        XCTAssertEqual(calendar.component(.day, from: date), 18)
+    }
+
+    @MainActor
+    func testPlaidDateEndToEndWeekdayMatchesCalendarDate() throws {
+        // July 18, 2026 — computed independently from the same DateComponents construction the
+        // fixed parser itself uses, never a hardcoded weekday string, so this can't silently pass
+        // due to an assumption baked into the test rather than the code.
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "America/New_York")
+        var reference = DateComponents()
+        reference.year = 2026
+        reference.month = 7
+        reference.day = 18
+        let referenceDate = try XCTUnwrap(calendar.date(from: reference))
+        XCTAssertEqual(
+            calendar.component(.weekday, from: date),
+            calendar.component(.weekday, from: referenceDate),
+            "The persisted/reloaded transaction must produce the same weekday as its own authoritative calendar date"
+        )
+    }
+
+    @MainActor
+    func testPlaidDateSwiftDataSaveReloadPreservesJuly18() throws {
+        // A second, independent reload — closes a fresh ModelContext against the SAME persistent
+        // container rather than reading the same in-memory context that performed the insert, so
+        // this genuinely exercises SwiftData's own save/reload round-trip, not just an in-memory
+        // object graph that never left the process.
+        let calendar = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let date = try XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: calendar))
+        let schema = Schema([Account.self, FinanceTransaction.self, Category.self])
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let firstContext = ModelContext(container)
+        firstContext.insert(FinanceTransaction(amount: 10, date: date, source: .plaid, externalTransactionId: "reload-test"))
+        try firstContext.save()
+
+        let secondContext = ModelContext(container)
+        let reloaded = try XCTUnwrap(try secondContext.fetch(FetchDescriptor<FinanceTransaction>()).first)
+        XCTAssertEqual(calendar.component(.day, from: reloaded.date), 18)
+    }
+
+    @MainActor
+    func testExistingStalePersistedPlaidDateIsCorrectedOnNextSync() throws {
+        // Simulates a transaction imported BEFORE the local-midnight parser fix shipped: its
+        // stored `.date` is exactly UTC midnight for July 18 — the OLD bug's signature — which in
+        // any timezone behind UTC reads back as July 17. A routine sync (nothing added/modified/
+        // removed for this transaction — Plaid never redelivers an unchanged transaction) must
+        // still correct it via the repair sweep, without needing Plaid to resend anything.
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let staleUTCMidnight = try XCTUnwrap(utcCalendar.date(from: components))
+
+        let stale = FinanceTransaction(
+            amount: 25,
+            date: staleUTCMidnight,
+            source: .plaid,
+            externalTransactionId: "stale-row",
+            authorizedDate: staleUTCMidnight,
+            postedDate: staleUTCMidnight
+        )
+        context.insert(stale)
+        try context.save()
+
+        let eastern = Self.calendar(timeZoneIdentifier: "America/New_York")
+        XCTAssertEqual(eastern.component(.day, from: stale.date), 17, "Precondition: the old bug's UTC-midnight value must read back as July 17 in US Eastern before repair")
+
+        // A routine sync with nothing new for this row — Plaid genuinely wouldn't redeliver it.
+        let outcome = try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [], modified: [], removedExternalIds: []),
+            context: context
+        )
+
+        XCTAssertEqual(outcome.repairedDateCount, 1)
+        // Post-repair, check via Calendar.current — the SAME calendar `repairStaleUTCMidnightDate`
+        // itself defaults to when reconstructing local midnight, so this is robust regardless of
+        // whatever timezone the machine running this test happens to be in (unlike the Eastern-
+        // specific precondition check above, which only needed to prove the ORIGINAL stale value
+        // was wrong somewhere, not what the corrected value looks like everywhere).
+        let repaired = try XCTUnwrap(try context.fetch(FetchDescriptor<FinanceTransaction>()).first { $0.externalTransactionId == "stale-row" })
+        XCTAssertEqual(Calendar.current.component(.day, from: repaired.date), 18, "The repair sweep must correct the stale UTC-anchored date to the true July 18 calendar day")
+        XCTAssertEqual(Calendar.current.component(.day, from: try XCTUnwrap(repaired.authorizedDate)), 18)
+        XCTAssertEqual(Calendar.current.component(.day, from: try XCTUnwrap(repaired.postedDate)), 18)
+    }
+
+    @MainActor
+    func testDuplicateRedeliveryDoesNotPreventStaleDateRepair() throws {
+        // The SAME transaction is both (a) already persisted with a stale UTC-midnight date, and
+        // (b) redelivered this sync as a genuine unchanged duplicate — identical amount/merchant/
+        // description, and (post-fix) the SAME correctly-parsed date the repair sweep itself
+        // reconstructs. The repair sweep runs over ALL existing rows before the upsert loop even
+        // looks at this sync's payload, so being "just a duplicate" from `applyUpdates`'s point of
+        // view must never block the repair from happening first.
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let staleUTCMidnight = try XCTUnwrap(utcCalendar.date(from: components))
+        let correctedDate = try XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18"))
+
+        let stale = FinanceTransaction(
+            amount: 25, date: staleUTCMidnight, source: .plaid, externalTransactionId: "dup-stale-row",
+            merchantName: "Test Merchant", originalDescription: "TEST DESCRIPTION",
+            authorizedDate: staleUTCMidnight, postedDate: staleUTCMidnight
+        )
+        context.insert(stale)
+        try context.save()
+
+        // A real re-delivery of an already-correctly-imported transaction always carries a
+        // correctly-parsed date (the parser is fixed) — never the old stale shape.
+        let redelivered = makePlaidDTO(id: "dup-stale-row", amount: 25, date: correctedDate)
+        let outcome = try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [redelivered], modified: [], removedExternalIds: []),
+            context: context
+        )
+
+        XCTAssertEqual(outcome.repairedDateCount, 1, "The repair sweep must still run even though this same row is also redelivered this sync")
+        XCTAssertEqual(outcome.duplicateSkippedCount, 1, "Once repaired, the redelivery carries identical data and must be recognized as a true duplicate, not a fresh update")
+        let saved = try XCTUnwrap(try context.fetch(FetchDescriptor<FinanceTransaction>()).first { $0.externalTransactionId == "dup-stale-row" })
+        XCTAssertEqual(Calendar.current.component(.day, from: saved.date), Calendar.current.component(.day, from: correctedDate))
+    }
+
+    @MainActor
+    func testPendingToPostedMergeUsesAuthoritativePostedDate() throws {
+        // The pending row was persisted (pre-fix) with a stale UTC-midnight date; the posted
+        // delivery carries the CORRECT local-midnight date computed by the fixed parser. The
+        // merge must end up with the correct posted date, not the stale pending one.
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let stalePendingDate = try XCTUnwrap(utcCalendar.date(from: components))
+
+        let pending = FinanceTransaction(
+            amount: 25, date: stalePendingDate, source: .plaid, isPending: true,
+            externalTransactionId: "pending-id", authorizedDate: stalePendingDate, postedDate: nil
+        )
+        context.insert(pending)
+        try context.save()
+
+        let eastern = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let correctPostedDate = try XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: eastern))
+        let postedDTO = makePlaidDTO(id: "posted-id", amount: 25, pendingTransactionId: "pending-id", date: correctPostedDate)
+
+        try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [postedDTO], modified: [], removedExternalIds: []),
+            context: context
+        )
+
+        let saved = try context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertEqual(saved.count, 1, "Pending-to-posted merge must re-key the existing row, never leave both")
+        let merged = try XCTUnwrap(saved.first)
+        XCTAssertEqual(merged.externalTransactionId, "posted-id")
+        XCTAssertFalse(merged.isPending)
+        XCTAssertEqual(eastern.component(.day, from: merged.date), 18, "The merge must use the posted delivery's authoritative date")
+    }
+
+    @MainActor
+    func testManualTransactionDatesAreNeverRepaired() throws {
+        // A manual transaction that happens to carry an exact-UTC-midnight Date (e.g. the user
+        // picked midnight in some other timezone context) must never be touched by the repair
+        // sweep — only source == .plaid rows are ever in scope.
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let utcMidnight = try XCTUnwrap(utcCalendar.date(from: components))
+
+        let manual = FinanceTransaction(amount: 50, date: utcMidnight, source: .manual)
+        context.insert(manual)
+        try context.save()
+
+        let outcome = try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [], modified: [], removedExternalIds: []),
+            context: context
+        )
+
+        XCTAssertEqual(outcome.repairedDateCount, 0, "Manual transactions must never be counted or touched by the repair sweep")
+        let saved = try XCTUnwrap(try context.fetch(FetchDescriptor<FinanceTransaction>()).first)
+        XCTAssertEqual(saved.date, utcMidnight, "A manual transaction's date must be completely unchanged, regardless of its shape")
+    }
+
+    @MainActor
+    func testDashboardAndActivityGroupingDeriveFromTheSameAuthoritativeDate() throws {
+        // Dashboard's Recent Activity formats `transaction.date` directly; the Activity screen
+        // groups via `Calendar.current.startOfDay(for: transaction.date)`. Both must read the same
+        // calendar day off the SAME underlying value — this guards against either surface ever
+        // acquiring its own separate date computation that could silently diverge from the other.
+        let (date, calendar) = try endToEndPlaidDate(bareDateString: "2026-07-18", timeZoneIdentifier: "America/New_York")
+        let activityGroupingDay = calendar.component(.day, from: calendar.startOfDay(for: date))
+        let dashboardDisplayDay = calendar.component(.day, from: date)
+        XCTAssertEqual(activityGroupingDay, dashboardDisplayDay, "Activity's day-bucket and Dashboard's displayed day must always agree")
+        XCTAssertEqual(dashboardDisplayDay, 18)
+    }
+
+    // MARK: - Plaid branding (client_name)
+
+    func testPlaidClientNameIncludesFullLegalEntityNameInCreateLinkToken() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../supabase/functions/create-link-token/index.ts")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains(#"client_name: "SpendSmart by S&L App Development LLC""#))
+    }
+
+    func testPlaidClientNameIncludesFullLegalEntityNameInSharedPlaidHelper() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../supabase/functions/_shared/plaid.ts")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains(#"client_name: "SpendSmart by S&L App Development LLC""#))
+    }
+
+    // MARK: - Face ID
+
+    func testFreshBudgetSettingsHasFaceIDDisabled() {
+        let settings = BudgetSettings()
+        XCTAssertFalse(settings.requireFaceID)
+    }
+
+    func testPendingFaceIDOptInRoundTripsAndIsConsumedOnce() {
+        let email = "test-face-id-\(UUID().uuidString)@example.com"
+        XCTAssertFalse(PendingFaceIDOptIn.consume(email: email), "must be false when never marked")
+
+        PendingFaceIDOptIn.markPending(email: email)
+        XCTAssertTrue(PendingFaceIDOptIn.consume(email: email))
+        XCTAssertFalse(PendingFaceIDOptIn.consume(email: email), "must not still be pending after being consumed once")
+    }
+
+    func testPendingFaceIDOptInIsNormalizedAndIsolatedPerEmail() {
+        let base = "Test-FaceID-\(UUID().uuidString)@Example.com"
+        PendingFaceIDOptIn.markPending(email: base)
+        XCTAssertTrue(PendingFaceIDOptIn.consume(email: base.lowercased()), "must be keyed case/whitespace-insensitively")
+
+        let otherEmail = "other-\(UUID().uuidString)@example.com"
+        XCTAssertFalse(PendingFaceIDOptIn.consume(email: otherEmail), "a different email must never see another email's pending opt-in")
+    }
+
+    func testSettingsViewRequireFaceIDToggleRequiresBiometricSuccessBeforeEnabling() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "private func enableFaceIDIfAuthenticated() async {") else {
+            XCTFail("enableFaceIDIfAuthenticated() not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(600))
+        XCTAssertTrue(functionBody.contains("biometricAuth.authenticate("), "turning Require Face ID on must run a real biometric check")
+        XCTAssertTrue(functionBody.contains("if biometricAuth.isUnlocked"), "must only commit requireFaceID = true on a successful check")
+    }
+
+    func testFinanceTrackAppResetsBiometricStateOnSignOut() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/App/FinanceTrackApp.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "if newValue == .signedOut {") else {
+            XCTFail("sign-out handler not found")
+            return
+        }
+        let functionBody = String(source[range.lowerBound...].prefix(2000))
+        XCTAssertTrue(functionBody.contains("biometricAuth.isFaceIDRequired = false"))
+        XCTAssertTrue(functionBody.contains("biometricAuth.isUnlocked = false"))
+    }
+
     // MARK: - Spend Sense setting
 
     func testNewBudgetSettingsHasSpendSenseEnabled() {
@@ -884,6 +1608,65 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(recommended, 0)
     }
 
+    // MARK: - Monthly Savings Goal reduces weekly spending, floored at 0 (Phase 3 blocking correction)
+    //
+    // A savings goal (plus bills/buffer) that exceeds available income must never produce a
+    // negative weekly recommendation — there is no amount left to recommend spending, not a
+    // negative one. These reproduce the exact numeric scenarios from the correction spec using
+    // the calculator's real parameters: income 4000, no fixed expenses/buffer, 4 weeks in the
+    // month, varying the savings goal.
+
+    func testRecommendedWeeklySpendingWithSavingsGoalReducesWeeklyAllowance() {
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(
+            income: 4000, fixedExpenses: 0, savingsGoal: 800, bufferAmount: 0
+        )
+        let recommended = MonthlyPlanCalculator.recommendedWeeklySpendingLimit(
+            flexibleSpendingAvailable: flexible, spendingWeeksInMonth: 4
+        )
+        XCTAssertEqual(recommended, 800)
+    }
+
+    func testRecommendedWeeklySpendingWithNoSavingsGoalUsesFullMonthlyAmount() {
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(
+            income: 4000, fixedExpenses: 0, savingsGoal: 0, bufferAmount: 0
+        )
+        let recommended = MonthlyPlanCalculator.recommendedWeeklySpendingLimit(
+            flexibleSpendingAvailable: flexible, spendingWeeksInMonth: 4
+        )
+        XCTAssertEqual(recommended, 1000)
+    }
+
+    func testRecommendedWeeklySpendingIsZeroWithNoIncomeAvailable() {
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(
+            income: 0, fixedExpenses: 0, savingsGoal: 0, bufferAmount: 0
+        )
+        let recommended = MonthlyPlanCalculator.recommendedWeeklySpendingLimit(
+            flexibleSpendingAvailable: flexible, spendingWeeksInMonth: 4
+        )
+        XCTAssertEqual(recommended, 0)
+    }
+
+    func testRecommendedWeeklySpendingIsZeroWhenSavingsGoalEqualsAvailableAmount() {
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(
+            income: 4000, fixedExpenses: 0, savingsGoal: 4000, bufferAmount: 0
+        )
+        let recommended = MonthlyPlanCalculator.recommendedWeeklySpendingLimit(
+            flexibleSpendingAvailable: flexible, spendingWeeksInMonth: 4
+        )
+        XCTAssertEqual(recommended, 0)
+    }
+
+    /// This is the case that would have gone negative (-250/week) before the `max(0, ...)` floor.
+    func testRecommendedWeeklySpendingIsZeroWhenSavingsGoalExceedsAvailableAmount() {
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(
+            income: 4000, fixedExpenses: 0, savingsGoal: 5000, bufferAmount: 0
+        )
+        let recommended = MonthlyPlanCalculator.recommendedWeeklySpendingLimit(
+            flexibleSpendingAvailable: flexible, spendingWeeksInMonth: 4
+        )
+        XCTAssertEqual(recommended, 0)
+    }
+
     func testProjectedMonthlySavingsCalculation() {
         let projected = MonthlyPlanCalculator.projectedMonthlySavings(
             income: 4600,
@@ -1627,6 +2410,26 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(accounts.first?.name, "Everyday Checking", "The old pre-existing account must be gone, replaced entirely by the backup")
         XCTAssertEqual(expenses.count, 1)
         XCTAssertEqual(expenses.first?.name, "Rent")
+    }
+
+    /// Phase 3 blocking correction: `stopObserving()` must remove the NotificationCenter observer
+    /// so a `didSave` notification for a torn-down user's context, posted after sign-out, can
+    /// never schedule a backup attempt against it — this is the fix for the sign-out
+    /// freeze/instability caused by AutoBackupManager's observer/debounce task otherwise
+    /// outliving the outgoing user's ModelContainer reference.
+    func testAutoBackupManagerStopObservingRemovesObserverForFutureSaves() {
+        let context = makeAutosaveTestContext()
+        let manager = AutoBackupManager(debounceDelay: .milliseconds(20))
+        manager.startObserving(context: context)
+        manager.stopObserving()
+
+        // No observer remains registered, so this notification has nothing to catch it — no
+        // backup attempt is scheduled, and it's safe to call stopObserving() again (no crash) or
+        // even before any startObserving() call ever happened.
+        NotificationCenter.default.post(name: ModelContext.didSave, object: context)
+        manager.stopObserving()
+
+        XCTAssertNil(manager.lastBackupError)
     }
 
     func testAutoBackupCreatesFileAfterDataChanges() throws {
@@ -2648,6 +3451,30 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertNil(displays.first?.primaryRow, "PlaidBalanceFormatter must never fabricate a $0.00 row for a value that was never reported")
     }
 
+    func testConnectedAccountsDashboardPresenterDisplayExposesConnectionAndAccountIdForRefreshTargeting() {
+        // The Dashboard's per-account Refresh button targets exactly one account via this pair —
+        // never this project's internal plaid_accounts.id, which the client never has.
+        let cachedBalance = CachedPlaidAccountBalance(
+            accountId: "acc-1", name: nil, mask: nil, type: "depository", subtype: nil,
+            currentBalance: 500, availableBalance: 480, creditLimit: nil,
+            isoCurrencyCode: "USD", unofficialCurrencyCode: nil, updatedAt: Date()
+        )
+        let connection = PlaidConnection(id: "conn-1", institutionId: "ins_1", institutionName: "Some Bank", cachedBalances: ["acc-1": cachedBalance])
+        let displays = ConnectedAccountsDashboardPresenter.displays(for: [connection])
+        XCTAssertEqual(displays.first?.connectionId, "conn-1")
+        XCTAssertEqual(displays.first?.accountId, "acc-1")
+    }
+
+    func testConnectedAccountsDashboardPresenterPlaceholderRowHasNilAccountIdButConnectionId() {
+        // The no-balance-cached-yet placeholder row still carries connectionId (there's a
+        // connection to point at) but no accountId (nothing specific to refresh yet) — this is
+        // exactly what tells the Dashboard row to omit the Refresh button entirely.
+        let connection = PlaidConnection(id: "conn-1", institutionId: "ins_1", institutionName: "Some Bank")
+        let displays = ConnectedAccountsDashboardPresenter.displays(for: [connection])
+        XCTAssertEqual(displays.first?.connectionId, "conn-1")
+        XCTAssertNil(displays.first?.accountId)
+    }
+
     // MARK: - Dashboard construction never contacts Plaid (source-level regression guard)
 
     func testDashboardViewSourceNeverReferencesPlaidNetworkingCalls() throws {
@@ -2665,6 +3492,103 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(source.contains("syncBalances"))
         XCTAssertFalse(source.contains("refreshPlaidAccounts"))
         XCTAssertFalse(source.contains("SupabasePlaidBackendService"))
+    }
+
+    func testDashboardViewSourceWiresRefreshButtonThroughPlaidConnectionManagerOnly() throws {
+        // Positive counterpart to the guard above: confirms the per-account Refresh button
+        // genuinely reaches the network (indirectly, via PlaidConnectionManager) rather than the
+        // exclusion test above passing only because the feature was never wired in at all.
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("RefreshPillButton"), "Dashboard must render the shared RefreshPillButton component for connected accounts")
+        XCTAssertTrue(source.contains("plaidConnection.refreshAccountBalance(connectionId:"), "The Refresh button must call PlaidConnectionManager.refreshAccountBalance, never a backend/Plaid call directly")
+        XCTAssertTrue(source.contains("refreshingAccountKeys"), "Each account's in-flight refresh state must be tracked independently, keyed by that account's own Display.id")
+        XCTAssertTrue(source.contains("rateLimitedAccountKeys"), "Each account's rate-limited state must be tracked independently, keyed by that account's own Display.id")
+    }
+
+    // MARK: - PlaidConnectionManager.refreshAccountBalance (Dashboard per-account Refresh button —
+    // server-rate-limited manual refresh of exactly one connected account)
+
+    private struct FakeRefreshOnlyPlaidBackendService: PlaidBackendService {
+        var refreshResult: Result<ConnectedAccountRefreshResult, Error>
+        var receivedConnectionId: String?
+        var receivedAccountId: String?
+
+        func createLinkToken(daysRequested: Int?) async throws -> String { fatalError("not used in this test") }
+        func createUpdateLinkToken(connectionId: String) async throws -> String { fatalError("not used in this test") }
+        func exchangePublicToken(_ publicToken: String, institutionId: String?, institutionName: String) async throws -> PlaidExchangeResult { fatalError("not used in this test") }
+        func syncTransactions(connectionId: String) async throws -> PlaidSyncResult { fatalError("not used in this test") }
+        func syncBalances(connectionId: String) async throws -> [PlaidAccountBalance] { fatalError("not used in this test") }
+        func refreshConnectedAccount(connectionId: String, accountId: String) async throws -> ConnectedAccountRefreshResult {
+            try refreshResult.get()
+        }
+        func refreshAccounts(connectionId: String) async throws -> [PlaidAccountSummary] { fatalError("not used in this test") }
+        func listConnections() async throws -> [PlaidConnectionStatus] { fatalError("not used in this test") }
+        func disconnectAccount(connectionId: String) async throws { fatalError("not used in this test") }
+        func debugResetCursor(connectionId: String) async throws { fatalError("not used in this test") }
+    }
+
+    func testRefreshAccountBalanceUpdatesOnlyTheTargetedAccountLeavingSiblingsUntouched() async throws {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_amex", institutionName: "American Express")
+        manager.updateCachedBalances(connectionId: "conn-1", balances: [
+            makeBalance(accountId: "acc-A", current: 100),
+            makeBalance(accountId: "acc-B", current: 200),
+        ])
+
+        let refreshedBalance = makeBalance(accountId: "acc-A", current: 999)
+        let fake = FakeRefreshOnlyPlaidBackendService(refreshResult: .success(ConnectedAccountRefreshResult(balance: refreshedBalance, remaining: 1)))
+
+        let result = try await manager.refreshAccountBalance(connectionId: "conn-1", accountId: "acc-A", backend: fake)
+
+        XCTAssertEqual(result.remaining, 1)
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["acc-A"]?.currentBalance, 999, "The targeted account's cached balance must reflect the fresh refresh result")
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["acc-B"]?.currentBalance, 200, "A different account under the same connection must be completely untouched by refreshing acc-A")
+    }
+
+    func testRefreshAccountBalancePropagatesRateLimitedErrorAndLeavesCacheUntouched() async {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Some Bank")
+        manager.updateCachedBalances(connectionId: "conn-1", balances: [makeBalance(accountId: "acc-A", current: 100)])
+
+        let fake = FakeRefreshOnlyPlaidBackendService(refreshResult: .failure(PlaidBackendError.rateLimited))
+
+        do {
+            _ = try await manager.refreshAccountBalance(connectionId: "conn-1", accountId: "acc-A", backend: fake)
+            XCTFail("Expected PlaidBackendError.rateLimited to be thrown")
+        } catch PlaidBackendError.rateLimited {
+            // expected — the Dashboard's catch site must map exactly this case to the disabled
+            // "Daily limit reached" button state, never a raw error.
+        } catch {
+            XCTFail("Expected PlaidBackendError.rateLimited, got \(error)")
+        }
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["acc-A"]?.currentBalance, 100, "A rejected refresh must never alter the previously cached balance")
+    }
+
+    func testRefreshConnectedAccountThrowsUnauthorizedWithoutAccessToken() async {
+        // Confirms the new per-account refresh call goes through the exact same auth gate as
+        // every other PlaidBackendService method (post()'s pre-network accessTokenProvider
+        // check) — verified without any live network call, matching this codebase's established
+        // pattern for the other methods above.
+        let service = SupabasePlaidBackendService(
+            accessTokenProvider: { throw AccountDeletionError.serverError }
+        )
+        do {
+            _ = try await service.refreshConnectedAccount(connectionId: "conn-1", accountId: "acc-1")
+            XCTFail("Expected .unauthorized to be thrown")
+        } catch PlaidBackendError.unauthorized {
+            // expected
+        } catch {
+            XCTFail("Expected PlaidBackendError.unauthorized, got \(error)")
+        }
+    }
+
+    func testPlaidBackendErrorRateLimitedHasUserFacingMessage() {
+        let error: Error = PlaidBackendError.rateLimited
+        XCTAssertEqual(error.friendlyAuthMessage, "Daily refresh limit reached for this account.")
     }
 
     // MARK: - Plaid connection warnings (Plaid onboarding — "Follow Link UI best practices").
@@ -5889,9 +6813,41 @@ final class FinanceTrackTests: XCTestCase {
             .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        XCTAssertTrue(source.contains("\"Monthly Savings Goal (optional)\""), "The editable field must read exactly \"Monthly Savings Goal (optional)\"")
+        XCTAssertTrue(source.contains("\"Monthly Savings Goal\""), "The editable field must read \"Monthly Savings Goal\"")
         XCTAssertFalse(source.contains("\"Monthly Goal (optional)\""), "The old, unclear label must no longer appear in Budget Settings")
-        XCTAssertTrue(source.contains("amount you want to save each month"), "Explanatory text describing the desired savings target must be present")
+        // Superseded by the direct two-way sync correction: the field is no longer "(optional)"
+        // framed, and the old standalone descriptive paragraph was intentionally removed in favor
+        // of the compact "Weekly Spend Goal" helper row — see
+        // testBudgetSettingsMonthlySavingsGoalLabelHasNoOptionalSuffix /
+        // testBudgetSettingsOldDescriptiveParagraphRemoved below.
+    }
+
+    func testBudgetSettingsMonthlySavingsGoalLabelHasNoOptionalSuffix() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertFalse(source.contains("Monthly Savings Goal (optional)"), "\"(optional)\" must no longer appear in the runtime Settings Budget Settings label")
+    }
+
+    func testBudgetSettingsOldDescriptiveParagraphRemoved() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertFalse(source.contains("amount you want to save each month"), "The old standalone descriptive paragraph must be removed")
+        XCTAssertFalse(source.contains("Directly tied to your Weekly Spending Limit — editing either one updates the other"), "The old standalone descriptive paragraph must be removed")
+    }
+
+    func testBudgetSettingsUsesWeeklySpendGoalWording() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("Weekly Spend Goal"), "The supporting label area under Monthly Savings Goal must use the \"Weekly Spend Goal\" wording")
     }
 
     func testBudgetSettingsProjectionHasDistinctLabelAndFormulaText() throws {

@@ -157,11 +157,26 @@ struct MonthlyGoalEditView: View {
             return false
         }
 
+        // Direct two-way sync with Weekly Spending Limit, per the user's explicit edit here — a
+        // one-shot imperative write to the model, never a reactive observer on
+        // `weeklySpendingLimit` itself, so this can never recursively re-trigger
+        // `WeeklyLimitEditView`'s own autosave (that view's `@State` only reacts to its own local
+        // field, not to external model mutations). Only fires when the user commits an actual
+        // numeric goal — clearing/leaving the field blank (`goal == nil`, "no monthly goal") is a
+        // deliberate distinct state and must never zero out an already-set weekly limit.
         if let existing = activeRecord {
             existing.monthlyGoal = goal
             existing.updatedAt = .now
+            if let goal {
+                existing.weeklySpendingLimit = goal / 4
+                existing.weeklyMonthlySyncSource = .monthly
+            }
         } else {
-            let created = BudgetSettings(monthlyGoal: goal)
+            let created = BudgetSettings(
+                weeklySpendingLimit: goal.map { $0 / 4 } ?? 0,
+                monthlyGoal: goal,
+                weeklyMonthlySyncSource: goal != nil ? .monthly : nil
+            )
             modelContext.insert(created)
             createdSettings = created
         }

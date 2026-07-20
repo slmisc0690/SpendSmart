@@ -59,6 +59,15 @@ struct PlaidAccountBalance: Equatable {
     let unofficialCurrencyCode: String?
 }
 
+/// The result of a successful `refreshConnectedAccount` call — the ONE requested account's
+/// freshly-refreshed balance, plus how many of today's (UTC calendar day) 2 manual refreshes
+/// remain for that specific account afterward. The server is always authoritative for the count;
+/// this is purely informational for the client to mirror in the Dashboard's button state.
+struct ConnectedAccountRefreshResult: Equatable {
+    let balance: PlaidAccountBalance
+    let remaining: Int
+}
+
 /// The server-side truth about one linked institution, as `list-connections` reports it —
 /// including flags a Plaid webhook set that this device could never have learned about on its
 /// own (see `PlaidConnectionManager.applyServerState`).
@@ -120,6 +129,17 @@ protocol PlaidBackendService {
     /// cadences and failure domains.
     func syncBalances(connectionId: String) async throws -> [PlaidAccountBalance]
 
+    /// Asks the backend to refresh ONE specific account's balance (the Dashboard's per-account
+    /// "Refresh" button) — subject to a server-enforced maximum of 2 manual refreshes per account
+    /// per UTC calendar day (see `refresh-connected-account/index.ts` and
+    /// `0009_connected_account_refresh_log.sql`). `accountId` is Plaid's own `account_id`, the
+    /// same identifier `PlaidAccountBalance.accountId`/`CachedPlaidAccountBalance.accountId`
+    /// already carry — never this project's internal `plaid_accounts.id`, which the client never
+    /// needs to know. Throws `PlaidBackendError.rateLimited` when today's allowance for this
+    /// specific account is already used — never silently retried, never shown as a raw backend
+    /// error; callers must handle it as "disable this account's button for the rest of today."
+    func refreshConnectedAccount(connectionId: String, accountId: String) async throws -> ConnectedAccountRefreshResult
+
     /// Asks the backend to re-run Plaid account DISCOVERY (`/accounts/get`) for an ALREADY linked
     /// institution — call this right after a successful Link UPDATE MODE session, so any account
     /// that became newly available (the reason `NEW_ACCOUNTS_AVAILABLE` fired in the first place)
@@ -170,6 +190,11 @@ enum PlaidBackendError: FriendlyError {
     /// `PlaidBackendService.createUpdateLinkToken`). Distinct from `.server` so call sites can
     /// route straight to "reconnect" UI instead of showing a generic error.
     case requiresReauth
+    /// `refresh-connected-account` returned 429 — today's (UTC calendar day) 2-manual-refresh
+    /// allowance for that specific account is already used. Distinct from `.server` for the same
+    /// reason as `.requiresReauth`: call sites must route straight to a graceful "disable this
+    /// button, show a limit-reached state" UI, never a raw backend error string.
+    case rateLimited
     case server(status: Int, message: String)
 
     var errorDescription: String? {
@@ -182,6 +207,8 @@ enum PlaidBackendError: FriendlyError {
             return "You're signed out. Please sign in again."
         case .requiresReauth:
             return "This connection needs to be reconnected."
+        case .rateLimited:
+            return "Daily refresh limit reached for this account."
         case .server(let status, let message):
             return "Backend error (\(status)): \(message)"
         }
@@ -304,6 +331,18 @@ struct SupabasePlaidBackendService: PlaidBackendService {
         return response.accounts.map { $0.asPlaidAccountBalance() }
     }
 
+    func refreshConnectedAccount(connectionId: String, accountId: String) async throws -> ConnectedAccountRefreshResult {
+        struct Body: Encodable { let connection_id: String; let account_id: String }
+        let response: RefreshConnectedAccountResponse = try await post(
+            "refresh-connected-account",
+            body: Body(connection_id: connectionId, account_id: accountId)
+        )
+        #if DEBUG
+        print("[PlaidBackend] connected-account refresh completed, remaining today: \(response.remaining)")
+        #endif
+        return ConnectedAccountRefreshResult(balance: response.account.asPlaidAccountBalance(), remaining: response.remaining)
+    }
+
     func refreshAccounts(connectionId: String) async throws -> [PlaidAccountSummary] {
         struct Body: Encodable { let connection_id: String }
         let response: RefreshAccountsResponse = try await post("refresh-plaid-accounts", body: Body(connection_id: connectionId))
@@ -394,6 +433,12 @@ struct SupabasePlaidBackendService: PlaidBackendService {
             // function either never returns 409 or has no meaningful distinction to make here, so
             // this check is safe to apply globally rather than per-endpoint.
             throw PlaidBackendError.requiresReauth
+        }
+        if httpResponse.statusCode == 429 {
+            // `refresh-connected-account`'s "today's 2-refresh allowance for this account is
+            // already used" response — see `PlaidBackendError.rateLimited`'s doc comment. No other
+            // function returns 429, so this check is safe to apply globally.
+            throw PlaidBackendError.rateLimited
         }
 
         // 2xx and non-2xx are decoded as two entirely separate, non-overlapping types — a non-2xx
@@ -577,6 +622,16 @@ private struct SyncBalancesResponse: Decodable {
     enum CodingKeys: String, CodingKey { case connectionId = "connection_id", accounts }
 }
 
+private struct RefreshConnectedAccountResponse: Decodable {
+    let connectionId: String
+    /// Reuses `BackendAccountBalanceDTO` — `refresh-connected-account`'s single `account` object
+    /// is deliberately the exact same per-account JSON shape `sync-balances` already sends for
+    /// each entry in its `accounts` array, so nothing new needs decoding logic of its own.
+    let account: BackendAccountBalanceDTO
+    let remaining: Int
+    enum CodingKeys: String, CodingKey { case connectionId = "connection_id", account, remaining }
+}
+
 private struct BackendConnectionStatusDTO: Decodable {
     let connectionId: String
     let institutionId: String?
@@ -708,17 +763,39 @@ struct BackendTransactionDTO: Decodable, Equatable {
         categoryGuess = try container.decodeIfPresent(String.self, forKey: .categoryGuess)
     }
 
-    /// `ISO8601DateFormatter` configured for date-only strings ("2026-07-01"), fixed to UTC/
-    /// Gregorian so parsing is deterministic regardless of the device's locale or time zone.
-    private static let bareDateFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withFullDate]
-        return formatter
-    }()
+    /// Parses a Plaid date-only string ("2026-07-01") into the **local** midnight `Date` for
+    /// that calendar day — deliberately NOT UTC-anchored. Parsing a bare date via
+    /// `ISO8601DateFormatter`/`DateFormatter` defaults to UTC, producing e.g.
+    /// `2026-07-18T00:00:00Z`; every display/grouping call site in this app (Activity,
+    /// Dashboard, Weekly, Monthly Summary) reinterprets a `Date` through `Calendar.current` —
+    /// the device's LOCAL time zone — which rolls a UTC-midnight instant back to the PRIOR
+    /// calendar day in any time zone behind UTC. This was the confirmed root cause of Plaid-
+    /// imported transactions displaying one day early. Building the `Date` directly from the
+    /// target calendar's own `DateComponents` instead produces an instant that always
+    /// represents THIS calendar day when read back through that same calendar/time zone —
+    /// exactly matching how a manually-entered transaction's `DatePicker` value already behaves
+    /// (also device-local midnight), so both round-trip through every `Calendar.current`-based
+    /// display/grouping call site identically, regardless of device time zone. `calendar` is
+    /// injectable (default `.current`) so this is deterministically testable across time zones.
+    static func parseBareDate(_ string: String, calendar: Calendar = .current) -> Date? {
+        let parts = string.split(separator: "-")
+        guard parts.count == 3,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2])
+        else {
+            return nil
+        }
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        return calendar.date(from: components)
+    }
 
     private static func decodeBareDate(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Date? {
         guard let dateString = try container.decodeIfPresent(String.self, forKey: key) else { return nil }
-        guard let date = bareDateFormatter.date(from: dateString) else {
+        guard let date = Self.parseBareDate(dateString) else {
             throw DecodingError.dataCorruptedError(
                 forKey: key,
                 in: container,

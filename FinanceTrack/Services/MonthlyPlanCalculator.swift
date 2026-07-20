@@ -88,11 +88,13 @@ enum MonthlyPlanCalculator {
         income - fixedExpenses - savingsGoal - bufferAmount
     }
 
-    /// Flexible spending divided evenly across the weeks touching the month. 0 when there are no
-    /// spending weeks (shouldn't happen in practice, but avoids a division by zero).
+    /// Flexible spending divided evenly across the weeks touching the month, floored at 0 — when
+    /// bills plus the savings goal (plus buffer) exceed income, there is no amount left to
+    /// recommend spending, not a negative one. 0 when there are no spending weeks (shouldn't
+    /// happen in practice, but avoids a division by zero).
     static func recommendedWeeklySpendingLimit(flexibleSpendingAvailable: Decimal, spendingWeeksInMonth: Int) -> Decimal {
         guard spendingWeeksInMonth > 0 else { return 0 }
-        return flexibleSpendingAvailable / Decimal(spendingWeeksInMonth)
+        return max(0, flexibleSpendingAvailable / Decimal(spendingWeeksInMonth))
     }
 
     /// income − fixed expenses − what's actually been spent so far this month. This is what the

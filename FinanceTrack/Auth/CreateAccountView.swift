@@ -6,6 +6,7 @@ import SwiftUI
 /// sign-in with them). Never persisted or logged beyond that in-memory hand-off.
 struct CreateAccountView: View {
     @Environment(AuthenticationService.self) private var authService
+    @Environment(BiometricAuthManager.self) private var biometricAuth
 
     var onBack: () -> Void
     var onAccountCreated: (String, String) -> Void
@@ -13,9 +14,14 @@ struct CreateAccountView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var confirmPassword = ""
+    @State private var wantsFaceID = false
     @State private var isCreating = false
     @State private var errorMessage: String?
     @State private var successMessage: String?
+
+    private var biometricAvailability: BiometricAvailability {
+        biometricAuth.availability()
+    }
 
     private var emailError: String? {
         guard !email.isEmpty else { return nil }
@@ -44,6 +50,7 @@ struct CreateAccountView: View {
                 VStack(spacing: Theme.Spacing.lg) {
                     header
                     form
+                    faceIDOptInRow
 
                     if let successMessage {
                         inlineMessage(icon: "checkmark.circle.fill", text: successMessage, color: Theme.statusGood)
@@ -89,7 +96,8 @@ struct CreateAccountView: View {
                     placeholder: "you@example.com",
                     text: $email,
                     keyboardType: .emailAddress,
-                    textContentType: .username
+                    textContentType: .username,
+                    requestsInitialFocus: true
                 )
                 if let emailError { fieldError(emailError) }
 
@@ -114,6 +122,45 @@ struct CreateAccountView: View {
                     textContentType: .newPassword
                 )
                 if let confirmError { fieldError(confirmError) }
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+    }
+
+    /// Default OFF. Only offered as an active, checkable control when this device can actually
+    /// evaluate Face ID/Touch ID/passcode right now — otherwise shown disabled with an
+    /// explanation, never as a misleadingly-active control that would silently do nothing.
+    @ViewBuilder
+    private var faceIDOptInRow: some View {
+        CardBackground {
+            switch biometricAvailability {
+            case .available:
+                Toggle(isOn: $wantsFaceID) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use Face ID for future sign-in")
+                            .font(Theme.bodyFont)
+                            .foregroundStyle(Theme.textPrimary)
+                        Text("Unlock SpendSmart with Face ID instead of typing your password every time.")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .tint(Theme.accent)
+            case .unavailable(let reason):
+                HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                    Image(systemName: "faceid")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use Face ID for future sign-in")
+                            .font(Theme.bodyFont)
+                            .foregroundStyle(Theme.textTertiary)
+                        Text(reason)
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    Spacer()
+                }
             }
         }
         .padding(.horizontal, Theme.Spacing.lg)
@@ -146,6 +193,13 @@ struct CreateAccountView: View {
         defer { isCreating = false }
         do {
             try await authService.signUp(email: email, password: password)
+            if wantsFaceID {
+                // No authenticated session/container exists yet at this point (sign-up may
+                // still require email verification) — never enroll Face ID here. Only mark the
+                // intent; RootView's bootstrap performs the actual biometric check once this
+                // user's session and per-user store both genuinely exist.
+                PendingFaceIDOptIn.markPending(email: email)
+            }
             successMessage = "Account created! Check your email to verify SpendSmart."
             // Let the success message register on screen before moving on.
             try? await Task.sleep(nanoseconds: 700_000_000)
@@ -159,5 +213,6 @@ struct CreateAccountView: View {
 #Preview {
     CreateAccountView(onBack: {}, onAccountCreated: { _, _ in })
         .environment(AuthenticationService.shared)
+        .environment(BiometricAuthManager())
         .preferredColorScheme(.dark)
 }

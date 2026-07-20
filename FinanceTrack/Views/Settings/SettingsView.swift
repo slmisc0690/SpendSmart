@@ -33,6 +33,10 @@ struct SettingsView: View {
 
     @State private var weeklyLimit: Decimal?
     @State private var monthlyGoal: Decimal?
+    /// True only for the duration of a programmatic counterpart-field update inside
+    /// `saveWeeklyLimit()`/`saveMonthlyGoal()` — see `labeledAmountField`'s `onChange` guard.
+    @State private var isSyncingCounterpartField = false
+    @State private var faceIDToggleErrorMessage: String?
     @State private var isPresentingSecurityNotes = false
     @State private var isPresentingResetConfirmation = false
     @State private var isPresentingConnectedAccounts = false
@@ -228,12 +232,10 @@ struct SettingsView: View {
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     labeledAmountField(title: "Weekly Spending Limit", amount: $weeklyLimit, onSubmit: saveWeeklyLimit)
-                    projectedSavingsRow
+                    weeklySpendingLimitHelperRow
                     Divider().overlay(Theme.cardStroke)
-                    labeledAmountField(title: "Monthly Savings Goal (optional)", amount: $monthlyGoal, onSubmit: saveMonthlyGoal)
-                    Text("The amount you want to save each month. This doesn't change your Weekly Spending Limit or the estimate above — it's simply your own target to track against.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.textTertiary)
+                    labeledAmountField(title: "Monthly Savings Goal", amount: $monthlyGoal, onSubmit: saveMonthlyGoal)
+                    monthlySavingsGoalHelperRow
                     Divider().overlay(Theme.cardStroke)
 
                     TransactionToggleRow(
@@ -267,51 +269,106 @@ struct SettingsView: View {
         }
     }
 
-    /// Estimates what sticking to the weekly limit above would leave you with at month's end.
-    /// Reads only the final projected number from Monthly Plan — never income or bill totals.
+    /// Rendered directly under Weekly Spending Limit. Shows content only when the CALCULATED
+    /// result belongs here — i.e. the user just edited Monthly Savings Goal, so this field's
+    /// value is the derived one (`weeklyMonthlySyncSource == .monthly`) — or when neither field
+    /// has ever been driven through the synced path yet (`nil`, the original Monthly-Plan-
+    /// projection estimate, which has always been associated with the weekly limit). Renders
+    /// nothing at all when `.weekly` (that case's calculated result belongs under Monthly
+    /// Savings Goal instead — see `monthlySavingsGoalHelperRow`) — never both at once.
     @ViewBuilder
-    private var projectedSavingsRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Estimated Savings This Month")
-                .font(Theme.captionFont)
-                .foregroundStyle(Theme.textTertiary)
-
-            if !hasIncomeDataForProjection {
-                Text("Add income and bills in Monthly Plan to calculate this estimate — there isn't enough information yet.")
+    private var weeklySpendingLimitHelperRow: some View {
+        switch settings.weeklyMonthlySyncSource {
+        case .weekly:
+            EmptyView()
+        case .monthly:
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Weekly Spend Goal")
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
-            } else if projectedSavingsFromWeeklyLimit >= 0 {
-                HStack(spacing: 4) {
-                    Text("You could save about")
+                Text("Keeping your Weekly Spend at \(settings.weeklySpendingLimit.formatted(.currency(code: "USD").precision(.fractionLength(2)))) could help you reach your monthly savings goal.")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.statusGood)
+            }
+        case nil:
+            // Estimates what sticking to the weekly limit above would leave you with at month's
+            // end. Reads only the final projected number from Monthly Plan — never income or
+            // bill totals. Unchanged original behavior for a user who has never used the synced
+            // fields; always associated with the weekly limit, since that's the number the
+            // estimate is actually projected from.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Estimated Savings This Month")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
+
+                if !hasIncomeDataForProjection {
+                    Text("Add income and bills in Monthly Plan to calculate this estimate — there isn't enough information yet.")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
+                } else if projectedSavingsFromWeeklyLimit >= 0 {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("You could save about")
+                        PrivacyAmountView(
+                            amount: projectedSavingsFromWeeklyLimit,
+                            isPrivacyModeEnabled: privacyMode.isEnabled,
+                            font: Theme.captionFont,
+                            color: Theme.statusGood
+                        )
+                        Text("this month.")
+                    }
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.statusGood)
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("This weekly limit may overspend by")
+                        PrivacyAmountView(
+                            amount: abs(projectedSavingsFromWeeklyLimit),
+                            isPrivacyModeEnabled: privacyMode.isEnabled,
+                            font: Theme.captionFont,
+                            color: Theme.statusOver
+                        )
+                        Text(".")
+                    }
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.statusOver)
+                }
+
+                if hasIncomeDataForProjection {
+                    Text("Estimated income minus planned bills and your Monthly Plan buffer, minus your Weekly Spending Limit for every week this month.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+        }
+    }
+
+    /// Rendered directly under Monthly Savings Goal. Shows content only when the user just
+    /// edited Weekly Spending Limit, so THIS field's value is the derived one
+    /// (`weeklyMonthlySyncSource == .weekly`) — empty otherwise, so this and
+    /// `weeklySpendingLimitHelperRow` never both show content for the same state.
+    @ViewBuilder
+    private var monthlySavingsGoalHelperRow: some View {
+        if settings.weeklyMonthlySyncSource == .weekly {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Weekly Spend Goal")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
+                // `.firstTextBaseline` (not the HStack default `.center`) is what keeps the
+                // amount aligned with the FIRST line of the sentence rather than vertically
+                // centered against the whole (possibly two-line, on narrow widths) text block —
+                // without it, a wrapped sentence pushes the amount down to visually "float"
+                // between the two lines instead of reading as part of the same row.
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("This amount reflects what you could save this month:")
                     PrivacyAmountView(
-                        amount: projectedSavingsFromWeeklyLimit,
+                        amount: settings.monthlyGoal ?? 0,
                         isPrivacyModeEnabled: privacyMode.isEnabled,
                         font: Theme.captionFont,
                         color: Theme.statusGood
                     )
-                    Text("this month.")
                 }
                 .font(Theme.captionFont)
                 .foregroundStyle(Theme.statusGood)
-            } else {
-                HStack(spacing: 4) {
-                    Text("This weekly limit may overspend by")
-                    PrivacyAmountView(
-                        amount: abs(projectedSavingsFromWeeklyLimit),
-                        isPrivacyModeEnabled: privacyMode.isEnabled,
-                        font: Theme.captionFont,
-                        color: Theme.statusOver
-                    )
-                    Text(".")
-                }
-                .font(Theme.captionFont)
-                .foregroundStyle(Theme.statusOver)
-            }
-
-            if hasIncomeDataForProjection {
-                Text("Estimated income minus planned bills and your Monthly Plan buffer, minus your Weekly Spending Limit for every week this month.")
-                    .font(.system(size: 11, weight: .regular, design: .rounded))
-                    .foregroundStyle(Theme.textTertiary)
             }
         }
     }
@@ -421,12 +478,25 @@ struct SettingsView: View {
                         isOn: Binding(
                             get: { settings.requireFaceID },
                             set: { newValue in
-                                settings.requireFaceID = newValue
-                                biometricAuth.isFaceIDRequired = newValue
-                                if !newValue { biometricAuth.isUnlocked = true }
+                                if newValue {
+                                    // OFF -> ON requires a successful biometric check first —
+                                    // the toggle visually stays off until this completes (and
+                                    // snaps back off if it fails), never flipping on speculatively.
+                                    Task { await enableFaceIDIfAuthenticated() }
+                                } else {
+                                    settings.requireFaceID = false
+                                    settings.updatedAt = .now
+                                    biometricAuth.isFaceIDRequired = false
+                                    biometricAuth.isUnlocked = true
+                                }
                             }
                         )
                     )
+                    if let faceIDToggleErrorMessage {
+                        Text(faceIDToggleErrorMessage)
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.statusOver)
+                    }
 
                     Divider().overlay(Theme.cardStroke)
 
@@ -731,25 +801,59 @@ struct SettingsView: View {
                 style: .inline,
                 accessibilityLabel: title
             )
-            .onChange(of: amount.wrappedValue) { _, _ in onSubmit() }
+            // Suppressed while a sync commit is programmatically updating the OTHER field's
+            // state below (see `isSyncingCounterpartField`) — without this guard, that
+            // programmatic update would itself be seen as "the user edited this field" and
+            // recursively re-trigger the other save function.
+            .onChange(of: amount.wrappedValue) { _, _ in
+                if !isSyncingCounterpartField { onSubmit() }
+            }
         }
     }
 
+    /// Applies the canonical sync (`BudgetSettings.applyWeeklySpendingLimitCommit`) and mirrors
+    /// the result into this screen's own local `monthlyGoal` `@State` (so the visible field
+    /// updates immediately, without requiring the user to leave and return to Settings). The
+    /// state write is wrapped in `isSyncingCounterpartField` so `labeledAmountField`'s
+    /// `onChange` treats it as programmatic, never as a second user edit — this is what
+    /// prevents a recursive call into `saveMonthlyGoal()`.
     private func saveWeeklyLimit() {
         guard let weeklyLimit, weeklyLimit >= 0 else { return }
-        settings.weeklySpendingLimit = weeklyLimit
-        settings.updatedAt = .now
+        settings.applyWeeklySpendingLimitCommit(weeklyLimit)
+
+        isSyncingCounterpartField = true
+        monthlyGoal = settings.monthlyGoal
+        isSyncingCounterpartField = false
     }
 
+    /// Applies the canonical sync (`BudgetSettings.applyMonthlySavingsGoalCommit`) — same
+    /// model-write-plus-visible-state-write reasoning as `saveWeeklyLimit()` above. Only
+    /// mirrors into `weeklyLimit`'s local state when an actual numeric goal was committed;
+    /// clearing the field to `nil` ("no monthly goal") never touches the weekly field.
     private func saveMonthlyGoal() {
-        guard let monthlyGoal else {
-            settings.monthlyGoal = nil
+        if let monthlyGoal, monthlyGoal < 0 { return }
+        settings.applyMonthlySavingsGoalCommit(monthlyGoal)
+        guard monthlyGoal != nil else { return }
+
+        isSyncingCounterpartField = true
+        weeklyLimit = settings.weeklySpendingLimit
+        isSyncingCounterpartField = false
+    }
+
+    /// Turning "Require Face ID" ON must succeed a real biometric check first — never flips the
+    /// setting speculatively. Only ever enables for the CURRENT per-user `BudgetSettings` row
+    /// (this view's `settings`, already scoped to the signed-in user's isolated store), so one
+    /// user enabling this can never affect another user's row.
+    private func enableFaceIDIfAuthenticated() async {
+        faceIDToggleErrorMessage = nil
+        await biometricAuth.authenticate(reason: "Enable Face ID for SpendSmart", surfaceErrors: true)
+        if biometricAuth.isUnlocked {
+            settings.requireFaceID = true
             settings.updatedAt = .now
-            return
+            biometricAuth.isFaceIDRequired = true
+        } else {
+            faceIDToggleErrorMessage = biometricAuth.lastErrorMessage ?? "Face ID verification failed. Please try again."
         }
-        guard monthlyGoal >= 0 else { return }
-        settings.monthlyGoal = monthlyGoal
-        settings.updatedAt = .now
     }
 
     private func resetAllData() {

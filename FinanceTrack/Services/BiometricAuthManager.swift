@@ -9,6 +9,34 @@ enum BiometricAvailability: Equatable {
     case unavailable(reason: String)
 }
 
+/// A brand-new user's "Use Face ID for future sign-in" choice, made on `CreateAccountView`
+/// before any session/container exists yet — persisted (not held only in memory) because
+/// sign-up may require email verification, which can involve backgrounding or even relaunching
+/// the app before a real session is established, which would lose a purely in-memory flag.
+/// Keyed by normalized email (no UID is known yet at mark time), consumed exactly once by
+/// `RootView`'s bootstrap for whichever authenticated user that email resolves to, then removed
+/// — so it can never be applied twice or leak to a different account that happens to reuse the
+/// key. Stores only a boolean flag — never a credential, never anything sensitive.
+enum PendingFaceIDOptIn {
+    private static func key(for email: String) -> String {
+        "pendingFaceIDOptIn.\(email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+    }
+
+    static func markPending(email: String) {
+        UserDefaults.standard.set(true, forKey: key(for: email))
+    }
+
+    /// Returns whether this email had a pending opt-in — removes the marker either way, so it
+    /// is only ever consumed once regardless of the outcome.
+    @discardableResult
+    static func consume(email: String) -> Bool {
+        let resolvedKey = key(for: email)
+        let wasPending = UserDefaults.standard.bool(forKey: resolvedKey)
+        UserDefaults.standard.removeObject(forKey: resolvedKey)
+        return wasPending
+    }
+}
+
 @Observable
 final class BiometricAuthManager {
     var isUnlocked: Bool = false

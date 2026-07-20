@@ -124,6 +124,23 @@ final class PlaidConnectionManager {
 
     private let defaults: UserDefaults
 
+    /// The authenticated Supabase user this instance's storage is namespaced to — `nil` only for
+    /// a manager constructed before any user is known (should not happen in normal app operation
+    /// once Phase 3's `UserDataStoreManager` is wired up; kept `nil`-able so existing tests that
+    /// construct this type without a user in scope keep compiling unchanged). See
+    /// `effectiveConnectionsKey`/`namespacedKey(for:)` for how this affects storage.
+    let userId: UUID?
+
+    /// `"plaid.connections.v2.<uid>"` when `userId` is set, else the original flat
+    /// `"plaid.connections.v2"` key — the one place per-user namespacing is actually applied.
+    private static func namespacedKey(for userId: UUID) -> String {
+        "\(connectionsKey).\(userId.uuidString)"
+    }
+
+    private var effectiveConnectionsKey: String {
+        userId.map { Self.namespacedKey(for: $0) } ?? Self.connectionsKey
+    }
+
     private(set) var connections: [PlaidConnection] {
         didSet { persist() }
     }
@@ -163,9 +180,11 @@ final class PlaidConnectionManager {
         oauthReturnMissedActiveSession = false
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, userId: UUID? = nil) {
         self.defaults = defaults
-        if let data = defaults.data(forKey: Self.connectionsKey),
+        self.userId = userId
+        let effectiveKey = userId.map { Self.namespacedKey(for: $0) } ?? Self.connectionsKey
+        if let data = defaults.data(forKey: effectiveKey),
            let decoded = try? Self.makeDecoder().decode([PlaidConnection].self, from: data) {
             self.connections = decoded
         } else {
@@ -173,8 +192,11 @@ final class PlaidConnectionManager {
             // still on the pre-multi-institution scalar-key format. `didSet` does not fire for a
             // property set inside its own type's initializer, so this migration persists directly
             // (see its own doc comment) rather than relying on `persist()` running as a side
-            // effect of this assignment.
-            self.connections = Self.migrateLegacyConnectionIfNeeded(defaults: defaults)
+            // effect of this assignment. Only meaningful when `userId` is nil (the scalar keys
+            // predate any per-user concept entirely); for a namespaced instance this simply
+            // produces an empty array, since the actual flat-key-to-namespace copy is a distinct,
+            // explicitly-gated step — see `migrateFlatConnectionsIfNeeded`.
+            self.connections = Self.migrateLegacyConnectionIfNeeded(defaults: defaults, destinationKey: effectiveKey)
         }
         #if DEBUG
         print("[SpendSmartBuild] connections loaded: \(self.connections.count)")
@@ -194,7 +216,7 @@ final class PlaidConnectionManager {
     /// AND a non-empty connection id was actually stored — anything else (never connected, or the
     /// corrupt partial state the old implementation could theoretically leave behind) becomes an
     /// empty array, never a guessed-at connection.
-    private static func migrateLegacyConnectionIfNeeded(defaults: UserDefaults) -> [PlaidConnection] {
+    private static func migrateLegacyConnectionIfNeeded(defaults: UserDefaults, destinationKey: String) -> [PlaidConnection] {
         let legacyIsConnectedKey = "plaid.amex.isConnected"
         let legacyConnectionIdKey = "plaid.amex.connectionId"
         let legacyLastSyncedAtKey = "plaid.amex.lastSyncedAt"
@@ -226,7 +248,7 @@ final class PlaidConnectionManager {
         // if encoding somehow failed, the old keys are left in place so this same migration is
         // retried on the next launch instead of silently losing the user's connection state.
         if let data = try? Self.makeEncoder().encode(migrated) {
-            defaults.set(data, forKey: Self.connectionsKey)
+            defaults.set(data, forKey: destinationKey)
             defaults.removeObject(forKey: legacyIsConnectedKey)
             defaults.removeObject(forKey: legacyConnectionIdKey)
             defaults.removeObject(forKey: legacyLastSyncedAtKey)
@@ -241,7 +263,27 @@ final class PlaidConnectionManager {
 
     private func persist() {
         guard let data = try? Self.makeEncoder().encode(connections) else { return }
-        defaults.set(data, forKey: Self.connectionsKey)
+        defaults.set(data, forKey: effectiveConnectionsKey)
+    }
+
+    /// One-time copy of the pre-Phase-3 flat (un-namespaced) `"plaid.connections.v2"` value into a
+    /// specific user's namespaced key — never deletes the flat key (a harmless leftover once every
+    /// `PlaidConnectionManager` instance only ever reads/writes its own namespaced key going
+    /// forward). No-ops if the namespaced key already has data (already migrated for this user) or
+    /// if the flat key has no data to copy (fresh install, or a user who never had a connection).
+    ///
+    /// This function has no concept of "which user is allowed to claim the device's pre-existing
+    /// state" — callers MUST only invoke it for the single user authorized to do so (see
+    /// `UserDataStoreManager`'s combined legacy-claim marker); calling it for an arbitrary second
+    /// user would leak the first user's cached Plaid connection metadata into that second user's
+    /// namespace.
+    @discardableResult
+    static func migrateFlatConnectionsIfNeeded(defaults: UserDefaults, userId: UUID) -> Bool {
+        let destinationKey = namespacedKey(for: userId)
+        guard defaults.data(forKey: destinationKey) == nil else { return false }
+        guard let flatData = defaults.data(forKey: connectionsKey) else { return false }
+        defaults.set(flatData, forKey: destinationKey)
+        return true
     }
 
     private static func makeEncoder() -> JSONEncoder {
@@ -383,5 +425,30 @@ final class PlaidConnectionManager {
             )
         }
         connections[index].cachedBalances = updated
+    }
+
+    /// Refreshes exactly ONE account's balance via the new rate-limited
+    /// `refresh-connected-account` Edge Function and merges the single returned balance into this
+    /// connection's cache via `updateCachedBalances` — sibling accounts under the same connection
+    /// are left untouched. This is the ONLY place in the app that calls
+    /// `PlaidBackendService.refreshConnectedAccount`: the Dashboard itself must never reference
+    /// `PlaidBackendService`/`syncBalances`/`refreshPlaidAccounts` directly (see
+    /// `testDashboardStillNeverCallsPlaidDirectlyAfterRawBalanceRestore` in
+    /// `FinanceTrackTests.swift`, an intentional invariant from a past regression) — `DashboardView`
+    /// instead only ever calls this method on its already-injected `PlaidConnectionManager`.
+    ///
+    /// Throws whatever `PlaidBackendService.refreshConnectedAccount` throws, including
+    /// `PlaidBackendError.rateLimited` when today's per-account allowance is exhausted — callers
+    /// must catch that case and show a quiet "Daily limit reached" state, never a raw error. On
+    /// throw, the cache is left untouched (no partial/failed update is ever written).
+    @discardableResult
+    func refreshAccountBalance(
+        connectionId: String,
+        accountId: String,
+        backend: PlaidBackendService = SupabasePlaidBackendService()
+    ) async throws -> ConnectedAccountRefreshResult {
+        let result = try await backend.refreshConnectedAccount(connectionId: connectionId, accountId: accountId)
+        updateCachedBalances(connectionId: connectionId, balances: [result.balance])
+        return result
     }
 }

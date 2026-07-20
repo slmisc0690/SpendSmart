@@ -20,6 +20,12 @@ final class MonthlyPlanSettings {
     var createdAt: Date
     var updatedAt: Date
 
+    /// The Supabase auth user UUID that locally owns this row on this device. `nil` for any row
+    /// created before per-user local data isolation existed (or not yet backfilled) — a `nil`
+    /// value must never be treated as "belongs to the current user." Optional in this phase by
+    /// design (see `UserDataStoreManager`/`LegacyDataMigrator`); not yet enforced or required.
+    var ownerUserID: UUID?
+
     init(
         id: UUID = UUID(),
         monthlySavingsGoal: Decimal = 0,
@@ -27,7 +33,8 @@ final class MonthlyPlanSettings {
         useRecommendedWeeklyBudget: Bool = false,
         autoUpdateWeeklyBudgetFromPlan: Bool = false,
         createdAt: Date = .now,
-        updatedAt: Date = .now
+        updatedAt: Date = .now,
+        ownerUserID: UUID? = nil
     ) {
         self.id = id
         self.monthlySavingsGoal = monthlySavingsGoal
@@ -36,5 +43,6 @@ final class MonthlyPlanSettings {
         self.autoUpdateWeeklyBudgetFromPlan = autoUpdateWeeklyBudgetFromPlan
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.ownerUserID = ownerUserID
     }
 }

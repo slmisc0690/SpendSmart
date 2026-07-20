@@ -27,6 +27,12 @@ final class RecurringExpense {
     var createdAt: Date
     var updatedAt: Date
 
+    /// The Supabase auth user UUID that locally owns this row on this device. `nil` for any row
+    /// created before per-user local data isolation existed (or not yet backfilled) — a `nil`
+    /// value must never be treated as "belongs to the current user." Optional in this phase by
+    /// design (see `UserDataStoreManager`/`LegacyDataMigrator`); not yet enforced or required.
+    var ownerUserID: UUID?
+
     init(
         id: UUID = UUID(),
         name: String,
@@ -41,7 +47,8 @@ final class RecurringExpense {
         isActive: Bool = true,
         note: String = "",
         createdAt: Date = .now,
-        updatedAt: Date = .now
+        updatedAt: Date = .now,
+        ownerUserID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -57,5 +64,6 @@ final class RecurringExpense {
         self.note = note
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.ownerUserID = ownerUserID
     }
 }

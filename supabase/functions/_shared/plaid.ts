@@ -560,7 +560,7 @@ export interface UpdateModeLinkTokenParams {
  */
 export function buildUpdateModeLinkTokenParams(userId: string, accessToken: string): UpdateModeLinkTokenParams {
   return {
-    client_name: "SpendSmart",
+    client_name: "SpendSmart by S&L App Development LLC",
     language: "en",
     country_codes: ["US"],
     user: { client_user_id: userId },

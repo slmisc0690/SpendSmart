@@ -5,8 +5,13 @@ import SwiftData
 struct FinanceTrackApp: App {
     @State private var privacyMode = PrivacyModeManager()
     @State private var biometricAuth = BiometricAuthManager()
-    @State private var plaidConnection = PlaidConnectionManager()
     @State private var autoBackupManager = AutoBackupManager()
+    /// Owns the per-authenticated-user isolated SwiftData store and namespaced
+    /// `PlaidConnectionManager` — replaces the old single app-wide `sharedModelContainer`/
+    /// `plaidConnection` instances (see Phase 3 local user-data isolation). Never exposes a
+    /// container/manager for any user other than whichever `resolve(for:)` most recently
+    /// succeeded for.
+    @State private var userDataStore = UserDataStoreManager()
     // `.shared`, not a fresh instance — see AuthenticationService's doc comment for why there
     // must be exactly one app-wide session (both the UI and SupabasePlaidBackendService's default
     // token provider read from this same instance).
@@ -26,26 +31,9 @@ struct FinanceTrackApp: App {
         print("[SpendSmartBuild] manual-account-ux-v1")
         print("[SpendSmartBuild] currency-toolbar-polish-v1")
         print("[SpendSmartBuild] currency-accessory-removed-v1")
+        print("[SpendSmartBuild] per-user-local-isolation-v1")
         #endif
     }
-
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Account.self,
-            FinanceTransaction.self,
-            BudgetSettings.self,
-            Category.self,
-            IncomeSource.self,
-            RecurringExpense.self,
-            MonthlyPlanSettings.self,
-        ])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-        do {
-            return try ModelContainer(for: schema, configurations: [config])
-        } catch {
-            fatalError("Failed to create local SwiftData store: \(error)")
-        }
-    }()
 
     var body: some Scene {
         WindowGroup {
@@ -76,18 +64,72 @@ struct FinanceTrackApp: App {
                             password: "",
                             onBackToSignIn: { Task { try? await authService.signOut() } }
                         )
-                    } else {
+                    } else if let userId = authService.currentUserId,
+                              userDataStore.resolvedUserId == userId,
+                              let container = userDataStore.modelContainer,
+                              let plaidConnection = userDataStore.plaidConnectionManager {
                         RootView()
+                            .modelContainer(container)
                             .environment(privacyMode)
                             .environment(biometricAuth)
                             .environment(plaidConnection)
                             .environment(autoBackupManager)
+                    } else if let userId = authService.currentUserId, let error = userDataStore.lastResolutionError {
+                        // resolve(for:) failed for the currently-authenticated user — surfaced
+                        // here so this can never regress into a permanent blank/loading screen
+                        // with no way out. "Try Again" re-runs resolve(for:) directly (safe to
+                        // call repeatedly; it re-checks/clears its own error state each attempt).
+                        LocalStoreResolutionErrorView(message: error) {
+                            Task { await userDataStore.resolve(for: userId) }
+                        }
+                    } else {
+                        // Signed in and email-verified, but this authenticated user's isolated
+                        // local store (and namespaced Plaid state) hasn't finished resolving yet
+                        // — see `UserDataStoreManager.resolve(for:)` below. Never falls through to
+                        // RootView here: that would risk rendering @Query screens against no
+                        // container, a stale container, or (if this ever regressed) another user's
+                        // container.
+                        AuthLoadingView()
                     }
                 }
                 .environment(authService)
+                // Available to every branch (including CreateAccountView, pre-sign-in) — not
+                // just RootView's own explicit re-application below, which stays for clarity/
+                // explicitness there but is otherwise redundant with this one.
+                .environment(biometricAuth)
                 .task {
                     authService.startObservingAuthEvents()
                     await authService.restoreSession()
+                }
+                .task(id: authService.currentUserId) {
+                    guard authService.sessionState == .signedIn,
+                          authService.isEmailVerified,
+                          let userId = authService.currentUserId
+                    else { return }
+                    await userDataStore.resolve(for: userId)
+                }
+                .onChange(of: authService.sessionState) { _, newValue in
+                    if newValue == .signedOut {
+                        // Stop AutoBackupManager FIRST — it holds its own NotificationCenter
+                        // observer and debounced Task directly referencing the outgoing user's
+                        // ModelContext, entirely independent of userDataStore's own bookkeeping.
+                        // Only the next user's RootView.task re-arms it for a new context; nothing
+                        // else ever stops it, so leaving this out lets a debounced backup fire
+                        // against a context whose owning container is being released below.
+                        autoBackupManager.stopObserving()
+                        // Detach only — never deletes this user's on-disk store or UserDefaults
+                        // namespace, so signing back in (as this user or anyone else) finds
+                        // everything exactly as it was left.
+                        userDataStore.detach()
+                        // Reset the in-memory Face ID gate too — without this, a brief window
+                        // exists (between this sign-out and the next user's RootView re-setting
+                        // both from THEIR OWN settings.requireFaceID) where the outgoing user's
+                        // stale isFaceIDRequired/isUnlocked values could otherwise linger. This
+                        // makes "User A's Face ID must never affect User B" true by construction
+                        // rather than by incidental timing.
+                        biometricAuth.isFaceIDRequired = false
+                        biometricAuth.isUnlocked = false
+                    }
                 }
                 .onOpenURL { url in
                     // Single dispatch point for every URL this app can be opened with. Checked
@@ -102,7 +144,7 @@ struct FinanceTrackApp: App {
                         #if DEBUG
                         print("[PlaidOAuthReturn] recognized Plaid OAuth callback: true")
                         #endif
-                        plaidConnection.handlePlaidOAuthReturn()
+                        userDataStore.plaidConnectionManager?.handlePlaidOAuthReturn()
                         return
                     }
 
@@ -130,7 +172,6 @@ struct FinanceTrackApp: App {
             .animation(.easeInOut(duration: 0.25), value: authService.isPasswordRecoveryActive)
             .animation(.easeInOut(duration: 0.25), value: authService.isEmailVerified)
         }
-        .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .background, biometricAuth.isFaceIDRequired {
                 biometricAuth.lock()
@@ -152,10 +193,47 @@ private struct AuthLoadingView: View {
     }
 }
 
+/// Shown when `UserDataStoreManager.resolve(for:)` has failed for the currently-authenticated
+/// user — the recoverable alternative to letting the app fall through to a silent, permanent
+/// `AuthLoadingView()` with no way out. `onRetry` re-invokes `resolve(for:)` directly.
+private struct LocalStoreResolutionErrorView: View {
+    let message: String
+    var onRetry: () -> Void
+
+    var body: some View {
+        ZStack {
+            Theme.backgroundGradient.ignoresSafeArea()
+            VStack(spacing: Theme.Spacing.lg) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(Theme.statusOver)
+
+                Text("Couldn't load your data")
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(Theme.textPrimary)
+
+                Text(message)
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Theme.Spacing.lg)
+
+                PremiumActionButton(title: "Try Again", action: onRetry)
+                    .padding(.horizontal, Theme.Spacing.lg)
+                    .padding(.top, Theme.Spacing.sm)
+            }
+            .padding(Theme.Spacing.lg)
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
 /// Root tab container for the app's primary screens. Also owns first-run bootstrapping:
 /// a default `BudgetSettings` record and the standard `Category` set are created once if none
-/// exist, so the dashboard never shows a $0 budget and expense entry always has categories to
-/// pick from. No sample/demo transactions are ever inserted here — only settings and taxonomy.
+/// exist, so expense entry always has categories to pick from. No sample/demo transactions are
+/// ever inserted here — only settings and taxonomy. A brand-new user's `BudgetSettings` starts
+/// with a $0 weekly limit (see `bootstrapDefaultSettingsIfNeeded`) — deliberately not a nonzero
+/// default, so a fresh account never shows spending room it was never actually given.
 private struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var settingsList: [BudgetSettings]
@@ -164,6 +242,7 @@ private struct RootView: View {
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(AutoBackupManager.self) private var autoBackupManager
+    @Environment(AuthenticationService.self) private var authService
 
     var body: some View {
         TabView {
@@ -184,20 +263,28 @@ private struct RootView: View {
         }
         .tint(Theme.accent)
         .task {
-            bootstrapDefaultSettingsIfNeeded()
+            let freshlyCreatedSettings = bootstrapDefaultSettingsIfNeeded()
             bootstrapDefaultCategoriesIfNeeded()
             bootstrapDefaultMonthlyPlanSettingsIfNeeded()
             autoBackupManager.startObserving(context: modelContext)
+            await enablePendingFaceIDOptInIfNeeded(for: freshlyCreatedSettings)
         }
     }
 
-    private func bootstrapDefaultSettingsIfNeeded() {
+    /// Returns the newly-created `BudgetSettings` row when this is a genuinely fresh user (no
+    /// existing row) — `nil` when reusing an already-existing row — so callers (specifically the
+    /// pending Face ID opt-in below) can distinguish "first time this user's store was ever
+    /// bootstrapped" from every subsequent launch.
+    @discardableResult
+    private func bootstrapDefaultSettingsIfNeeded() -> BudgetSettings? {
         let settings: BudgetSettings
+        let isFreshlyCreated: Bool
         if let existing = settingsList.first {
             settings = existing
+            isFreshlyCreated = false
         } else {
             settings = BudgetSettings(
-                weeklySpendingLimit: 300,
+                weeklySpendingLimit: 0,
                 weekStartsOnSunday: true,
                 includePendingTransactions: true,
                 hideBalancesByDefault: false,
@@ -205,9 +292,29 @@ private struct RootView: View {
                 monthlyGoal: nil
             )
             modelContext.insert(settings)
+            isFreshlyCreated = true
         }
         privacyMode.isEnabled = settings.hideBalancesByDefault
         biometricAuth.isFaceIDRequired = settings.requireFaceID
+        return isFreshlyCreated ? settings : nil
+    }
+
+    /// Applies `CreateAccountView`'s "Use Face ID for future sign-in" opt-in — only for a
+    /// genuinely fresh user (`freshlyCreatedSettings != nil`), and only if a real biometric check
+    /// succeeds right now, at the one point a valid authenticated session AND this user's
+    /// isolated container both already exist. One-shot: `PendingFaceIDOptIn.consume` removes the
+    /// marker regardless of outcome, so this can never run again for this account.
+    private func enablePendingFaceIDOptInIfNeeded(for freshlyCreatedSettings: BudgetSettings?) async {
+        guard let settings = freshlyCreatedSettings,
+              let email = authService.currentUserEmail,
+              PendingFaceIDOptIn.consume(email: email)
+        else { return }
+
+        await biometricAuth.authenticate(reason: "Enable Face ID for SpendSmart", surfaceErrors: false)
+        if biometricAuth.isUnlocked {
+            settings.requireFaceID = true
+            biometricAuth.isFaceIDRequired = true
+        }
     }
 
     /// Runs on every launch (not just first-run): seeds the full default set for brand-new

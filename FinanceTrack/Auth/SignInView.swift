@@ -7,6 +7,7 @@ struct SignInView: View {
 
     var onBack: () -> Void
     var onForgotPassword: () -> Void
+    var onCreateAccount: () -> Void
 
     @State private var email = ""
     @State private var password = ""
@@ -72,6 +73,15 @@ struct SignInView: View {
                         ProgressView()
                             .tint(Theme.accent)
                     }
+
+                    HStack(spacing: 4) {
+                        Text("New user?")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textSecondary)
+                        Button("Create Account", action: onCreateAccount)
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.accent)
+                    }
                 }
                 .padding(.vertical, Theme.Spacing.lg)
             }
@@ -110,7 +120,7 @@ struct SignInView: View {
 }
 
 #Preview {
-    SignInView(onBack: {}, onForgotPassword: {})
+    SignInView(onBack: {}, onForgotPassword: {}, onCreateAccount: {})
         .environment(AuthenticationService.shared)
         .preferredColorScheme(.dark)
 }

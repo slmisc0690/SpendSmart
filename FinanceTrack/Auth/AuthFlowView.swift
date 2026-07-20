@@ -40,7 +40,8 @@ struct AuthFlowView: View {
             case .signIn:
                 SignInView(
                     onBack: { screen = .landing },
-                    onForgotPassword: { screen = .forgotPassword }
+                    onForgotPassword: { screen = .forgotPassword },
+                    onCreateAccount: { screen = .createAccount }
                 )
             case .forgotPassword:
                 ForgotPasswordView(onBack: { screen = .signIn })

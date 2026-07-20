@@ -103,7 +103,7 @@ Deno.serve(async (req) => {
 
     // NEW CONNECTION.
     const linkTokenParams: Record<string, unknown> = {
-      client_name: "SpendSmart",
+      client_name: "SpendSmart by S&L App Development LLC",
       language: "en",
       country_codes: ["US"],
       // Plaid's own per-end-user correlation id — the real authenticated household account id,

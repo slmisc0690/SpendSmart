@@ -20,6 +20,15 @@ struct DashboardView: View {
     /// nil means "no explicit choice yet" — `effectiveActivityTab` below falls back to
     /// `ActivityTabPresenter.defaultTab`, same pattern as `selectedWeekIndex`/`effectiveWeekIndex`.
     @State private var selectedActivityTab: ActivityTab?
+    /// Keyed by `ConnectedAccountsDashboardPresenter.Display.id` — tracks which single connected
+    /// account's Refresh button is mid-request, so tapping one account's button never disables or
+    /// otherwise affects any other account's button.
+    @State private var refreshingAccountKeys: Set<String> = []
+    /// Keyed the same way — set only after a real 429 from `refresh-connected-account` (or a
+    /// mirrored `remaining == 0` from a prior successful response), never guessed client-side from
+    /// a fresh calendar day. The server remains authoritative regardless: a stale-enabled button
+    /// simply gets a graceful 429 on tap, handled the same way as any other failed refresh.
+    @State private var rateLimitedAccountKeys: Set<String> = []
 
     private var settings: BudgetSettings? { settingsList.first }
 
@@ -246,7 +255,8 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Connected accounts (locally cached balances only — never a live Plaid call)
+    // MARK: - Connected accounts (locally cached balances — refresh delegates to
+    // PlaidConnectionManager, never calls Plaid/the backend directly from this view)
 
     /// See `ConnectedAccountsDashboardPresenter` for the actual mapping logic — kept out of this
     /// view entirely so it's unit-testable without SwiftUI/environment involvement.
@@ -262,7 +272,13 @@ struct DashboardView: View {
                 CardBackground {
                     VStack(spacing: Theme.Spacing.sm) {
                         ForEach(Array(connectedAccountBalanceDisplays.enumerated()), id: \.element.id) { index, display in
-                            ConnectedAccountBalanceRow(display: display, isPrivacyModeEnabled: privacyMode.isEnabled)
+                            ConnectedAccountBalanceRow(
+                                display: display,
+                                isPrivacyModeEnabled: privacyMode.isEnabled,
+                                isRefreshing: refreshingAccountKeys.contains(display.id),
+                                isRateLimited: rateLimitedAccountKeys.contains(display.id),
+                                onRefresh: { refreshConnectedAccount(display) }
+                            )
                             if index < connectedAccountBalanceDisplays.count - 1 {
                                 Divider().overlay(Theme.cardStroke)
                             }
@@ -270,6 +286,33 @@ struct DashboardView: View {
                     }
                 }
                 .padding(.horizontal, Theme.Spacing.lg)
+            }
+        }
+    }
+
+    /// Fires exactly one account's server-rate-limited manual refresh via
+    /// `PlaidConnectionManager.refreshAccountBalance` — this view never names the backend service
+    /// type or any Plaid sync/refresh helper directly (see
+    /// `testDashboardStillNeverCallsPlaidDirectlyAfterRawBalanceRestore`); all networking happens
+    /// behind that one already-injected environment object. `display.accountId` is only `nil` for
+    /// the no-balance-cached-yet placeholder row, which never renders a Refresh button in the
+    /// first place (see `ConnectedAccountBalanceRow`), so a nil here means the button that fired
+    /// this call is stale and there is nothing to refresh — a silent no-op, not an error.
+    private func refreshConnectedAccount(_ display: ConnectedAccountsDashboardPresenter.Display) {
+        guard let accountId = display.accountId else { return }
+        guard !refreshingAccountKeys.contains(display.id) else { return }
+        refreshingAccountKeys.insert(display.id)
+        Task {
+            defer { refreshingAccountKeys.remove(display.id) }
+            do {
+                _ = try await plaidConnection.refreshAccountBalance(connectionId: display.connectionId, accountId: accountId)
+                rateLimitedAccountKeys.remove(display.id)
+            } catch PlaidBackendError.rateLimited {
+                rateLimitedAccountKeys.insert(display.id)
+            } catch {
+                // Any other failure (network, environment mismatch, reauth-required, etc.) — the
+                // button simply returns to its idle state so the user can try again; no raw
+                // backend error is ever surfaced here per the product spec.
             }
         }
     }
@@ -474,6 +517,12 @@ private struct RecentActivityRow: View {
 private struct ConnectedAccountBalanceRow: View {
     let display: ConnectedAccountsDashboardPresenter.Display
     var isPrivacyModeEnabled: Bool = false
+    /// `nil` only when this account has no `accountId` yet (the no-balance-cached-yet placeholder
+    /// row) — there is nothing for a per-account Refresh button to target in that case, so the row
+    /// simply omits the button rather than showing one that can't do anything.
+    var isRefreshing: Bool = false
+    var isRateLimited: Bool = false
+    var onRefresh: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
@@ -495,7 +544,7 @@ private struct ConnectedAccountBalanceRow: View {
             Spacer()
 
             if let row = display.primaryRow {
-                VStack(alignment: .trailing, spacing: 2) {
+                VStack(alignment: .trailing, spacing: 4) {
                     PrivacyAmountView(
                         amount: row.amount,
                         isPrivacyModeEnabled: isPrivacyModeEnabled,
@@ -505,6 +554,9 @@ private struct ConnectedAccountBalanceRow: View {
                     Text(row.label)
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(Theme.textTertiary)
+                    if let onRefresh, display.accountId != nil {
+                        RefreshPillButton(isRefreshing: isRefreshing, isRateLimited: isRateLimited, action: onRefresh)
+                    }
                 }
             }
         }

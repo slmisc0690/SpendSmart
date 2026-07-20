@@ -67,6 +67,12 @@ final class FinanceTransaction {
     /// (`account` is the source). Nil for all other types.
     var transferDestinationAccount: Account?
 
+    /// The Supabase auth user UUID that locally owns this row on this device. `nil` for any row
+    /// created before per-user local data isolation existed (or not yet backfilled) — a `nil`
+    /// value must never be treated as "belongs to the current user." Optional in this phase by
+    /// design (see `UserDataStoreManager`/`LegacyDataMigrator`); not yet enforced or required.
+    var ownerUserID: UUID?
+
     init(
         id: UUID = UUID(),
         amount: Decimal,
@@ -91,7 +97,8 @@ final class FinanceTransaction {
         matchedTransactionId: UUID? = nil,
         account: Account? = nil,
         category: Category? = nil,
-        transferDestinationAccount: Account? = nil
+        transferDestinationAccount: Account? = nil,
+        ownerUserID: UUID? = nil
     ) {
         self.id = id
         self.amount = amount
@@ -117,6 +124,7 @@ final class FinanceTransaction {
         self.account = account
         self.category = category
         self.transferDestinationAccount = transferDestinationAccount
+        self.ownerUserID = ownerUserID
     }
 
     /// The best available display name: prefers the merchant name from a future sync, then the

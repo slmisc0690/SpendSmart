@@ -84,6 +84,12 @@ final class Account {
     /// `defaultCountsTowardMonthlySpending` above.
     var showsInRecentActivity: Bool = true
 
+    /// The Supabase auth user UUID that locally owns this row on this device. `nil` for any row
+    /// created before per-user local data isolation existed (or not yet backfilled) — a `nil`
+    /// value must never be treated as "belongs to the current user." Optional in this phase by
+    /// design (see `UserDataStoreManager`/`LegacyDataMigrator`); not yet enforced or required.
+    var ownerUserID: UUID?
+
     @Relationship(deleteRule: .cascade, inverse: \FinanceTransaction.account)
     var transactions: [FinanceTransaction]? = []
 
