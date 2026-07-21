@@ -69,10 +69,20 @@ enum ManualAccountDeletionService {
     /// nothing saved — if `account` isn't eligible or the save itself throws. Never deletes Plaid
     /// Items, Plaid accounts, Plaid-imported transactions, categories, budgets, or any other
     /// account/transaction.
+    ///
+    /// Also records a `PendingCloudDeletion` tombstone — in the SAME save as the delete itself, so
+    /// the two can never desync — when `account.ownerUserID` is set (a manual, non-Plaid account
+    /// this device has already backfilled ownership for; see `PendingCloudDeletion`'s own doc
+    /// comment for why this is how `ManualDataCloudSyncManager` finds out a cloud row needs
+    /// removing). No tombstone is recorded for a Plaid-connected account (never eligible here
+    /// anyway) or one with a still-nil `ownerUserID` (nothing was ever synced to the cloud for it).
     @discardableResult
     static func delete(_ account: Account, transactions: [FinanceTransaction], context: ModelContext) -> Bool {
         guard eligibility(for: account, transactions: transactions) == .eligible else { return false }
 
+        if let ownerUserID = account.ownerUserID {
+            context.insert(PendingCloudDeletion(entityType: .manualAccount, recordID: account.id, ownerUserID: ownerUserID))
+        }
         context.delete(account)
         do {
             try context.save()

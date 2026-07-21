@@ -87,6 +87,12 @@ enum ManualTransactionDeletionService {
     /// reachable), then deletes the row and saves. Returns `false` without changing anything —
     /// no balance mutation, no row deletion — if `transaction` isn't eligible (a Plaid import) or
     /// a required account relationship is missing (see `hasRequiredAccountRelationships`).
+    ///
+    /// Also records a `PendingCloudDeletion` tombstone — in the SAME save as the delete itself —
+    /// when `transaction.ownerUserID` is set, mirroring `ManualAccountDeletionService.delete`'s
+    /// own identical reasoning. A Plaid-imported transaction is never eligible here in the first
+    /// place (see `Eligibility.blockedPlaidImport`), so this tombstone path is only ever reached
+    /// for manual entries.
     @discardableResult
     static func delete(_ transaction: FinanceTransaction, context: ModelContext) -> Bool {
         guard eligibility(for: transaction) == .eligible else { return false }
@@ -95,6 +101,9 @@ enum ManualTransactionDeletionService {
         reverseBalanceEffect(of: transaction)
         clearMatchedRelationship(of: transaction, context: context)
 
+        if let ownerUserID = transaction.ownerUserID {
+            context.insert(PendingCloudDeletion(entityType: .manualTransaction, recordID: transaction.id, ownerUserID: ownerUserID))
+        }
         context.delete(transaction)
         try? context.save()
         return true

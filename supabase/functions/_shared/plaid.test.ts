@@ -25,6 +25,7 @@ import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/asse
 import {
   assertItemEnvironmentMatches,
   buildLinkTokenCreatedLogFields,
+  buildNormalizedTransactionRows,
   buildPlaidOperationLogFields,
   buildPlaidWebhookUrl,
   computeDuplicateInstitutionResult,
@@ -33,6 +34,7 @@ import {
   loadPlaidCredentials,
   logPlaidOperation,
   logSafeError,
+  mapPlaidTransactionToNormalizedRow,
   PLAID_OAUTH_REDIRECT_URI,
   plaidFetch,
   PlaidRequestError,
@@ -582,4 +584,175 @@ Deno.test("logPlaidOperation: logged output never contains a token/secret/user-i
   for (const banned of ["access_token", "public_token", "link_token", "PLAID_SECRET", "user_id", "\"body\""]) {
     assert(!serialized.includes(banned), `logPlaidOperation output must never contain "${banned}"`);
   }
+});
+
+// -------------------------------------------------------------------------------------------
+// PHASE 4 — normalized Plaid transaction persistence (mapPlaidTransactionToNormalizedRow /
+// buildNormalizedTransactionRows), see migration 0010_plaid_transactions_normalized.sql. Pure
+// mapping only, verified here without any live Supabase/Postgres call — the actual upsert/delete
+// against public.plaid_transactions is verified by code review (sync-transactions/index.ts),
+// matching this file's own established testing philosophy (see this file's header comment).
+// -------------------------------------------------------------------------------------------
+
+const RAW_MCDONALDS_PENDING = {
+  transaction_id: "txn-mcdonalds-pending",
+  pending_transaction_id: null,
+  account_id: "plaid-account-amex-1",
+  amount: 9.5,
+  merchant_name: "MCDONALDS",
+  name: "MCDONALDS",
+  authorized_date: "2026-07-18",
+  date: "2026-07-18",
+  pending: true,
+};
+
+Deno.test("mapPlaidTransactionToNormalizedRow: maps every field to the exact normalized row shape", () => {
+  const row = mapPlaidTransactionToNormalizedRow(
+    RAW_MCDONALDS_PENDING,
+    "resolved-plaid-account-uuid",
+    "owner-uuid",
+    "2026-07-18T12:00:00.000Z",
+  );
+  assertEquals(row, {
+    plaid_account_id: "resolved-plaid-account-uuid",
+    owner_user_id: "owner-uuid",
+    transaction_id: "txn-mcdonalds-pending",
+    pending_transaction_id: null,
+    original_description: "MCDONALDS",
+    merchant_name: "MCDONALDS",
+    amount: 9.5,
+    authorized_date: "2026-07-18",
+    posted_date: "2026-07-18",
+    is_pending: true,
+    updated_at: "2026-07-18T12:00:00.000Z",
+  });
+});
+
+Deno.test("mapPlaidTransactionToNormalizedRow: bare Plaid date strings pass through completely unparsed — no UTC-midnight shift is even possible here", () => {
+  const row = mapPlaidTransactionToNormalizedRow(
+    { ...RAW_MCDONALDS_PENDING, authorized_date: "2026-07-18", date: "2026-07-18" },
+    "acct",
+    "owner",
+    "now",
+  );
+  assertEquals(row.authorized_date, "2026-07-18", "must be the exact literal string Plaid sent, never reconstructed through any Date/instant type");
+  assertEquals(row.posted_date, "2026-07-18");
+});
+
+Deno.test("mapPlaidTransactionToNormalizedRow: a pending transaction's date mirrors authorized_date, matching Plaid's own documented semantics", () => {
+  const row = mapPlaidTransactionToNormalizedRow(RAW_MCDONALDS_PENDING, "acct", "owner", "now");
+  assertEquals(row.is_pending, true);
+  assertEquals(row.authorized_date, row.posted_date, "while pending, Plaid's own `date` field mirrors `authorized_date` — both must carry the same calendar day");
+});
+
+Deno.test("mapPlaidTransactionToNormalizedRow: a posted transaction's posted_date is Plaid's own authoritative date, independent of authorized_date", () => {
+  const posted = {
+    ...RAW_MCDONALDS_PENDING,
+    transaction_id: "txn-mcdonalds-posted",
+    pending: false,
+    authorized_date: "2026-07-18",
+    date: "2026-07-19", // posted a day later than authorized, a real-world case Plaid supports
+  };
+  const row = mapPlaidTransactionToNormalizedRow(posted, "acct", "owner", "now");
+  assertEquals(row.authorized_date, "2026-07-18");
+  assertEquals(row.posted_date, "2026-07-19");
+  assertEquals(row.is_pending, false);
+});
+
+Deno.test("mapPlaidTransactionToNormalizedRow: missing optional fields default to null, never undefined", () => {
+  const minimal = {
+    transaction_id: "txn-minimal",
+    account_id: "acct-1",
+    amount: 5,
+    name: "TEST",
+    pending: false,
+  };
+  const row = mapPlaidTransactionToNormalizedRow(minimal, "acct", "owner", "now");
+  assertEquals(row.pending_transaction_id, null);
+  assertEquals(row.merchant_name, null);
+  assertEquals(row.authorized_date, null);
+  assertEquals(row.posted_date, null);
+});
+
+Deno.test("mapPlaidTransactionToNormalizedRow: amount is passed through as the same JS number representation, never re-stringified here", () => {
+  const row = mapPlaidTransactionToNormalizedRow({ ...RAW_MCDONALDS_PENDING, amount: 19.99 }, "acct", "owner", "now");
+  assertEquals(row.amount, 19.99);
+  assertEquals(typeof row.amount, "number");
+});
+
+Deno.test("mapPlaidTransactionToNormalizedRow: never carries an access_token/secret/credential field (closed shape)", () => {
+  const row = mapPlaidTransactionToNormalizedRow(
+    { ...RAW_MCDONALDS_PENDING, access_token: "access-sandbox-should-never-appear" },
+    "acct",
+    "owner",
+    "now",
+  );
+  const serialized = JSON.stringify(row);
+  assert(!serialized.includes("access_token"), "the normalized row must never echo an access_token even if the raw Plaid object happened to carry one");
+});
+
+Deno.test("buildNormalizedTransactionRows: maps every transaction whose account_id resolves, in order", () => {
+  const plan = buildNormalizedTransactionRows(
+    [RAW_MCDONALDS_PENDING, { ...RAW_MCDONALDS_PENDING, transaction_id: "txn-2", account_id: "plaid-account-amex-2" }],
+    { "plaid-account-amex-1": "uuid-account-1", "plaid-account-amex-2": "uuid-account-2" },
+    "owner-uuid",
+    "now",
+  );
+  assertEquals(plan.rows.length, 2);
+  assertEquals(plan.skippedUnknownAccountCount, 0);
+  assertEquals(plan.rows[0].plaid_account_id, "uuid-account-1");
+  assertEquals(plan.rows[1].plaid_account_id, "uuid-account-2");
+});
+
+Deno.test("buildNormalizedTransactionRows: two accounts under one Plaid Item remain distinct, never merged", () => {
+  const plan = buildNormalizedTransactionRows(
+    [
+      { ...RAW_MCDONALDS_PENDING, transaction_id: "txn-acct-1", account_id: "amex-card-1" },
+      { ...RAW_MCDONALDS_PENDING, transaction_id: "txn-acct-2", account_id: "amex-card-2" },
+    ],
+    { "amex-card-1": "uuid-1", "amex-card-2": "uuid-2" },
+    "owner",
+    "now",
+  );
+  const accountIds = plan.rows.map((r) => r.plaid_account_id);
+  assertEquals(new Set(accountIds).size, 2, "each transaction must resolve to its OWN account's plaid_accounts.id, never collapsed onto a sibling account under the same Item");
+});
+
+Deno.test("buildNormalizedTransactionRows: skips (never throws for) a transaction whose account_id has no known plaid_accounts mapping", () => {
+  const plan = buildNormalizedTransactionRows(
+    [{ ...RAW_MCDONALDS_PENDING, account_id: "never-discovered-account" }],
+    { "plaid-account-amex-1": "uuid-1" },
+    "owner",
+    "now",
+  );
+  assertEquals(plan.rows.length, 0);
+  assertEquals(plan.skippedUnknownAccountCount, 1);
+});
+
+Deno.test("buildNormalizedTransactionRows: an unknown-account transaction never blocks normalization of the OTHER transactions in the same batch", () => {
+  const plan = buildNormalizedTransactionRows(
+    [
+      { ...RAW_MCDONALDS_PENDING, transaction_id: "txn-known", account_id: "plaid-account-amex-1" },
+      { ...RAW_MCDONALDS_PENDING, transaction_id: "txn-unknown", account_id: "never-discovered-account" },
+    ],
+    { "plaid-account-amex-1": "uuid-1" },
+    "owner",
+    "now",
+  );
+  assertEquals(plan.rows.length, 1);
+  assertEquals(plan.rows[0].transaction_id, "txn-known");
+  assertEquals(plan.skippedUnknownAccountCount, 1);
+});
+
+Deno.test("buildNormalizedTransactionRows: empty input produces an empty plan, never throws", () => {
+  const plan = buildNormalizedTransactionRows([], {}, "owner", "now");
+  assertEquals(plan.rows.length, 0);
+  assertEquals(plan.skippedUnknownAccountCount, 0);
+});
+
+Deno.test("buildNormalizedTransactionRows: reprocessing the exact same input is a pure, deterministic no-op (idempotent at the mapping layer)", () => {
+  const accountMap = { "plaid-account-amex-1": "uuid-1" };
+  const first = buildNormalizedTransactionRows([RAW_MCDONALDS_PENDING], accountMap, "owner", "same-instant");
+  const second = buildNormalizedTransactionRows([RAW_MCDONALDS_PENDING], accountMap, "owner", "same-instant");
+  assertEquals(first, second, "the exact same sync input must always produce the exact same normalized rows — the actual dedup/no-duplication guarantee is then provided by the database's own upsert-on-conflict(plaid_account_id, transaction_id), verified by code review");
 });

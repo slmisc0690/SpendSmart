@@ -29,6 +29,7 @@
 // longer calling this function — see the deployment plan for the exact removal criteria.
 import {
   assertItemEnvironmentMatches,
+  buildNormalizedTransactionRows,
   createPrivilegedClient,
   EnvironmentMismatchError,
   isValidUuid,
@@ -185,6 +186,72 @@ Deno.serve(async (req) => {
       .eq("user_id", userId);
     console.log("[sync-transactions] final cursor saved:", !cursorUpdateError);
     console.log("[sync-transactions] response transaction count:", transactions.length);
+
+    // PHASE 4 — server-side normalized persistence (migration
+    // 0010_plaid_transactions_normalized.sql), additive to everything above. Deliberately
+    // best-effort: caught and logged, never allowed to throw past this point — a bug in this NEW
+    // normalized-mirror code path must never prevent the iOS client from receiving the
+    // already-fetched transactions it came here for (see this project's Phase 4 instruction that
+    // existing Production iOS import behavior must remain unchanged). This is genuinely additive,
+    // not a replacement for anything: the iOS-facing response below is built entirely from
+    // `transactions`/`modifiedTransactions`/`removedTransactionIds` above, computed BEFORE this
+    // block runs and completely unaffected by whatever happens in it.
+    try {
+      const { data: accountRows, error: accountsError } = await supabase
+        .from("plaid_accounts")
+        .select("id, account_id")
+        .eq("plaid_item_id", item.id);
+      if (accountsError) throw accountsError;
+
+      const accountIdToPlaidAccountId: Record<string, string> = {};
+      for (const row of accountRows ?? []) {
+        accountIdToPlaidAccountId[row.account_id as string] = row.id as string;
+      }
+
+      const nowIso = new Date().toISOString();
+      const { rows: normalizedRows, skippedUnknownAccountCount } = buildNormalizedTransactionRows(
+        [...added, ...modified],
+        accountIdToPlaidAccountId,
+        userId,
+        nowIso,
+      );
+
+      // Upsert first, THEN process removals — mirrors the iOS local import's own documented
+      // ordering rationale (PlaidTransactionImportService.applySync): a pending transaction's
+      // `removed` entry is the other half of a pending-to-posted transition delivered alongside
+      // the NEW posted transaction's `added`/`modified` entry, so the posted row must already
+      // exist before the old pending row's removal is processed, not the other way around. Unlike
+      // the iOS local import, this table has no user-entered state to preserve across that
+      // transition (no category/note/approval flags exist on plaid_transactions at all — see
+      // migration 0010's own comment), so a plain insert-then-delete-by-transaction_id is
+      // sufficient here; no re-keying of the pending row is needed or attempted.
+      if (normalizedRows.length > 0) {
+        const { error: upsertError } = await supabase
+          .from("plaid_transactions")
+          .upsert(normalizedRows, { onConflict: "plaid_account_id,transaction_id" });
+        if (upsertError) throw upsertError;
+      }
+
+      if (removedTransactionIds.length > 0) {
+        const { error: deleteError } = await supabase
+          .from("plaid_transactions")
+          .delete()
+          .in("transaction_id", removedTransactionIds);
+        if (deleteError) throw deleteError;
+      }
+
+      console.log(
+        "[sync-transactions] normalized rows upserted:", normalizedRows.length,
+        "skipped (unknown account):", skippedUnknownAccountCount,
+        "normalized rows removed:", removedTransactionIds.length,
+      );
+    } catch (normalizedPersistenceError) {
+      logSafeError(
+        "sync-transactions: normalized transaction persistence failed (iOS-facing response unaffected)",
+        normalizedPersistenceError,
+      );
+    }
+
     logPlaidOperation({
       operation: "sync-transactions",
       outcome: "success",

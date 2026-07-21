@@ -372,4 +372,135 @@ final class UserDataIsolationTests: XCTestCase {
         let managerB = PlaidConnectionManager(defaults: defaults, userId: userB)
         XCTAssertTrue(managerB.connections.isEmpty)
     }
+
+    // MARK: - Local (network-free) Plaid stale-date repair on store resolve
+
+    private func staleUTCMidnightJuly18() -> Date {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        return utcCalendar.date(from: components)!
+    }
+
+    func testResolveRepairsStalePlaidDatesLocallyWithoutAnySync() async throws {
+        // Proves the repair introduced for the "Dashboard Refresh never triggers a transaction
+        // sync" gap: a stale-dated Plaid transaction already sitting in a user's store — exactly
+        // the real-world shape (persisted BEFORE the local-midnight parser fix shipped, and
+        // BEFORE this user's first resolve() under the new code) — must be corrected the moment
+        // `resolve(for:)` attaches that store, with no `applySync`/network call anywhere in this
+        // test. Seeded directly against the on-disk store URL, not via a first `resolve()` call —
+        // seeding through `resolve()` itself would mark the user as already swept (even with zero
+        // rows to repair) before the stale row ever existed, which would defeat the point of this
+        // test (see `testResolveDoesNotReRepairAlreadySweptUser` for that scenario instead).
+        let manager = UserDataStoreManager(
+            defaults: makeTestDefaults(),
+            userStoresBaseDirectoryOverride: makeTempDirectory(),
+            legacyContainerProvider: { self.makeInMemoryContainer() }
+        )
+        let userA = UUID()
+
+        let storeURL = try manager.storeURL(for: userA)
+        let seedConfig = ModelConfiguration(schema: Self.schema, url: storeURL)
+        let seedContainer = try ModelContainer(for: Self.schema, configurations: [seedConfig])
+        let seedContext = ModelContext(seedContainer)
+        let staleDate = staleUTCMidnightJuly18()
+        let stale = FinanceTransaction(
+            amount: 25, date: staleDate, source: .plaid, externalTransactionId: "stale-resolve-row",
+            authorizedDate: staleDate, postedDate: staleDate
+        )
+        seedContext.insert(stale)
+        try seedContext.save()
+
+        await manager.resolve(for: userA)
+
+        let container = try XCTUnwrap(manager.modelContainer)
+        let reloaded = try XCTUnwrap(
+            try ModelContext(container).fetch(FetchDescriptor<FinanceTransaction>())
+                .first { $0.externalTransactionId == "stale-resolve-row" }
+        )
+        XCTAssertEqual(Calendar.current.component(.day, from: reloaded.date), 18, "resolve(for:) must repair a stale Plaid date on its own, without any transaction sync")
+    }
+
+    func testResolveDoesNotReRepairAlreadySweptUser() async throws {
+        let defaults = makeTestDefaults()
+        let manager = UserDataStoreManager(
+            defaults: defaults,
+            userStoresBaseDirectoryOverride: makeTempDirectory(),
+            legacyContainerProvider: { self.makeInMemoryContainer() }
+        )
+        let userA = UUID()
+
+        await manager.resolve(for: userA)
+        XCTAssertEqual(
+            Set(defaults.stringArray(forKey: "localPlaidDateRepair.completedUserIDs") ?? []),
+            [userA.uuidString],
+            "the first resolve must record this user as swept"
+        )
+
+        // Insert a stale row AFTER the one-time marker has already been set for this user — the
+        // marker means resolve() won't sweep again, so this row is deliberately left uncorrected
+        // by this test; it only exists to prove the second resolve() truly skips the sweep rather
+        // than happening to find nothing to repair.
+        let container = try XCTUnwrap(manager.modelContainer)
+        let context = ModelContext(container)
+        let staleDate = staleUTCMidnightJuly18()
+        let stale = FinanceTransaction(
+            amount: 25, date: staleDate, source: .plaid, externalTransactionId: "post-marker-stale-row",
+            authorizedDate: staleDate, postedDate: staleDate
+        )
+        context.insert(stale)
+        try context.save()
+
+        manager.detach()
+        await manager.resolve(for: userA)
+
+        let reattachedContainer = try XCTUnwrap(manager.modelContainer)
+        let reloaded = try XCTUnwrap(
+            try ModelContext(reattachedContainer).fetch(FetchDescriptor<FinanceTransaction>())
+                .first { $0.externalTransactionId == "post-marker-stale-row" }
+        )
+        XCTAssertEqual(reloaded.date, staleDate, "a user already recorded as swept must not be re-swept on a later resolve — the marker must actually gate the work")
+    }
+
+    func testLocalPlaidDateRepairMarkerIsPerUserNotGlobal() async throws {
+        let manager = UserDataStoreManager(
+            defaults: makeTestDefaults(),
+            userStoresBaseDirectoryOverride: makeTempDirectory(),
+            legacyContainerProvider: { self.makeInMemoryContainer() }
+        )
+        let userA = UUID()
+        let userB = UUID()
+
+        // User A resolves (and gets marked swept) FIRST, before User B's stale row even exists —
+        // proves the marker set is genuinely keyed per-user, not a single "device has been swept"
+        // flag that would incorrectly also cover User B.
+        await manager.resolve(for: userA)
+        manager.detach()
+
+        let storeURLB = try manager.storeURL(for: userB)
+        let seedConfig = ModelConfiguration(schema: Self.schema, url: storeURLB)
+        let seedContainer = try ModelContainer(for: Self.schema, configurations: [seedConfig])
+        let seedContext = ModelContext(seedContainer)
+        let staleDate = staleUTCMidnightJuly18()
+        let stale = FinanceTransaction(
+            amount: 25, date: staleDate, source: .plaid, externalTransactionId: "user-b-stale-row",
+            authorizedDate: staleDate, postedDate: staleDate
+        )
+        seedContext.insert(stale)
+        try seedContext.save()
+
+        // User B has never been swept, even though User A already has been — resolving B for the
+        // first time must still repair B's own stale row.
+        await manager.resolve(for: userB)
+
+        let containerB = try XCTUnwrap(manager.modelContainer)
+        let reloaded = try XCTUnwrap(
+            try ModelContext(containerB).fetch(FetchDescriptor<FinanceTransaction>())
+                .first { $0.externalTransactionId == "user-b-stale-row" }
+        )
+        XCTAssertEqual(Calendar.current.component(.day, from: reloaded.date), 18, "each user must get their own one-time repair sweep, independent of any other user already swept on this device")
+    }
 }

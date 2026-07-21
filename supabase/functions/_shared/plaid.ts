@@ -766,6 +766,117 @@ export async function refreshPlaidAccounts(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Normalized Plaid transaction persistence (used by sync-transactions — Phase 4 foundation for
+// Connected Account cloud sharing, see migration 0010_plaid_transactions_normalized.sql)
+// ---------------------------------------------------------------------------------------------
+//
+// Pure mapping only — no Supabase/Postgres call happens in this file. sync-transactions performs
+// the actual upsert/delete against public.plaid_transactions using the shapes built here, verified
+// by code review (matching this file's own established testing philosophy — see plaid.test.ts's
+// header — since no live Postgres is available to this repo locally).
+
+/** The exact row shape upserted into public.plaid_transactions — see migration
+ * 0010_plaid_transactions_normalized.sql for the table definition these fields map onto.
+ * `transaction_date` is deliberately NOT included: it is a generated column the database itself
+ * derives from `posted_date`/`authorized_date`, never caller-supplied (see that column's own
+ * comment for why — a caller-writable derived value could drift from the fields it was derived
+ * from; a database-generated one cannot). */
+export interface NormalizedPlaidTransactionRow {
+  plaid_account_id: string;
+  owner_user_id: string;
+  transaction_id: string;
+  pending_transaction_id: string | null;
+  original_description: string;
+  merchant_name: string | null;
+  amount: number;
+  authorized_date: string | null;
+  posted_date: string | null;
+  is_pending: boolean;
+  updated_at: string;
+}
+
+/**
+ * Maps one raw Plaid transaction object (as `/transactions/sync` returns it — the SAME shape
+ * `toWireTransaction` in sync-transactions/index.ts already maps for the iOS-facing response) into
+ * the normalized server row shape, given the ALREADY-RESOLVED `plaid_accounts.id` for its
+ * `account_id` and the ALREADY-VERIFIED owner. Resolving those is the caller's responsibility (see
+ * `buildNormalizedTransactionRows` below) — this function performs no lookup of its own.
+ *
+ * `authorized_date`/`posted_date` are passed through as Plaid's own bare "YYYY-MM-DD" strings,
+ * completely unparsed — Postgres's `date` column type accepts that string directly and never
+ * requires (or permits) a time-of-day/time-zone anchor, which is exactly why the server-side
+ * schema uses `date` rather than `timestamptz` (see migration 0010's own header comment). There is
+ * no equivalent here of the iOS-side `parseBareDate`/UTC-midnight bug class at all: nothing in this
+ * function ever constructs a `Date`/instant from these strings.
+ *
+ * `amount` is passed through as the JS `number` Plaid's own JSON response already deserializes it
+ * to — the SAME representation `toWireTransaction`'s `String(t.amount)` already reads from today,
+ * not a new precision characteristic introduced here.
+ */
+export function mapPlaidTransactionToNormalizedRow(
+  transaction: Record<string, unknown>,
+  plaidAccountId: string,
+  ownerUserId: string,
+  nowIso: string,
+): NormalizedPlaidTransactionRow {
+  return {
+    plaid_account_id: plaidAccountId,
+    owner_user_id: ownerUserId,
+    transaction_id: transaction.transaction_id as string,
+    pending_transaction_id: (transaction.pending_transaction_id as string | null | undefined) ?? null,
+    original_description: transaction.name as string,
+    merchant_name: (transaction.merchant_name as string | null | undefined) ?? null,
+    amount: transaction.amount as number,
+    authorized_date: (transaction.authorized_date as string | null | undefined) ?? null,
+    posted_date: (transaction.date as string | null | undefined) ?? null,
+    is_pending: transaction.pending === true,
+    updated_at: nowIso,
+  };
+}
+
+export interface NormalizedTransactionSyncPlan {
+  rows: NormalizedPlaidTransactionRow[];
+  /** Count of transactions whose `account_id` had no matching entry in
+   * `accountIdToPlaidAccountId` — defensive only (every account should already be discovered in
+   * `plaid_accounts` by the time a transaction for it can exist), never thrown; see this
+   * function's own doc comment. */
+  skippedUnknownAccountCount: number;
+}
+
+/**
+ * Builds the full set of normalized rows for one sync's `added` + `modified` transactions
+ * (callers pass both arrays concatenated — Plaid's `modified` entries are full transaction
+ * objects just like `added`, so both upsert through the exact same path, mirroring how the
+ * existing iOS-facing `toWireTransaction` mapping already treats them identically). A transaction
+ * whose `account_id` has no entry in `accountIdToPlaidAccountId` is skipped (counted, never
+ * thrown) rather than failing the whole batch — this should never happen in practice (every
+ * account a transaction can reference is discovered into `plaid_accounts` at connection time, well
+ * before any transaction for it exists), but a single unexpected/late-discovered account must
+ * never take down normalized persistence for every OTHER transaction in the same sync.
+ */
+export function buildNormalizedTransactionRows(
+  transactions: Record<string, unknown>[],
+  accountIdToPlaidAccountId: Record<string, string>,
+  ownerUserId: string,
+  nowIso: string,
+): NormalizedTransactionSyncPlan {
+  const rows: NormalizedPlaidTransactionRow[] = [];
+  let skippedUnknownAccountCount = 0;
+
+  for (const transaction of transactions) {
+    const accountId = transaction.account_id as string;
+    const plaidAccountId = accountIdToPlaidAccountId[accountId];
+    if (!plaidAccountId) {
+      skippedUnknownAccountCount += 1;
+      continue;
+    }
+    rows.push(mapPlaidTransactionToNormalizedRow(transaction, plaidAccountId, ownerUserId, nowIso));
+  }
+
+  return { rows, skippedUnknownAccountCount };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Plaid webhook signature verification (used by plaid-webhook/index.ts)
 // ---------------------------------------------------------------------------------------------
 //

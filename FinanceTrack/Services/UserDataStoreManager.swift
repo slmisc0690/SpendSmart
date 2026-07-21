@@ -40,6 +40,12 @@ final class UserDataStoreManager {
     /// secret; not process-memory-only; survives sign-out/sign-in and app relaunch.
     private static let legacyClaimedByUserIDKey = "legacyMigration.claimedByUserID"
     private static let legacyClaimedAtKey = "legacyMigration.claimedAt"
+    /// One-time-per-user marker for the local (network-free) stale-Plaid-date repair sweep — see
+    /// `repairLocalPlaidDatesIfNeeded`. A `Set<String>` of UUID strings, not a single value like
+    /// the legacy-claim marker above: unlike the legacy claim (which by design only ever admits
+    /// ONE user on a device), every authenticated user who resolves on this device needs their
+    /// OWN Plaid transactions swept exactly once, so each user's UUID is recorded independently.
+    private static let localPlaidDateRepairCompletedUserIDsKey = "localPlaidDateRepair.completedUserIDs"
 
     init(
         defaults: UserDefaults = .standard,
@@ -72,6 +78,7 @@ final class UserDataStoreManager {
 
             try claimLegacyDataIfUnclaimed(userId: userId, destinationContext: context)
             try OwnerUserIDBackfill.run(in: context, ownerUserID: userId)
+            try repairLocalPlaidDatesIfNeeded(userId: userId, context: context)
 
             let plaid = PlaidConnectionManager(defaults: defaults, userId: userId)
 
@@ -125,6 +132,7 @@ final class UserDataStoreManager {
             IncomeSource.self,
             RecurringExpense.self,
             MonthlyPlanSettings.self,
+            PendingCloudDeletion.self,
         ])
     }
 
@@ -165,5 +173,31 @@ final class UserDataStoreManager {
 
         defaults.set(userId.uuidString, forKey: Self.legacyClaimedByUserIDKey)
         defaults.set(Date.now, forKey: Self.legacyClaimedAtKey)
+    }
+
+    // MARK: - Local Plaid stale-date repair
+
+    /// Runs `PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally` for `userId` at
+    /// most once, purely from this device's own local marker — no network request, no dependency
+    /// on the user ever triggering an actual transaction sync (Settings ▸ Connected Accounts ▸
+    /// Manual Refresh). Without this, a user whose Plaid transactions were persisted before the
+    /// local-midnight parser fix shipped, and who only ever uses the Dashboard's balance-only
+    /// per-account Refresh (which never calls `PlaidTransactionImportService.applySync`), would
+    /// keep seeing those transactions grouped one calendar day early indefinitely.
+    ///
+    /// The repair itself (`repairStaleUTCMidnightDate`) is already idempotent and safe to re-run
+    /// unconditionally — this marker is purely an optimization so `resolve(for:)` doesn't re-fetch
+    /// and re-scan every persisted Plaid transaction on every single app launch once a user's
+    /// store has already been swept once. A thrown error here leaves the marker unset, so a
+    /// failed attempt is retried on the next resolve rather than silently treated as done, mirroring
+    /// `claimLegacyDataIfUnclaimed`'s own success-gated marker write.
+    private func repairLocalPlaidDatesIfNeeded(userId: UUID, context: ModelContext) throws {
+        var completedUserIDs = Set(defaults.stringArray(forKey: Self.localPlaidDateRepairCompletedUserIDsKey) ?? [])
+        guard !completedUserIDs.contains(userId.uuidString) else { return }
+
+        try PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally(in: context)
+
+        completedUserIDs.insert(userId.uuidString)
+        defaults.set(Array(completedUserIDs), forKey: Self.localPlaidDateRepairCompletedUserIDsKey)
     }
 }

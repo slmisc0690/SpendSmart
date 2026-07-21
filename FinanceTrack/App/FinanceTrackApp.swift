@@ -6,6 +6,20 @@ struct FinanceTrackApp: App {
     @State private var privacyMode = PrivacyModeManager()
     @State private var biometricAuth = BiometricAuthManager()
     @State private var autoBackupManager = AutoBackupManager()
+    /// Phase 5 — Manual Account/Transaction cloud sync foundation. See its own doc comment for why
+    /// it mirrors `AutoBackupManager`'s observe-`ModelContext.didSave` shape rather than
+    /// instrumenting every add/edit/delete call site.
+    @State private var manualDataCloudSyncManager = ManualDataCloudSyncManager()
+    /// Phase 6 — Monthly Plan cloud sync foundation. A separate manager from
+    /// `manualDataCloudSyncManager` — see its own doc comment for why.
+    @State private var monthlyPlanCloudSyncManager = MonthlyPlanCloudSyncManager()
+    /// Phase 7 — Account Related Options / Primary sharing controls. Drives both the sheet's own
+    /// data and the Primary-only visibility gate for its Settings row — see its own doc comment
+    /// for why role resolution must come only from the server, never local state.
+    @State private var accountRelatedOptionsViewModel = AccountRelatedOptionsViewModel()
+    /// Phase 8 — captures a `spendsmart://household-invitation` deep link, surviving a
+    /// sign-out/sign-in round trip if the user wasn't already authenticated when they opened it.
+    @State private var pendingInvitationRouter = PendingInvitationRouter()
     /// Owns the per-authenticated-user isolated SwiftData store and namespaced
     /// `PlaidConnectionManager` — replaces the old single app-wide `sharedModelContainer`/
     /// `plaidConnection` instances (see Phase 3 local user-data isolation). Never exposes a
@@ -33,6 +47,27 @@ struct FinanceTrackApp: App {
         print("[SpendSmartBuild] currency-accessory-removed-v1")
         print("[SpendSmartBuild] per-user-local-isolation-v1")
         #endif
+    }
+
+    /// Only ever non-nil once the user is fully signed in and email-verified — a link opened
+    /// while signed out (or mid-verification) stays captured in `pendingInvitationRouter` but the
+    /// cover does not appear until the normal sign-in flow completes on its own, at which point
+    /// this binding starts surfacing it (Phase 8's own "logged-out invitation context survives
+    /// sign-in" / "after successful sign-in, continue to invitation validation" requirements).
+    /// Setting this to `nil` (the cover's own dismiss gesture) clears the router the same way
+    /// `InvitationAcceptanceView`'s own `onFinished` does.
+    private var pendingInvitationBinding: Binding<PendingHouseholdInvitation?> {
+        Binding(
+            get: {
+                guard authService.sessionState == .signedIn, authService.isEmailVerified else { return nil }
+                return pendingInvitationRouter.invitation
+            },
+            set: { newValue in
+                if newValue == nil {
+                    pendingInvitationRouter.clear()
+                }
+            }
+        )
     }
 
     var body: some Scene {
@@ -74,6 +109,9 @@ struct FinanceTrackApp: App {
                             .environment(biometricAuth)
                             .environment(plaidConnection)
                             .environment(autoBackupManager)
+                            .environment(manualDataCloudSyncManager)
+                            .environment(monthlyPlanCloudSyncManager)
+                            .environment(accountRelatedOptionsViewModel)
                     } else if let userId = authService.currentUserId, let error = userDataStore.lastResolutionError {
                         // resolve(for:) failed for the currently-authenticated user — surfaced
                         // here so this can never regress into a permanent blank/loading screen
@@ -117,6 +155,10 @@ struct FinanceTrackApp: App {
                         // else ever stops it, so leaving this out lets a debounced backup fire
                         // against a context whose owning container is being released below.
                         autoBackupManager.stopObserving()
+                        // Same reasoning as AutoBackupManager immediately above — must stop before
+                        // userDataStore.detach() below releases the outgoing user's container.
+                        manualDataCloudSyncManager.stopObserving()
+                        monthlyPlanCloudSyncManager.stopObserving()
                         // Detach only — never deletes this user's on-disk store or UserDefaults
                         // namespace, so signing back in (as this user or anyone else) finds
                         // everything exactly as it was left.
@@ -129,13 +171,25 @@ struct FinanceTrackApp: App {
                         // rather than by incidental timing.
                         biometricAuth.isFaceIDRequired = false
                         biometricAuth.isUnlocked = false
+                        // Phase 7 — clears cached role state (see its own reset() doc comment).
+                        accountRelatedOptionsViewModel.reset()
+                        // Phase 8 — clears any pending invitation so it can never resurface for a
+                        // different user who signs in next.
+                        pendingInvitationRouter.clear()
                     }
                 }
                 .onOpenURL { url in
                     // Single dispatch point for every URL this app can be opened with. Checked
-                    // FIRST and exclusively: a Plaid OAuth return must never be handed to
-                    // AuthenticationService.handle(url:), which unconditionally attempts to
-                    // establish a Supabase session from whatever URL it receives.
+                    // FIRST of all: a household-invitation link must never reach
+                    // AuthenticationService.handle(url:) (which unconditionally attempts to
+                    // establish a Supabase session from whatever URL it receives) — both share the
+                    // `spendsmart://` scheme, distinguished only by host.
+                    if pendingInvitationRouter.handle(url: url) {
+                        return
+                    }
+
+                    // A Plaid OAuth return must never be handed to AuthenticationService.handle(url:)
+                    // either, for the same reason.
                     if PlaidOAuthReturn.matches(url) {
                         // Never log the full URL — Plaid's OAuth return can carry state/query
                         // parameters. Only confirms recognition, matching this project's existing
@@ -153,6 +207,12 @@ struct FinanceTrackApp: App {
                     // whether the app was already running (foreground or background) or launched
                     // fresh by tapping the link — `.onOpenURL` covers both.
                     Task { await authService.handle(url: url) }
+                }
+                .fullScreenCover(item: pendingInvitationBinding) { invitation in
+                    InvitationAcceptanceView(token: invitation.token) {
+                        pendingInvitationRouter.clear()
+                    }
+                    .environment(accountRelatedOptionsViewModel)
                 }
 
                 // Only over the actual main app — not the recovery, verify-email, or auth
@@ -242,6 +302,9 @@ private struct RootView: View {
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(AutoBackupManager.self) private var autoBackupManager
+    @Environment(ManualDataCloudSyncManager.self) private var manualDataCloudSyncManager
+    @Environment(MonthlyPlanCloudSyncManager.self) private var monthlyPlanCloudSyncManager
+    @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
     @Environment(AuthenticationService.self) private var authService
 
     var body: some View {
@@ -267,6 +330,17 @@ private struct RootView: View {
             bootstrapDefaultCategoriesIfNeeded()
             bootstrapDefaultMonthlyPlanSettingsIfNeeded()
             autoBackupManager.startObserving(context: modelContext)
+            // RootView only ever renders once userDataStore.resolvedUserId == authService
+            // .currentUserId (see this file's own gating above) — currentUserId is guaranteed
+            // non-nil here in practice; the `if let` is a graceful skip, not a workaround for an
+            // expected nil.
+            if let userId = authService.currentUserId {
+                manualDataCloudSyncManager.startObserving(context: modelContext, userId: userId)
+                monthlyPlanCloudSyncManager.startObserving(context: modelContext, userId: userId)
+            }
+            // Fire-and-forget — resolves the Settings row's Primary-only visibility gate without
+            // blocking the rest of this task's own bootstrap work above.
+            Task { await accountRelatedOptionsViewModel.refresh() }
             await enablePendingFaceIDOptInIfNeeded(for: freshlyCreatedSettings)
         }
     }

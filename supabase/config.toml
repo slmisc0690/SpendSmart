@@ -463,3 +463,58 @@ verify_jwt = false
 
 [functions.delete-account]
 verify_jwt = false
+
+# PHASE 4 — authored as backend foundation only; not deployed, not called by any iOS code yet (see
+# get-connected-account-transactions/index.ts's own header for scope).
+[functions.get-connected-account-transactions]
+verify_jwt = false
+
+# PHASE 5 — authored as backend foundation only; not deployed (see sync-manual-data/index.ts's own
+# header for scope).
+[functions.sync-manual-data]
+verify_jwt = false
+
+# PHASE 5 — authored as backend foundation only; not deployed, not called by any iOS UI yet (see
+# get-manual-account-data/index.ts's own header for scope).
+[functions.get-manual-account-data]
+verify_jwt = false
+
+# PHASE 6 — authored as backend foundation only; not deployed (see sync-monthly-plan-data/
+# index.ts's own header for scope).
+[functions.sync-monthly-plan-data]
+verify_jwt = false
+
+# PHASE 6 — authored as backend foundation only; not deployed, not called by any iOS UI yet (see
+# get-monthly-plan-data/index.ts's own header for scope).
+[functions.get-monthly-plan-data]
+verify_jwt = false
+
+# PHASE 7 — authored as backend foundation only; not deployed (see initialize-household/index.ts's
+# own header for scope).
+[functions.initialize-household]
+verify_jwt = false
+
+# PHASE 7 — authored as backend foundation only; not deployed (see
+# get-account-related-options/index.ts's own header for scope).
+[functions.get-account-related-options]
+verify_jwt = false
+
+# PHASE 7 — authored as backend foundation only; not deployed (see
+# manage-household-invitation/index.ts's own header for scope).
+[functions.manage-household-invitation]
+verify_jwt = false
+
+# PHASE 7 — authored as backend foundation only; not deployed (see
+# update-sharing-permission/index.ts's own header for scope).
+[functions.update-sharing-permission]
+verify_jwt = false
+
+# PHASE 8 — authored as backend foundation only; not deployed (see
+# accept-household-invitation/index.ts's own header for scope).
+[functions.accept-household-invitation]
+verify_jwt = false
+
+# PHASE 8 — authored as backend foundation only; not deployed (see
+# get-household-invitation-preview/index.ts's own header for scope).
+[functions.get-household-invitation-preview]
+verify_jwt = false

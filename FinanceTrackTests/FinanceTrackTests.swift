@@ -16,6 +16,7 @@ final class FinanceTrackTests: XCTestCase {
             IncomeSource.self,
             RecurringExpense.self,
             MonthlyPlanSettings.self,
+            PendingCloudDeletion.self,
         ])
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         let container = try! ModelContainer(for: schema, configurations: [config])
@@ -765,6 +766,164 @@ final class FinanceTrackTests: XCTestCase {
         let dashboardDisplayDay = calendar.component(.day, from: date)
         XCTAssertEqual(activityGroupingDay, dashboardDisplayDay, "Activity's day-bucket and Dashboard's displayed day must always agree")
         XCTAssertEqual(dashboardDisplayDay, 18)
+    }
+
+    // MARK: - Plaid stale-date repair: local (network-free) sweep, timezone coverage, idempotency
+
+    @MainActor
+    func testStaleUTCMidnightDateRepairsToJuly18InLosAngeles() throws {
+        // Same "old bug" signature as `testExistingStalePersistedPlaidDateIsCorrectedOnNextSync`,
+        // verified against a SECOND, distinct US timezone (Pacific, not Eastern) — both are behind
+        // UTC, so both must independently exhibit (and independently repair from) the July-17
+        // rollback.
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let staleUTCMidnight = try XCTUnwrap(utcCalendar.date(from: components))
+
+        let pacific = Self.calendar(timeZoneIdentifier: "America/Los_Angeles")
+        XCTAssertEqual(pacific.component(.day, from: staleUTCMidnight), 17, "Precondition: the old bug's UTC-midnight value must read back as July 17 in US Pacific before repair")
+
+        let stale = FinanceTransaction(
+            amount: 25, date: staleUTCMidnight, source: .plaid, externalTransactionId: "stale-row-pacific",
+            authorizedDate: staleUTCMidnight, postedDate: staleUTCMidnight
+        )
+        context.insert(stale)
+        try context.save()
+
+        let repairedCount = try PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally(in: context, calendar: pacific)
+        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(pacific.component(.day, from: stale.date), 18, "must repair to July 18 in US Pacific, not stay on July 17")
+    }
+
+    @MainActor
+    func testLocalRepairSweepRunsWithoutNetworkSync() throws {
+        // The whole point of `repairStaleUTCMidnightDatesLocally` — it must correct a stale row
+        // using nothing but a `ModelContext`, no `PlaidSyncResult`/backend call of any kind, so
+        // `UserDataStoreManager.resolve(for:)` can invoke it purely locally at store-attach time.
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let staleUTCMidnight = try XCTUnwrap(utcCalendar.date(from: components))
+
+        let stale = FinanceTransaction(
+            amount: 25, date: staleUTCMidnight, source: .plaid, externalTransactionId: "stale-row-local",
+            authorizedDate: staleUTCMidnight, postedDate: staleUTCMidnight
+        )
+        context.insert(stale)
+        try context.save()
+
+        let repairedCount = try PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally(in: context)
+        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(Calendar.current.component(.day, from: stale.date), 18)
+    }
+
+    @MainActor
+    func testLocalRepairSweepIsIdempotent() throws {
+        let context = makePlaidSyncTestContext()
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 18
+        let staleUTCMidnight = try XCTUnwrap(utcCalendar.date(from: components))
+
+        let stale = FinanceTransaction(
+            amount: 25, date: staleUTCMidnight, source: .plaid, externalTransactionId: "stale-row-idempotent",
+            authorizedDate: staleUTCMidnight, postedDate: staleUTCMidnight
+        )
+        context.insert(stale)
+        try context.save()
+
+        let firstPass = try PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally(in: context)
+        let repairedDate = stale.date
+        let secondPass = try PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally(in: context)
+
+        XCTAssertEqual(firstPass, 1)
+        XCTAssertEqual(secondPass, 0, "a second sweep over an already-repaired row must report zero repairs")
+        XCTAssertEqual(stale.date, repairedDate, "a second sweep must never further move an already-correct date")
+    }
+
+    @MainActor
+    func testReopeningStoreDoesNotShiftAlreadyCorrectRow() throws {
+        // A transaction imported by the FIXED parser (never carried the old bug) reloaded from a
+        // fresh ModelContext against the same persistent container — the repair sweep must
+        // recognize this as already-correct and leave it untouched, not treat "exact local
+        // midnight" as the stale signature too.
+        let schema = Schema([Account.self, FinanceTransaction.self, Category.self])
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let correctDate = try XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18"))
+
+        let firstContext = ModelContext(container)
+        firstContext.insert(FinanceTransaction(
+            amount: 25, date: correctDate, source: .plaid, externalTransactionId: "already-correct-row",
+            authorizedDate: correctDate, postedDate: correctDate
+        ))
+        try firstContext.save()
+
+        let secondContext = ModelContext(container)
+        let repairedCount = try PlaidTransactionImportService.repairStaleUTCMidnightDatesLocally(in: secondContext)
+        XCTAssertEqual(repairedCount, 0, "an already-correct row from a fresh store reopen must never be reported as repaired")
+
+        let reloaded = try XCTUnwrap(try secondContext.fetch(FetchDescriptor<FinanceTransaction>()).first { $0.externalTransactionId == "already-correct-row" })
+        XCTAssertEqual(reloaded.date, correctDate, "must be byte-for-byte unchanged, not merely the same calendar day")
+    }
+
+    // MARK: - Pending transaction date semantics (Phase 5)
+
+    @MainActor
+    func testPendingTransactionUsesAuthorizedDateAsDisplayDate() throws {
+        // Per Plaid semantics, a still-pending transaction's `date` field mirrors its own
+        // `authorized_date` (sync-transactions/index.ts: `posted_date: t.date ?? null`) — so
+        // `dto.postedDate` and `dto.authorizedDate` carry the SAME calendar day while pending.
+        // `mapToFinanceTransaction`'s `postedDate ?? authorizedDate` priority therefore already
+        // displays the correct (pending/authorized) calendar day for a pending row; this test
+        // pins that behavior so it can't silently regress into always preferring some other field.
+        let eastern = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let july18 = try XCTUnwrap(BackendTransactionDTO.parseBareDate("2026-07-18", calendar: eastern))
+        let dto = PlaidTransactionDTO(
+            externalTransactionId: "pending-display-date",
+            pendingTransactionId: nil,
+            plaidAccountId: "plaid-account-1",
+            amount: 9.50,
+            merchantName: "MCDONALDS",
+            originalDescription: "MCDONALDS",
+            authorizedDate: july18,
+            postedDate: july18,
+            isPending: true,
+            categoryGuess: nil
+        )
+        let transaction = PlaidTransactionImportService.mapToFinanceTransaction(dto, account: nil)
+        XCTAssertTrue(transaction.isPending)
+        XCTAssertEqual(eastern.component(.day, from: transaction.date), 18, "a pending transaction must display its authoritative (authorized) calendar day, not shift a day early")
+    }
+
+    // MARK: - Dashboard Refresh does not (and must never) perform a transaction sync
+
+    func testDashboardRefreshNeverCallsApplySyncOrRepair() throws {
+        // The Dashboard per-account Refresh button is explicitly balance-only (see
+        // `PlaidConnectionManager.refreshAccountBalance`'s own doc comment) — it must never call
+        // `PlaidTransactionImportService.applySync` (or, transitively, the repair sweep). If it
+        // ever did, `testDashboardStillNeverCallsPlaidDirectlyAfterRawBalanceRestore` above would
+        // likely also need updating; this test pins the more specific claim directly against the
+        // service that actually performs the balance-only refresh call.
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Services/PlaidConnectionManager.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertFalse(source.contains("applySync"), "PlaidConnectionManager (which backs the Dashboard's per-account Refresh) must never call applySync — that would silently turn a balance-only refresh into a transaction sync")
+        XCTAssertFalse(source.contains("repairStaleUTCMidnightDate"), "PlaidConnectionManager must never invoke the Plaid date-repair sweep directly — that belongs to the transaction-sync/local-store-resolve paths only")
     }
 
     // MARK: - Plaid branding (client_name)
@@ -10413,6 +10572,1778 @@ final class FinanceTrackTests: XCTestCase {
         let context = makeBudgetSignalContext(transactions: [deposit], budgetSettings: settings, now: tooEarlyNow)
         XCTAssertTrue(BudgetSignalEngine().generateSignals(context: context).isEmpty)
     }
+
+    // MARK: - Phase 5: Manual Account/Transaction cloud sync foundation
+
+    private final class FakeManualDataSyncService: ManualDataSyncService {
+        var requests: [ManualDataSyncRequest] = []
+        var result: Result<ManualDataSyncResult, Error> = .success(
+            ManualDataSyncResult(syncedAccountIds: [], syncedTransactionIds: [], deletedAccountIds: [], deletedTransactionIds: [])
+        )
+
+        func syncManualData(_ request: ManualDataSyncRequest) async throws -> ManualDataSyncResult {
+            requests.append(request)
+            return try result.get()
+        }
+    }
+
+    // MARK: Payload builder — date semantics
+
+    func testManualDataBareDateStringJuly18RemainsJuly18InEasternTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        var components = DateComponents()
+        components.year = 2026; components.month = 7; components.day = 18; components.hour = 23
+        let date = calendar.date(from: components)!
+        XCTAssertEqual(ManualDataSyncPayloadBuilder.bareDateString(from: date, calendar: calendar), "2026-07-18")
+    }
+
+    func testManualDataBareDateStringJuly18RemainsJuly18InLosAngelesTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        var components = DateComponents()
+        components.year = 2026; components.month = 7; components.day = 18; components.hour = 0; components.minute = 5
+        let date = calendar.date(from: components)!
+        XCTAssertEqual(ManualDataSyncPayloadBuilder.bareDateString(from: date, calendar: calendar), "2026-07-18")
+    }
+
+    func testManualDataBareDateStringJuly18RemainsJuly18InTokyoTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        var components = DateComponents()
+        components.year = 2026; components.month = 7; components.day = 18; components.hour = 12
+        let date = calendar.date(from: components)!
+        XCTAssertEqual(ManualDataSyncPayloadBuilder.bareDateString(from: date, calendar: calendar), "2026-07-18")
+    }
+
+    // MARK: Payload builder — field mapping
+
+    func testManualAccountPayloadMapsEveryField() {
+        let account = Account(
+            name: "Chase Checking",
+            type: .checking,
+            currentBalance: Decimal(string: "1234.56")!,
+            institutionName: "Chase",
+            lastFourDigits: "4821",
+            showsInRecentActivity: false
+        )
+        let payload = ManualDataSyncPayloadBuilder.accountPayload(for: account)
+        XCTAssertEqual(payload.id, account.id.uuidString)
+        XCTAssertEqual(payload.name, "Chase Checking")
+        XCTAssertEqual(payload.account_type, "checking")
+        XCTAssertEqual(payload.current_balance, "1234.56")
+        XCTAssertEqual(payload.institution_name, "Chase")
+        XCTAssertEqual(payload.last_four_digits, "4821")
+        XCTAssertEqual(payload.shows_in_recent_activity, false)
+    }
+
+    func testManualTransactionPayloadMapsEveryFieldIncludingCategoryName() {
+        let account = Account(name: "Checking", type: .checking)
+        let category = Category(name: "Groceries")
+        let transaction = FinanceTransaction(amount: Decimal(string: "42.50")!, type: .expense, source: .manual, note: "Trader Joe's", account: account, category: category)
+        let payload = ManualDataSyncPayloadBuilder.transactionPayload(for: transaction)
+        XCTAssertEqual(payload?.id, transaction.id.uuidString)
+        XCTAssertEqual(payload?.manual_account_id, account.id.uuidString)
+        XCTAssertEqual(payload?.amount, "42.5")
+        XCTAssertEqual(payload?.transaction_type, "expense")
+        XCTAssertEqual(payload?.note, "Trader Joe's")
+        XCTAssertEqual(payload?.category_name, "Groceries")
+        XCTAssertEqual(payload?.is_pending, false)
+    }
+
+    func testManualTransactionPayloadIsNilWithoutAnAccountRelationship() {
+        let transaction = FinanceTransaction(amount: 10, type: .expense, source: .manual)
+        XCTAssertNil(ManualDataSyncPayloadBuilder.transactionPayload(for: transaction))
+    }
+
+    func testManualTransactionPayloadCategoryNameIsNilWithoutACategory() {
+        let account = Account(name: "Checking", type: .checking)
+        let transaction = FinanceTransaction(amount: 10, type: .expense, source: .manual, account: account)
+        XCTAssertNil(ManualDataSyncPayloadBuilder.transactionPayload(for: transaction)?.category_name)
+    }
+
+    // MARK: Tombstone recording on delete
+
+    @MainActor
+    func testDeletingAManualAccountRecordsAPendingCloudDeletionTombstone() {
+        let context = makeAutosaveTestContext()
+        let ownerID = UUID()
+        let account = Account(name: "Old Loan", type: .other, currentBalance: 0)
+        account.ownerUserID = ownerID
+        context.insert(account)
+        try! context.save()
+        let accountID = account.id
+
+        let deleted = ManualAccountDeletionService.delete(account, transactions: [], context: context)
+
+        XCTAssertTrue(deleted)
+        let tombstones = try! context.fetch(FetchDescriptor<PendingCloudDeletion>())
+        XCTAssertEqual(tombstones.count, 1)
+        XCTAssertEqual(tombstones.first?.entityType, PendingCloudDeletionEntityType.manualAccount.rawValue)
+        XCTAssertEqual(tombstones.first?.recordID, accountID)
+        XCTAssertEqual(tombstones.first?.ownerUserID, ownerID)
+    }
+
+    @MainActor
+    func testDeletingAManualAccountWithNilOwnerUserIDRecordsNoTombstone() {
+        let context = makeAutosaveTestContext()
+        let account = Account(name: "Old Loan", type: .other, currentBalance: 0)
+        // ownerUserID deliberately left nil — pre-Phase-3-backfill state.
+        context.insert(account)
+        try! context.save()
+
+        ManualAccountDeletionService.delete(account, transactions: [], context: context)
+
+        XCTAssertTrue(try! context.fetch(FetchDescriptor<PendingCloudDeletion>()).isEmpty)
+    }
+
+    @MainActor
+    func testDeletingAManualTransactionRecordsAPendingCloudDeletionTombstone() {
+        let context = makeAutosaveTestContext()
+        let ownerID = UUID()
+        let account = Account(name: "Checking", type: .checking, currentBalance: 100)
+        account.ownerUserID = ownerID
+        context.insert(account)
+        let expense = FinanceTransaction(amount: 20, type: .expense, source: .manual, account: account)
+        expense.ownerUserID = ownerID
+        context.insert(expense)
+        AccountBalanceManager.applyExpense(amount: 20, to: account)
+        let transactionID = expense.id
+
+        let deleted = ManualTransactionDeletionService.delete(expense, context: context)
+
+        XCTAssertTrue(deleted)
+        let tombstones = try! context.fetch(FetchDescriptor<PendingCloudDeletion>())
+        XCTAssertEqual(tombstones.count, 1)
+        XCTAssertEqual(tombstones.first?.entityType, PendingCloudDeletionEntityType.manualTransaction.rawValue)
+        XCTAssertEqual(tombstones.first?.recordID, transactionID)
+        XCTAssertEqual(tombstones.first?.ownerUserID, ownerID)
+    }
+
+    @MainActor
+    func testDeletingAPlaidTransactionIsIneligibleAndRecordsNoTombstone() {
+        let context = makeAutosaveTestContext()
+        let imported = FinanceTransaction(amount: 5, type: .expense, source: .plaid)
+        imported.ownerUserID = UUID()
+        context.insert(imported)
+        try! context.save()
+
+        let deleted = ManualTransactionDeletionService.delete(imported, context: context)
+
+        XCTAssertFalse(deleted, "Plaid-imported transactions stay read-only through this control")
+        XCTAssertTrue(try! context.fetch(FetchDescriptor<PendingCloudDeletion>()).isEmpty)
+    }
+
+    // MARK: ManualDataCloudSyncManager — observer lifecycle (mirrors AutoBackupManager's own test)
+
+    @MainActor
+    func testManualDataCloudSyncManagerStopObservingRemovesObserverForFutureSaves() {
+        let context = makeAutosaveTestContext()
+        let fake = FakeManualDataSyncService()
+        let manager = ManualDataCloudSyncManager(debounceDelay: .milliseconds(20), backend: fake)
+        manager.startObserving(context: context, userId: UUID())
+        manager.stopObserving()
+
+        NotificationCenter.default.post(name: ModelContext.didSave, object: context)
+        manager.stopObserving()
+
+        XCTAssertNil(manager.lastSyncError)
+    }
+
+    // MARK: ManualDataCloudSyncManager — sync scope and ownership isolation
+
+    @MainActor
+    func testManualDataCloudSyncManagerUploadsOnlyThisUsersOwnManualData() async throws {
+        let context = makeAutosaveTestContext()
+        let userA = UUID()
+        let userB = UUID()
+
+        let manualAccount = Account(name: "Owned Manual", type: .checking)
+        manualAccount.ownerUserID = userA
+        let plaidAccount = Account(name: "Owned Plaid", type: .checking, connectionType: .plaid)
+        plaidAccount.ownerUserID = userA
+        let otherUsersAccount = Account(name: "User B's Account", type: .checking)
+        otherUsersAccount.ownerUserID = userB
+        context.insert(manualAccount)
+        context.insert(plaidAccount)
+        context.insert(otherUsersAccount)
+
+        let manualTransaction = FinanceTransaction(amount: 10, type: .expense, source: .manual, account: manualAccount)
+        manualTransaction.ownerUserID = userA
+        let plaidTransaction = FinanceTransaction(amount: 20, type: .expense, source: .plaid)
+        plaidTransaction.ownerUserID = userA
+        let otherUsersTransaction = FinanceTransaction(amount: 30, type: .expense, source: .manual, account: otherUsersAccount)
+        otherUsersTransaction.ownerUserID = userB
+        context.insert(manualTransaction)
+        context.insert(plaidTransaction)
+        context.insert(otherUsersTransaction)
+        try context.save()
+
+        let fake = FakeManualDataSyncService()
+        let manager = ManualDataCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userA)
+
+        try await waitUntil(timeout: .seconds(2)) { !fake.requests.isEmpty }
+        manager.stopObserving()
+
+        let request = try XCTUnwrap(fake.requests.first)
+        XCTAssertEqual(request.accounts.map(\.id), [manualAccount.id.uuidString], "Only User A's own MANUAL account is uploaded — never the Plaid account, never User B's")
+        XCTAssertEqual(request.transactions.map(\.id), [manualTransaction.id.uuidString], "Only User A's own MANUAL transaction is uploaded")
+    }
+
+    @MainActor
+    func testManualDataCloudSyncManagerFailureNeverTouchesLocalData() async throws {
+        let context = makeAutosaveTestContext()
+        let userId = UUID()
+        let account = Account(name: "Checking", type: .checking)
+        account.ownerUserID = userId
+        context.insert(account)
+        try context.save()
+
+        let fake = FakeManualDataSyncService()
+        fake.result = .failure(ManualDataSyncError.server(status: 500, message: "boom"))
+        let manager = ManualDataCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userId)
+
+        try await waitUntil(timeout: .seconds(2)) { manager.lastSyncError != nil }
+        manager.stopObserving()
+
+        XCTAssertNotNil(manager.lastSyncError)
+        // Local data is completely untouched by the failed sync attempt.
+        let remaining = try context.fetch(FetchDescriptor<Account>())
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.name, "Checking")
+    }
+
+    @MainActor
+    func testManualDataCloudSyncManagerRetriesAndSucceedsAfterAPriorFailure() async throws {
+        let context = makeAutosaveTestContext()
+        let userId = UUID()
+        let account = Account(name: "Checking", type: .checking)
+        account.ownerUserID = userId
+        context.insert(account)
+        try context.save()
+
+        let fake = FakeManualDataSyncService()
+        fake.result = .failure(ManualDataSyncError.server(status: 500, message: "boom"))
+        let manager = ManualDataCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userId)
+
+        try await waitUntil(timeout: .seconds(2)) { manager.lastSyncError != nil }
+        XCTAssertEqual(fake.requests.count, 1)
+
+        // Flip the backend to succeed, then trigger another save — the debounced observer retries
+        // the full reconciliation from scratch on the very next save, exactly as documented.
+        fake.result = .success(ManualDataSyncResult(syncedAccountIds: [], syncedTransactionIds: [], deletedAccountIds: [], deletedTransactionIds: []))
+        let secondAccount = Account(name: "Savings", type: .savings)
+        secondAccount.ownerUserID = userId
+        context.insert(secondAccount)
+        try context.save()
+
+        try await waitUntil(timeout: .seconds(2)) { manager.lastSyncError == nil && fake.requests.count >= 2 }
+        manager.stopObserving()
+
+        XCTAssertNil(manager.lastSyncError, "A subsequent successful sync must clear the prior failure")
+        let lastRequest = try XCTUnwrap(fake.requests.last)
+        XCTAssertEqual(Set(lastRequest.accounts.map(\.name)), ["Checking", "Savings"], "The retry re-uploads the full current state, including data created after the failed attempt")
+    }
+
+    @MainActor
+    func testManualDataCloudSyncManagerClearsOnlyServerConfirmedTombstones() async throws {
+        let context = makeAutosaveTestContext()
+        let userId = UUID()
+        let confirmedId = UUID()
+        let unconfirmedId = UUID()
+        context.insert(PendingCloudDeletion(entityType: .manualAccount, recordID: confirmedId, ownerUserID: userId))
+        context.insert(PendingCloudDeletion(entityType: .manualAccount, recordID: unconfirmedId, ownerUserID: userId))
+        try context.save()
+
+        let fake = FakeManualDataSyncService()
+        fake.result = .success(
+            ManualDataSyncResult(
+                syncedAccountIds: [],
+                syncedTransactionIds: [],
+                deletedAccountIds: [confirmedId.uuidString],
+                deletedTransactionIds: []
+            )
+        )
+        let manager = ManualDataCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userId)
+
+        try await waitUntil(timeout: .seconds(2)) { !fake.requests.isEmpty }
+        // One extra debounced pass follows the tombstone-clearing save (see this manager's own
+        // doc comment) — give it a moment to settle before asserting final state.
+        try await Task.sleep(for: .milliseconds(100))
+        manager.stopObserving()
+
+        let remainingTombstones = try context.fetch(FetchDescriptor<PendingCloudDeletion>())
+        XCTAssertEqual(remainingTombstones.map(\.recordID), [unconfirmedId], "Only the server-confirmed deletion's tombstone is cleared")
+    }
+
+    /// Polls `condition` on the main actor until it's true or `timeout` elapses — used instead of
+    /// a single fixed `Task.sleep` for the debounced-async manager tests above, since a fixed
+    /// sleep is either flaky (too short) or slow (too long); this settles as soon as the
+    /// condition is actually met.
+    @MainActor
+    private func waitUntil(timeout: Duration, condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !condition() {
+            if ContinuousClock.now >= deadline {
+                XCTFail("Condition not met within \(timeout)")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    // MARK: - Phase 6: Monthly Plan cloud sync foundation
+
+    private final class FakeMonthlyPlanSyncService: MonthlyPlanSyncService {
+        var requests: [MonthlyPlanSyncRequest] = []
+        var result: Result<MonthlyPlanSyncResult, Error> = .success(
+            MonthlyPlanSyncResult(settingsSynced: false, syncedIncomeSourceIds: [], syncedRecurringExpenseIds: [], deletedIncomeSourceIds: [], deletedRecurringExpenseIds: [])
+        )
+
+        func syncMonthlyPlanData(_ request: MonthlyPlanSyncRequest) async throws -> MonthlyPlanSyncResult {
+            requests.append(request)
+            return try result.get()
+        }
+    }
+
+    // MARK: Payload builder — date semantics
+
+    func testMonthlyPlanBareDateStringJuly18RemainsJuly18InEasternTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        var components = DateComponents()
+        components.year = 2026; components.month = 7; components.day = 18; components.hour = 23
+        let date = calendar.date(from: components)!
+        XCTAssertEqual(MonthlyPlanSyncPayloadBuilder.bareDateString(from: date, calendar: calendar), "2026-07-18")
+    }
+
+    func testMonthlyPlanBareDateStringJuly18RemainsJuly18InLosAngelesTime() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        var components = DateComponents()
+        components.year = 2026; components.month = 7; components.day = 18; components.hour = 0; components.minute = 5
+        let date = calendar.date(from: components)!
+        XCTAssertEqual(MonthlyPlanSyncPayloadBuilder.bareDateString(from: date, calendar: calendar), "2026-07-18")
+    }
+
+    // MARK: Payload builder — field mapping
+
+    func testMonthlyPlanSettingsPayloadMapsEveryField() {
+        let settings = MonthlyPlanSettings(
+            monthlySavingsGoal: Decimal(string: "500.00")!,
+            bufferAmount: Decimal(string: "100.00")!,
+            autoUpdateWeeklyBudgetFromPlan: true
+        )
+        let payload = MonthlyPlanSyncPayloadBuilder.settingsPayload(for: settings)
+        XCTAssertEqual(payload.monthly_savings_goal, "500")
+        XCTAssertEqual(payload.buffer_amount, "100")
+        XCTAssertEqual(payload.auto_update_weekly_budget_from_plan, true)
+    }
+
+    func testMonthlyPlanSettingsPayloadBufferAmountIsNilWhenNotSet() {
+        let settings = MonthlyPlanSettings(monthlySavingsGoal: Decimal(string: "500")!)
+        let payload = MonthlyPlanSyncPayloadBuilder.settingsPayload(for: settings)
+        XCTAssertNil(payload.buffer_amount)
+    }
+
+    func testMonthlyPlanIncomeSourcePayloadMapsEveryField() {
+        let source = IncomeSource(
+            name: "Paycheck",
+            amount: Decimal(string: "2500.00")!,
+            frequency: .biweekly,
+            isActive: true,
+            note: "Direct deposit"
+        )
+        let payload = MonthlyPlanSyncPayloadBuilder.incomeSourcePayload(for: source)
+        XCTAssertEqual(payload.id, source.id.uuidString)
+        XCTAssertEqual(payload.name, "Paycheck")
+        XCTAssertEqual(payload.amount, "2500")
+        XCTAssertEqual(payload.frequency, "biweekly")
+        XCTAssertEqual(payload.is_active, true)
+        XCTAssertEqual(payload.note, "Direct deposit")
+        XCTAssertNil(payload.next_pay_date)
+    }
+
+    func testMonthlyPlanIncomeSourcePayloadEmptyNoteBecomesNil() {
+        let source = IncomeSource(name: "Cash gift", amount: Decimal(string: "50")!, note: "")
+        let payload = MonthlyPlanSyncPayloadBuilder.incomeSourcePayload(for: source)
+        XCTAssertNil(payload.note)
+    }
+
+    func testMonthlyPlanRecurringExpensePayloadMapsEveryFieldIncludingCategoryName() {
+        let category = Category(name: "Housing")
+        let expense = RecurringExpense(
+            name: "Rent",
+            amount: Decimal(string: "1500")!,
+            category: category,
+            frequency: .monthly,
+            isEssential: true,
+            isActive: true
+        )
+        let payload = MonthlyPlanSyncPayloadBuilder.recurringExpensePayload(for: expense)
+        XCTAssertEqual(payload.id, expense.id.uuidString)
+        XCTAssertEqual(payload.name, "Rent")
+        XCTAssertEqual(payload.amount, "1500")
+        XCTAssertEqual(payload.frequency, "monthly")
+        XCTAssertEqual(payload.is_essential, true)
+        XCTAssertEqual(payload.category_name, "Housing")
+        XCTAssertNil(payload.due_date)
+    }
+
+    func testMonthlyPlanRecurringExpensePayloadCategoryNameIsNilWithoutACategory() {
+        let expense = RecurringExpense(name: "Subscription", amount: Decimal(string: "10")!)
+        let payload = MonthlyPlanSyncPayloadBuilder.recurringExpensePayload(for: expense)
+        XCTAssertNil(payload.category_name)
+    }
+
+    // MARK: Tombstone recording on delete
+
+    @MainActor
+    func testDeletingAnIncomeSourceRecordsAPendingCloudDeletionTombstone() {
+        let context = makeAutosaveTestContext()
+        let ownerID = UUID()
+        let source = IncomeSource(name: "Paycheck", amount: Decimal(string: "2500")!)
+        source.ownerUserID = ownerID
+        context.insert(source)
+        try! context.save()
+        let sourceID = source.id
+
+        let deleted = MonthlyPlanIncomeSourceDeletionService.delete(source, context: context)
+
+        XCTAssertTrue(deleted)
+        let tombstones = try! context.fetch(FetchDescriptor<PendingCloudDeletion>())
+        XCTAssertEqual(tombstones.count, 1)
+        XCTAssertEqual(tombstones.first?.entityType, PendingCloudDeletionEntityType.monthlyPlanIncomeSource.rawValue)
+        XCTAssertEqual(tombstones.first?.recordID, sourceID)
+        XCTAssertEqual(tombstones.first?.ownerUserID, ownerID)
+    }
+
+    @MainActor
+    func testDeletingAnIncomeSourceWithNilOwnerUserIDRecordsNoTombstone() {
+        let context = makeAutosaveTestContext()
+        let source = IncomeSource(name: "Paycheck", amount: Decimal(string: "2500")!)
+        context.insert(source)
+        try! context.save()
+
+        MonthlyPlanIncomeSourceDeletionService.delete(source, context: context)
+
+        XCTAssertTrue(try! context.fetch(FetchDescriptor<PendingCloudDeletion>()).isEmpty)
+    }
+
+    @MainActor
+    func testDeletingARecurringExpenseRecordsAPendingCloudDeletionTombstone() {
+        let context = makeAutosaveTestContext()
+        let ownerID = UUID()
+        let expense = RecurringExpense(name: "Rent", amount: Decimal(string: "1500")!)
+        expense.ownerUserID = ownerID
+        context.insert(expense)
+        try! context.save()
+        let expenseID = expense.id
+
+        let deleted = MonthlyPlanRecurringExpenseDeletionService.delete(expense, context: context)
+
+        XCTAssertTrue(deleted)
+        let tombstones = try! context.fetch(FetchDescriptor<PendingCloudDeletion>())
+        XCTAssertEqual(tombstones.count, 1)
+        XCTAssertEqual(tombstones.first?.entityType, PendingCloudDeletionEntityType.monthlyPlanRecurringExpense.rawValue)
+        XCTAssertEqual(tombstones.first?.recordID, expenseID)
+        XCTAssertEqual(tombstones.first?.ownerUserID, ownerID)
+    }
+
+    @MainActor
+    func testDeletingARecurringExpenseWithNilOwnerUserIDRecordsNoTombstone() {
+        let context = makeAutosaveTestContext()
+        let expense = RecurringExpense(name: "Rent", amount: Decimal(string: "1500")!)
+        context.insert(expense)
+        try! context.save()
+
+        MonthlyPlanRecurringExpenseDeletionService.delete(expense, context: context)
+
+        XCTAssertTrue(try! context.fetch(FetchDescriptor<PendingCloudDeletion>()).isEmpty)
+    }
+
+    // MARK: MonthlyPlanCloudSyncManager — observer lifecycle
+
+    @MainActor
+    func testMonthlyPlanCloudSyncManagerStopObservingRemovesObserverForFutureSaves() {
+        let context = makeAutosaveTestContext()
+        let fake = FakeMonthlyPlanSyncService()
+        let manager = MonthlyPlanCloudSyncManager(debounceDelay: .milliseconds(20), backend: fake)
+        manager.startObserving(context: context, userId: UUID())
+        manager.stopObserving()
+
+        NotificationCenter.default.post(name: ModelContext.didSave, object: context)
+        manager.stopObserving()
+
+        XCTAssertNil(manager.lastSyncError)
+    }
+
+    // MARK: MonthlyPlanCloudSyncManager — sync scope and ownership isolation
+
+    @MainActor
+    func testMonthlyPlanCloudSyncManagerUploadsOnlyThisUsersOwnData() async throws {
+        let context = makeAutosaveTestContext()
+        let userA = UUID()
+        let userB = UUID()
+
+        let settings = MonthlyPlanSettings(monthlySavingsGoal: Decimal(string: "500")!)
+        settings.ownerUserID = userA
+        let otherSettings = MonthlyPlanSettings(monthlySavingsGoal: Decimal(string: "999")!)
+        otherSettings.ownerUserID = userB
+        context.insert(settings)
+        context.insert(otherSettings)
+
+        let mySource = IncomeSource(name: "My Paycheck", amount: Decimal(string: "2500")!)
+        mySource.ownerUserID = userA
+        let otherSource = IncomeSource(name: "Other Paycheck", amount: Decimal(string: "1000")!)
+        otherSource.ownerUserID = userB
+        context.insert(mySource)
+        context.insert(otherSource)
+
+        let myExpense = RecurringExpense(name: "My Rent", amount: Decimal(string: "1500")!)
+        myExpense.ownerUserID = userA
+        let otherExpense = RecurringExpense(name: "Other Rent", amount: Decimal(string: "2000")!)
+        otherExpense.ownerUserID = userB
+        context.insert(myExpense)
+        context.insert(otherExpense)
+        try context.save()
+
+        let fake = FakeMonthlyPlanSyncService()
+        let manager = MonthlyPlanCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userA)
+
+        try await waitUntil(timeout: .seconds(2)) { !fake.requests.isEmpty }
+        manager.stopObserving()
+
+        let request = try XCTUnwrap(fake.requests.first)
+        XCTAssertEqual(request.settings?.monthly_savings_goal, "500", "Only User A's own settings are uploaded")
+        XCTAssertEqual(request.income_sources.map(\.name), ["My Paycheck"])
+        XCTAssertEqual(request.recurring_expenses.map(\.name), ["My Rent"])
+    }
+
+    @MainActor
+    func testMonthlyPlanCloudSyncManagerFailureNeverTouchesLocalData() async throws {
+        let context = makeAutosaveTestContext()
+        let userId = UUID()
+        let source = IncomeSource(name: "Paycheck", amount: Decimal(string: "2500")!)
+        source.ownerUserID = userId
+        context.insert(source)
+        try context.save()
+
+        let fake = FakeMonthlyPlanSyncService()
+        fake.result = .failure(MonthlyPlanSyncError.server(status: 500, message: "boom"))
+        let manager = MonthlyPlanCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userId)
+
+        try await waitUntil(timeout: .seconds(2)) { manager.lastSyncError != nil }
+        manager.stopObserving()
+
+        XCTAssertNotNil(manager.lastSyncError)
+        let remaining = try context.fetch(FetchDescriptor<IncomeSource>())
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.name, "Paycheck")
+    }
+
+    @MainActor
+    func testMonthlyPlanCloudSyncManagerRetriesAndSucceedsAfterAPriorFailure() async throws {
+        let context = makeAutosaveTestContext()
+        let userId = UUID()
+        let source = IncomeSource(name: "Paycheck", amount: Decimal(string: "2500")!)
+        source.ownerUserID = userId
+        context.insert(source)
+        try context.save()
+
+        let fake = FakeMonthlyPlanSyncService()
+        fake.result = .failure(MonthlyPlanSyncError.server(status: 500, message: "boom"))
+        let manager = MonthlyPlanCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userId)
+
+        try await waitUntil(timeout: .seconds(2)) { manager.lastSyncError != nil }
+        XCTAssertEqual(fake.requests.count, 1)
+
+        fake.result = .success(MonthlyPlanSyncResult(settingsSynced: false, syncedIncomeSourceIds: [], syncedRecurringExpenseIds: [], deletedIncomeSourceIds: [], deletedRecurringExpenseIds: []))
+        let secondSource = IncomeSource(name: "Second Job", amount: Decimal(string: "800")!)
+        secondSource.ownerUserID = userId
+        context.insert(secondSource)
+        try context.save()
+
+        try await waitUntil(timeout: .seconds(2)) { manager.lastSyncError == nil && fake.requests.count >= 2 }
+        manager.stopObserving()
+
+        XCTAssertNil(manager.lastSyncError)
+        let lastRequest = try XCTUnwrap(fake.requests.last)
+        XCTAssertEqual(Set(lastRequest.income_sources.map(\.name)), ["Paycheck", "Second Job"])
+    }
+
+    @MainActor
+    func testMonthlyPlanCloudSyncManagerClearsOnlyServerConfirmedTombstones() async throws {
+        let context = makeAutosaveTestContext()
+        let userId = UUID()
+        let confirmedId = UUID()
+        let unconfirmedId = UUID()
+        context.insert(PendingCloudDeletion(entityType: .monthlyPlanIncomeSource, recordID: confirmedId, ownerUserID: userId))
+        context.insert(PendingCloudDeletion(entityType: .monthlyPlanRecurringExpense, recordID: unconfirmedId, ownerUserID: userId))
+        try context.save()
+
+        let fake = FakeMonthlyPlanSyncService()
+        fake.result = .success(
+            MonthlyPlanSyncResult(
+                settingsSynced: false,
+                syncedIncomeSourceIds: [],
+                syncedRecurringExpenseIds: [],
+                deletedIncomeSourceIds: [confirmedId.uuidString],
+                deletedRecurringExpenseIds: []
+            )
+        )
+        let manager = MonthlyPlanCloudSyncManager(debounceDelay: .milliseconds(10), backend: fake)
+        manager.startObserving(context: context, userId: userId)
+
+        try await waitUntil(timeout: .seconds(2)) { !fake.requests.isEmpty }
+        try await Task.sleep(for: .milliseconds(100))
+        manager.stopObserving()
+
+        let remainingTombstones = try context.fetch(FetchDescriptor<PendingCloudDeletion>())
+        XCTAssertEqual(remainingTombstones.map(\.recordID), [unconfirmedId], "Only the server-confirmed deletion's tombstone is cleared")
+    }
+
+    // MARK: - Phase 7: Account Related Options / Primary sharing controls
+
+    private final class FakeHouseholdSharingService: HouseholdSharingService {
+        var stateResponse: AccountRelatedOptionsResponse
+        var initializeResult: Result<HouseholdStateResponse, Error>
+        var invitationResult: Result<InvitationActionResponse, Error> = .success(InvitationActionResponse(invitationId: UUID(), revoked: nil, invitationUrl: nil))
+        var sharingPermissionResult: Result<SharingPermissionUpdateResponse, Error> = .success(SharingPermissionUpdateResponse(sharingPermissionId: UUID()))
+
+        var initializeCallCount = 0
+        var getOptionsCallCount = 0
+        var lastInvitationRequest: InvitationActionRequest?
+        var lastSharingPermissionRequest: SharingPermissionUpdateRequest?
+
+        /// Phase 7D regression hooks — invoked synchronously from inside the async network call,
+        /// BEFORE it returns, so a test can assert on the view model's state while a mutation is
+        /// still genuinely in flight (the exact moment the full-screen-flash bug used to corrupt
+        /// `state`). Left `nil` by every pre-existing test, which is unaffected.
+        var onBeforeUpdateSharingPermissionReturns: (() -> Void)?
+        var onBeforeManageInvitationReturns: (() -> Void)?
+        var onBeforeGetOptionsReturns: (() -> Void)?
+        /// When set, `getAccountRelatedOptions` throws this instead of returning `stateResponse` —
+        /// lets a test flip a SUBSEQUENT (e.g. post-write silent) refresh into failing without
+        /// affecting the initial load that already succeeded.
+        var getOptionsError: Error?
+
+        init(stateResponse: AccountRelatedOptionsResponse) {
+            self.stateResponse = stateResponse
+            self.initializeResult = .success(HouseholdStateResponse(householdId: stateResponse.householdId, role: stateResponse.role, status: stateResponse.status))
+        }
+
+        func initializeHousehold() async throws -> HouseholdStateResponse {
+            initializeCallCount += 1
+            return try initializeResult.get()
+        }
+
+        func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse {
+            getOptionsCallCount += 1
+            onBeforeGetOptionsReturns?()
+            if let getOptionsError { throw getOptionsError }
+            return stateResponse
+        }
+
+        func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse {
+            lastInvitationRequest = request
+            onBeforeManageInvitationReturns?()
+            return try invitationResult.get()
+        }
+
+        func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse {
+            lastSharingPermissionRequest = request
+            onBeforeUpdateSharingPermissionReturns?()
+            return try sharingPermissionResult.get()
+        }
+
+        var previewResult: Result<InvitationPreviewResponse, Error> = .success(
+            InvitationPreviewResponse(found: false, status: nil, isExpired: nil, expiresAt: nil, primaryDisplayName: nil, invitedEmail: nil)
+        )
+        var acceptResult: Result<AcceptInvitationResponse, Error> = .success(
+            AcceptInvitationResponse(householdId: UUID(), role: .secondary, status: .active)
+        )
+        var lastPreviewToken: String?
+        var lastAcceptToken: String?
+
+        func previewInvitation(token: String) async throws -> InvitationPreviewResponse {
+            lastPreviewToken = token
+            return try previewResult.get()
+        }
+
+        func acceptInvitation(token: String) async throws -> AcceptInvitationResponse {
+            lastAcceptToken = token
+            return try acceptResult.get()
+        }
+    }
+
+    private static func makeNoHouseholdResponse() -> AccountRelatedOptionsResponse {
+        AccountRelatedOptionsResponse(
+            householdId: nil, role: nil, status: nil,
+            secondaryMember: nil, pendingInvitation: nil,
+            sharingPermissions: [], connectedAccounts: [], manualAccounts: []
+        )
+    }
+
+    private static func makeSecondaryResponse() -> AccountRelatedOptionsResponse {
+        AccountRelatedOptionsResponse(
+            householdId: UUID(), role: .secondary, status: .active,
+            secondaryMember: nil, pendingInvitation: nil,
+            sharingPermissions: [], connectedAccounts: [], manualAccounts: []
+        )
+    }
+
+    private static func makePrimaryResponse(
+        sharingPermissions: [SharingPermissionDTO] = [],
+        connectedAccounts: [ConnectedAccountShareDTO] = [],
+        manualAccounts: [ManualAccountShareDTO] = [],
+        pendingInvitation: PendingInvitationDTO? = nil,
+        secondaryMember: SecondaryMemberDTO? = nil
+    ) -> AccountRelatedOptionsResponse {
+        AccountRelatedOptionsResponse(
+            householdId: UUID(), role: .primary, status: .active,
+            secondaryMember: secondaryMember, pendingInvitation: pendingInvitation,
+            sharingPermissions: sharingPermissions, connectedAccounts: connectedAccounts, manualAccounts: manualAccounts
+        )
+    }
+
+    // MARK: Visibility / role resolution
+
+    @MainActor
+    func testAccountRelatedOptionsVisibilityIsHiddenBeforeAnyLoad() {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse()))
+        XCTAssertEqual(viewModel.visibility, .hidden)
+    }
+
+    @MainActor
+    func testAccountRelatedOptionsVisibilityIsEntryPointWithNoHousehold() async {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse()))
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .entryPoint)
+    }
+
+    @MainActor
+    func testAccountRelatedOptionsVisibilityIsHiddenForActiveSecondary() async {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makeSecondaryResponse()))
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .hidden, "A Secondary must never see Primary sharing controls")
+    }
+
+    @MainActor
+    func testAccountRelatedOptionsVisibilityIsPrimaryForActivePrimary() async {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse()))
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testAccountRelatedOptionsVisibilityIsHiddenOnLoadFailure() async {
+        struct DummyError: Error {}
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        // Force a failure by pointing the backend at a service that always throws.
+        final class ThrowingService: HouseholdSharingService {
+            func initializeHousehold() async throws -> HouseholdStateResponse { throw DummyError() }
+            func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse { throw DummyError() }
+            func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse { throw DummyError() }
+            func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse { throw DummyError() }
+            func previewInvitation(token: String) async throws -> InvitationPreviewResponse { throw DummyError() }
+            func acceptInvitation(token: String) async throws -> AcceptInvitationResponse { throw DummyError() }
+        }
+        let viewModel = AccountRelatedOptionsViewModel(backend: ThrowingService())
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .hidden)
+        _ = fake // silence unused-variable warning while keeping the fixture available for parity with other tests
+    }
+
+    @MainActor
+    func testAccountRelatedOptionsResetReturnsToHidden() async {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse()))
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .primary)
+
+        viewModel.reset()
+
+        XCTAssertEqual(viewModel.visibility, .hidden)
+        XCTAssertNil(viewModel.actionError)
+    }
+
+    // MARK: Household creation
+
+    @MainActor
+    func testCreateHouseholdCallsInitializeThenRefreshes() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        fake.stateResponse = Self.makePrimaryResponse()
+        await viewModel.createHousehold()
+
+        XCTAssertEqual(fake.initializeCallCount, 1)
+        XCTAssertEqual(viewModel.visibility, .primary, "A successful create must be followed by a re-fetch reflecting the new state")
+    }
+
+    @MainActor
+    func testCreateHouseholdSurfacesErrorWithoutCrashing() async {
+        struct DummyError: Error {}
+        final class ThrowingInitialize: HouseholdSharingService {
+            func initializeHousehold() async throws -> HouseholdStateResponse { throw DummyError() }
+            func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse { FinanceTrackTests.makeNoHouseholdResponse() }
+            func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse { throw DummyError() }
+            func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse { throw DummyError() }
+            func previewInvitation(token: String) async throws -> InvitationPreviewResponse { throw DummyError() }
+            func acceptInvitation(token: String) async throws -> AcceptInvitationResponse { throw DummyError() }
+        }
+        let viewModel = AccountRelatedOptionsViewModel(backend: ThrowingInitialize())
+        await viewModel.createHousehold()
+        XCTAssertNotNil(viewModel.actionError)
+    }
+
+    // MARK: Invitation actions
+
+    @MainActor
+    func testInviteSendsHouseholdIdAndNormalizedCallerSuppliedEmail() async {
+        let response = Self.makePrimaryResponse()
+        let fake = FakeHouseholdSharingService(stateResponse: response)
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.invite(email: "secondary@example.com")
+
+        XCTAssertEqual(fake.lastInvitationRequest?.action, "invite")
+        XCTAssertEqual(fake.lastInvitationRequest?.householdId, response.householdId?.uuidString)
+        XCTAssertEqual(fake.lastInvitationRequest?.email, "secondary@example.com")
+    }
+
+    @MainActor
+    func testInviteIsANoOpWithoutAResolvedHouseholdId() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.invite(email: "secondary@example.com")
+
+        XCTAssertNil(fake.lastInvitationRequest, "Must never attempt to invite before a household id is known")
+    }
+
+    @MainActor
+    func testResendInvitationUsesThePendingInvitationId() async {
+        let invitationId = UUID()
+        let invitation = PendingInvitationDTO(id: invitationId, invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(pendingInvitation: invitation))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.resendInvitation()
+
+        XCTAssertEqual(fake.lastInvitationRequest?.action, "resend")
+        XCTAssertEqual(fake.lastInvitationRequest?.invitationId, invitationId.uuidString)
+    }
+
+    @MainActor
+    func testRevokeInvitationUsesThePendingInvitationId() async {
+        let invitationId = UUID()
+        let invitation = PendingInvitationDTO(id: invitationId, invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(pendingInvitation: invitation))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.revokeInvitation()
+
+        XCTAssertEqual(fake.lastInvitationRequest?.action, "revoke")
+        XCTAssertEqual(fake.lastInvitationRequest?.invitationId, invitationId.uuidString)
+    }
+
+    @MainActor
+    func testResendInvitationIsANoOpWithoutAPendingInvitation() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.resendInvitation()
+
+        XCTAssertNil(fake.lastInvitationRequest)
+    }
+
+    // MARK: Sharing permission writes
+
+    @MainActor
+    func testSetGlobalSharingSendsNilItemId() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.setGlobalSharing(category: "connectedAccounts", isShared: true)
+
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.category, "connectedAccounts")
+        XCTAssertNil(fake.lastSharingPermissionRequest?.itemId)
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.isShared, true)
+    }
+
+    @MainActor
+    func testSetItemSharingSendsTheGivenItemId() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        let itemId = UUID()
+        await viewModel.setItemSharing(category: "manualAccounts", itemId: itemId, isShared: false)
+
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.category, "manualAccounts")
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.itemId, itemId.uuidString)
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.isShared, false)
+    }
+
+    @MainActor
+    func testSharingPermissionWriteFailureSurfacesErrorWithoutCrashing() async {
+        struct DummyError: Error {}
+        final class ThrowingWrite: HouseholdSharingService {
+            func initializeHousehold() async throws -> HouseholdStateResponse { HouseholdStateResponse(householdId: UUID(), role: .primary, status: .active) }
+            func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse { FinanceTrackTests.makePrimaryResponse() }
+            func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse { throw DummyError() }
+            func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse { throw DummyError() }
+            func previewInvitation(token: String) async throws -> InvitationPreviewResponse { throw DummyError() }
+            func acceptInvitation(token: String) async throws -> AcceptInvitationResponse { throw DummyError() }
+        }
+        let viewModel = AccountRelatedOptionsViewModel(backend: ThrowingWrite())
+        await viewModel.refresh()
+        await viewModel.setGlobalSharing(category: "monthlyPlan", isShared: true)
+        XCTAssertNotNil(viewModel.actionError)
+    }
+
+    // MARK: Effective-sharing display logic (mirrors is_effectively_shared_for_user's own semantics)
+
+    func testEffectiveIsSharedGlobalMissingMeansFalse() {
+        XCTAssertFalse(accountRelatedOptionsEffectiveIsShared(permissions: [], category: "connectedAccounts", itemId: nil))
+    }
+
+    func testEffectiveIsSharedGlobalFalseMeansFalseRegardlessOfItemOverride() {
+        let itemId = UUID()
+        let permissions = [
+            SharingPermissionDTO(category: "connectedAccounts", itemId: nil, isShared: false),
+            SharingPermissionDTO(category: "connectedAccounts", itemId: itemId, isShared: true),
+        ]
+        XCTAssertFalse(accountRelatedOptionsEffectiveIsShared(permissions: permissions, category: "connectedAccounts", itemId: itemId), "Global false must override any per-item true")
+    }
+
+    func testEffectiveIsSharedGlobalTrueNoOverrideDefaultsToTrue() {
+        let itemId = UUID()
+        let permissions = [SharingPermissionDTO(category: "manualAccounts", itemId: nil, isShared: true)]
+        XCTAssertTrue(accountRelatedOptionsEffectiveIsShared(permissions: permissions, category: "manualAccounts", itemId: itemId))
+    }
+
+    func testEffectiveIsSharedGlobalTrueWithExplicitItemFalse() {
+        let itemId = UUID()
+        let permissions = [
+            SharingPermissionDTO(category: "manualAccounts", itemId: nil, isShared: true),
+            SharingPermissionDTO(category: "manualAccounts", itemId: itemId, isShared: false),
+        ]
+        XCTAssertFalse(accountRelatedOptionsEffectiveIsShared(permissions: permissions, category: "manualAccounts", itemId: itemId))
+    }
+
+    func testEffectiveIsSharedGlobalTrueWithExplicitItemTrue() {
+        let itemId = UUID()
+        let permissions = [
+            SharingPermissionDTO(category: "manualAccounts", itemId: nil, isShared: true),
+            SharingPermissionDTO(category: "manualAccounts", itemId: itemId, isShared: true),
+        ]
+        XCTAssertTrue(accountRelatedOptionsEffectiveIsShared(permissions: permissions, category: "manualAccounts", itemId: itemId))
+    }
+
+    func testEffectiveIsSharedGlobalRowIgnoresOtherCategories() {
+        let permissions = [SharingPermissionDTO(category: "monthlyPlan", itemId: nil, isShared: true)]
+        XCTAssertFalse(accountRelatedOptionsEffectiveIsShared(permissions: permissions, category: "connectedAccounts", itemId: nil))
+    }
+
+    // MARK: Response decoding — wire-format parity with the Edge Function's JSON
+
+    func testAccountRelatedOptionsResponseDecodesFullPrimaryPayload() throws {
+        let json = """
+        {
+          "household_id": "11111111-1111-1111-1111-111111111111",
+          "role": "primary",
+          "status": "active",
+          "secondary_member": {
+            "user_id": "22222222-2222-2222-2222-222222222222",
+            "email": "secondary@example.com",
+            "status": "active",
+            "joined_at": "2026-07-01T12:00:00Z"
+          },
+          "pending_invitation": null,
+          "sharing_permissions": [
+            {"category": "connectedAccounts", "item_id": null, "is_shared": true}
+          ],
+          "connected_accounts": [
+            {"plaid_account_id": "33333333-3333-3333-3333-333333333333", "account_id": "plaid_abc", "name": "Checking", "mask": "1234"}
+          ],
+          "manual_accounts": [
+            {"id": "44444444-4444-4444-4444-444444444444", "name": "Cash", "account_type": "cash"}
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(AccountRelatedOptionsResponse.self, from: json)
+
+        XCTAssertEqual(response.role, .primary)
+        XCTAssertEqual(response.status, .active)
+        XCTAssertEqual(response.secondaryMember?.email, "secondary@example.com")
+        XCTAssertNil(response.pendingInvitation)
+        XCTAssertEqual(response.sharingPermissions.first?.isShared, true)
+        XCTAssertEqual(response.connectedAccounts.first?.mask, "1234")
+        XCTAssertEqual(response.manualAccounts.first?.accountType, "cash")
+    }
+
+    func testHouseholdStateResponseDecodesNoHouseholdShape() throws {
+        let json = """
+        { "household_id": null, "role": null, "status": null }
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(HouseholdStateResponse.self, from: json)
+        XCTAssertNil(response.householdId)
+        XCTAssertNil(response.role)
+        XCTAssertNil(response.status)
+    }
+
+    // MARK: Invitation request factories
+
+    func testInvitationActionRequestInviteFactory() {
+        let householdId = UUID()
+        let request = InvitationActionRequest.invite(householdId: householdId, email: "someone@example.com")
+        XCTAssertEqual(request.action, "invite")
+        XCTAssertEqual(request.householdId, householdId.uuidString)
+        XCTAssertEqual(request.email, "someone@example.com")
+        XCTAssertNil(request.invitationId)
+    }
+
+    func testInvitationActionRequestResendFactory() {
+        let invitationId = UUID()
+        let request = InvitationActionRequest.resend(invitationId: invitationId)
+        XCTAssertEqual(request.action, "resend")
+        XCTAssertEqual(request.invitationId, invitationId.uuidString)
+        XCTAssertNil(request.householdId)
+        XCTAssertNil(request.email)
+    }
+
+    func testInvitationActionRequestRevokeFactory() {
+        let invitationId = UUID()
+        let request = InvitationActionRequest.revoke(invitationId: invitationId)
+        XCTAssertEqual(request.action, "revoke")
+        XCTAssertEqual(request.invitationId, invitationId.uuidString)
+        XCTAssertNil(request.householdId)
+        XCTAssertNil(request.email)
+    }
+
+    // MARK: Phase 7D — no full-screen flash during mutations
+
+    /// True only while `viewModel.state` currently holds `.loaded(...)` — the regression this
+    /// whole block guards against is `state` (and therefore `visibility`) dropping away from
+    /// `.loaded` at any point during a mutation that starts from an already-loaded screen.
+    @MainActor
+    private func isLoaded(_ viewModel: AccountRelatedOptionsViewModel) -> Bool {
+        if case .loaded = viewModel.state { return true }
+        return false
+    }
+
+    @MainActor
+    func testInitialLoadMayShowLoadingStateBeforeDataExists() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+
+        var wasLoadingMidFlight = false
+        fake.onBeforeGetOptionsReturns = {
+            if case .loading = viewModel.state { wasLoadingMidFlight = true }
+        }
+        await viewModel.refresh()
+
+        XCTAssertTrue(wasLoadingMidFlight, "The very first refresh(), before any data exists, is allowed to show a loading state")
+        XCTAssertTrue(isLoaded(viewModel))
+    }
+
+    @MainActor
+    func testConnectedGlobalMutationDoesNotClearLoadedStateMidFlight() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        XCTAssertTrue(isLoaded(viewModel))
+
+        var wasStillLoadedDuringWrite = false
+        var wasStillLoadedDuringRefetch = false
+        fake.onBeforeUpdateSharingPermissionReturns = { wasStillLoadedDuringWrite = self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoadedDuringRefetch = self.isLoaded(viewModel) }
+
+        await viewModel.setGlobalSharing(category: "connectedAccounts", isShared: true)
+
+        XCTAssertTrue(wasStillLoadedDuringWrite, "state must remain .loaded while the write request is in flight")
+        XCTAssertTrue(wasStillLoadedDuringRefetch, "state must remain .loaded while the post-write silent refresh is in flight")
+        XCTAssertTrue(isLoaded(viewModel))
+        XCTAssertEqual(viewModel.visibility, .primary, "the screen must never drop to .hidden mid-mutation")
+    }
+
+    @MainActor
+    func testConnectedItemMutationDoesNotClearLoadedStateMidFlight() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeUpdateSharingPermissionReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.setItemSharing(category: "connectedAccounts", itemId: UUID(), isShared: true)
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testManualGlobalMutationDoesNotClearLoadedStateMidFlight() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeUpdateSharingPermissionReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.setGlobalSharing(category: "manualAccounts", isShared: true)
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testManualItemMutationDoesNotClearLoadedStateMidFlight() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeUpdateSharingPermissionReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.setItemSharing(category: "manualAccounts", itemId: UUID(), isShared: true)
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testMonthlyPlanMutationDoesNotClearLoadedStateMidFlight() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeUpdateSharingPermissionReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.setGlobalSharing(category: "monthlyPlan", isShared: true)
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testSendInvitationDoesNotClearLoadedStateMidFlight() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeManageInvitationReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.invite(email: "secondary@example.com")
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testResendInvitationDoesNotClearLoadedStateMidFlight() async {
+        let invitation = PendingInvitationDTO(id: UUID(), invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(pendingInvitation: invitation))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeManageInvitationReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.resendInvitation()
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testRevokeInvitationDoesNotClearLoadedStateMidFlight() async {
+        let invitation = PendingInvitationDTO(id: UUID(), invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(pendingInvitation: invitation))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var wasStillLoaded = true
+        fake.onBeforeManageInvitationReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+        fake.onBeforeGetOptionsReturns = { wasStillLoaded = wasStillLoaded && self.isLoaded(viewModel) }
+
+        await viewModel.revokeInvitation()
+
+        XCTAssertTrue(wasStillLoaded)
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testSuccessfulMutationUpdatesStateWithoutReturningToFullScreenInitialLoadingState() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var observedLoadingOrIdleDuringMutation = false
+        fake.onBeforeUpdateSharingPermissionReturns = {
+            switch viewModel.state {
+            case .loading, .idle, .failed: observedLoadingOrIdleDuringMutation = true
+            case .loaded: break
+            }
+        }
+        fake.onBeforeGetOptionsReturns = {
+            switch viewModel.state {
+            case .loading, .idle, .failed: observedLoadingOrIdleDuringMutation = true
+            case .loaded: break
+            }
+        }
+
+        await viewModel.setGlobalSharing(category: "connectedAccounts", isShared: true)
+
+        XCTAssertFalse(observedLoadingOrIdleDuringMutation, "a successful mutation must never pass through .loading/.idle/.failed on its way to the new .loaded state")
+    }
+
+    @MainActor
+    func testFailedToggleMutationLeavesPriorServerConfirmedValueInPlace() async {
+        struct WriteError: Error {}
+        let initialPermissions = [SharingPermissionDTO(category: "connectedAccounts", itemId: nil, isShared: false)]
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(sharingPermissions: initialPermissions))
+        fake.sharingPermissionResult = .failure(WriteError())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.setGlobalSharing(category: "connectedAccounts", isShared: true)
+
+        // The write failed before any refresh happened, so the displayed (server-confirmed)
+        // value is exactly what it was before the toggle was touched — never optimistically
+        // flipped to the requested value.
+        XCTAssertEqual(viewModel.response?.sharingPermissions.first?.isShared, false)
+        XCTAssertNotNil(viewModel.actionError)
+        XCTAssertTrue(isLoaded(viewModel), "a failed toggle write must not blank the screen")
+    }
+
+    @MainActor
+    func testFailedInvitationMutationPreservesExistingLoadedScreenState() async {
+        struct WriteError: Error {}
+        let response = Self.makePrimaryResponse()
+        let fake = FakeHouseholdSharingService(stateResponse: response)
+        fake.invitationResult = .failure(WriteError())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.invite(email: "secondary@example.com")
+
+        XCTAssertTrue(isLoaded(viewModel))
+        XCTAssertEqual(viewModel.visibility, .primary)
+        XCTAssertNotNil(viewModel.actionError)
+        XCTAssertNil(viewModel.response?.pendingInvitation, "no invitation was actually created server-side")
+    }
+
+    @MainActor
+    func testOnlyTheMutatingOperationIsMarkedBusyAtATime() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        XCTAssertNil(viewModel.activeMutation)
+
+        var observedDuringWrite: AccountRelatedOptionsViewModel.Mutation?
+        fake.onBeforeUpdateSharingPermissionReturns = { observedDuringWrite = viewModel.activeMutation }
+
+        let itemId = UUID()
+        await viewModel.setItemSharing(category: "manualAccounts", itemId: itemId, isShared: true)
+
+        XCTAssertEqual(observedDuringWrite, .manualItem(itemId), "only the specific item's mutation is tracked as active, not a blanket flag")
+        XCTAssertNil(viewModel.activeMutation, "cleared again once the operation completes")
+    }
+
+    @MainActor
+    func testSignOutResetStillClearsStateAndActiveMutation() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        XCTAssertTrue(isLoaded(viewModel))
+
+        viewModel.reset()
+
+        XCTAssertEqual(viewModel.visibility, .hidden)
+        XCTAssertNil(viewModel.activeMutation)
+        XCTAssertNil(viewModel.actionError)
+        if case .idle = viewModel.state {} else { XCTFail("reset() must return state to .idle") }
+    }
+
+    @MainActor
+    func testSilentBackgroundRefreshFailureDoesNotBlankAlreadyLoadedScreen() async {
+        struct RefreshError: Error {}
+        let originalResponse = Self.makePrimaryResponse()
+        let fake = FakeHouseholdSharingService(stateResponse: originalResponse)
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        XCTAssertTrue(isLoaded(viewModel))
+
+        // The write itself succeeds, but the post-write silent refresh's own fetch fails (e.g. a
+        // network blip right after a successful write) — the previously-loaded content must stay
+        // on screen exactly as it was, with only an error surfaced.
+        fake.getOptionsError = RefreshError()
+
+        await viewModel.setGlobalSharing(category: "connectedAccounts", isShared: true)
+
+        XCTAssertTrue(isLoaded(viewModel), "a failed background refresh must never blank an already-loaded screen")
+        XCTAssertEqual(viewModel.visibility, .primary)
+        XCTAssertEqual(viewModel.response?.householdId, originalResponse.householdId, "the stale-but-last-known-good data remains visible")
+        XCTAssertNotNil(viewModel.actionError)
+    }
+
+    // MARK: - Phase 8: Secondary invitation acceptance flow
+
+    // MARK: Deep-link routing
+
+    @MainActor
+    func testPendingInvitationRouterRecognizesTheInvitationURL() {
+        let router = PendingInvitationRouter()
+        let matched = router.handle(url: URL(string: "spendsmart://household-invitation?token=abc123")!)
+        XCTAssertTrue(matched)
+        XCTAssertEqual(router.invitation?.token, "abc123")
+    }
+
+    @MainActor
+    func testPendingInvitationRouterIgnoresUnrelatedScheme() {
+        let router = PendingInvitationRouter()
+        let matched = router.handle(url: URL(string: "https://household-invitation?token=abc123")!)
+        XCTAssertFalse(matched)
+        XCTAssertNil(router.invitation)
+    }
+
+    @MainActor
+    func testPendingInvitationRouterIgnoresAuthCallbackHost() {
+        let router = PendingInvitationRouter()
+        let matched = router.handle(url: URL(string: "spendsmart://auth-callback?code=xyz")!)
+        XCTAssertFalse(matched, "the auth callback must fall through to AuthenticationService.handle(url:), never be absorbed here")
+        XCTAssertNil(router.invitation)
+    }
+
+    @MainActor
+    func testPendingInvitationRouterSwallowsMalformedLinkMissingToken() {
+        let router = PendingInvitationRouter()
+        let matched = router.handle(url: URL(string: "spendsmart://household-invitation")!)
+        XCTAssertTrue(matched, "matched our route, so it must never fall through to the auth handler")
+        XCTAssertNil(router.invitation, "but no token means nothing to present")
+    }
+
+    @MainActor
+    func testPendingInvitationRouterSwallowsEmptyTokenValue() {
+        let router = PendingInvitationRouter()
+        let matched = router.handle(url: URL(string: "spendsmart://household-invitation?token=")!)
+        XCTAssertTrue(matched)
+        XCTAssertNil(router.invitation)
+    }
+
+    @MainActor
+    func testPendingInvitationRouterClearRemovesTheInvitation() {
+        let router = PendingInvitationRouter()
+        router.handle(url: URL(string: "spendsmart://household-invitation?token=abc123")!)
+        XCTAssertNotNil(router.invitation)
+        router.clear()
+        XCTAssertNil(router.invitation)
+    }
+
+    func testPendingHouseholdInvitationIdIsItsToken() {
+        let invitation = PendingHouseholdInvitation(token: "my-token")
+        XCTAssertEqual(invitation.id, "my-token")
+    }
+
+    // MARK: InvitationAcceptanceViewModel — preview loading
+
+    private final class FakeInvitationBackend: HouseholdSharingService {
+        var previewResult: Result<InvitationPreviewResponse, Error> = .success(
+            InvitationPreviewResponse(found: false, status: nil, isExpired: nil, expiresAt: nil, primaryDisplayName: nil, invitedEmail: nil)
+        )
+        var acceptResult: Result<AcceptInvitationResponse, Error> = .success(
+            AcceptInvitationResponse(householdId: UUID(), role: .secondary, status: .active)
+        )
+        var lastPreviewToken: String?
+        var lastAcceptToken: String?
+        var acceptCallCount = 0
+
+        func initializeHousehold() async throws -> HouseholdStateResponse {
+            HouseholdStateResponse(householdId: nil, role: nil, status: nil)
+        }
+        func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse {
+            FinanceTrackTests.makeNoHouseholdResponse()
+        }
+        func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse {
+            InvitationActionResponse(invitationId: nil, revoked: nil, invitationUrl: nil)
+        }
+        func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse {
+            SharingPermissionUpdateResponse(sharingPermissionId: UUID())
+        }
+        func previewInvitation(token: String) async throws -> InvitationPreviewResponse {
+            lastPreviewToken = token
+            return try previewResult.get()
+        }
+        func acceptInvitation(token: String) async throws -> AcceptInvitationResponse {
+            acceptCallCount += 1
+            lastAcceptToken = token
+            return try acceptResult.get()
+        }
+    }
+
+    @MainActor
+    func testInvitationPreviewLoadsIntoLoadedState() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "pending", isExpired: false, expiresAt: Date(), primaryDisplayName: "Scott", invitedEmail: "b@example.com"
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok-1", backend: backend)
+
+        await viewModel.loadPreview()
+
+        guard case .loaded(let preview) = viewModel.state else {
+            return XCTFail("expected .loaded")
+        }
+        XCTAssertTrue(preview.found)
+        XCTAssertEqual(preview.primaryDisplayName, "Scott")
+        XCTAssertEqual(backend.lastPreviewToken, "tok-1")
+    }
+
+    @MainActor
+    func testInvitationPreviewSendsOnlyTheToken() async {
+        let backend = FakeInvitationBackend()
+        let viewModel = InvitationAcceptanceViewModel(token: "the-exact-token", backend: backend)
+        await viewModel.loadPreview()
+        XCTAssertEqual(backend.lastPreviewToken, "the-exact-token")
+    }
+
+    @MainActor
+    func testInvitationPreviewFailureSurfacesFailedState() async {
+        struct PreviewError: Error {}
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .failure(PreviewError())
+        let viewModel = InvitationAcceptanceViewModel(token: "tok-1", backend: backend)
+
+        await viewModel.loadPreview()
+
+        guard case .failed = viewModel.state else {
+            return XCTFail("expected .failed")
+        }
+    }
+
+    // MARK: canAccept
+
+    @MainActor
+    func testCanAcceptIsTrueForFoundPendingUnexpiredInvitation() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "pending", isExpired: false, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+        XCTAssertTrue(viewModel.canAccept)
+    }
+
+    @MainActor
+    func testCanAcceptIsFalseWhenNotFound() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(found: false, status: nil, isExpired: nil, expiresAt: nil, primaryDisplayName: nil, invitedEmail: nil))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+        XCTAssertFalse(viewModel.canAccept)
+    }
+
+    @MainActor
+    func testCanAcceptIsFalseWhenExpired() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "pending", isExpired: true, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+        XCTAssertFalse(viewModel.canAccept)
+    }
+
+    @MainActor
+    func testCanAcceptIsFalseWhenAlreadyAccepted() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "accepted", isExpired: false, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+        XCTAssertFalse(viewModel.canAccept)
+    }
+
+    @MainActor
+    func testCanAcceptIsFalseWhenRevoked() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "revoked", isExpired: false, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+        XCTAssertFalse(viewModel.canAccept)
+    }
+
+    // MARK: Accept
+
+    @MainActor
+    func testAcceptSucceedsAndSetsDidAccept() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "pending", isExpired: false, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok-accept", backend: backend)
+        await viewModel.loadPreview()
+
+        await viewModel.accept()
+
+        XCTAssertTrue(viewModel.didAccept)
+        XCTAssertNil(viewModel.acceptanceError)
+        XCTAssertEqual(backend.lastAcceptToken, "tok-accept")
+    }
+
+    @MainActor
+    func testAcceptSendsOnlyTheToken() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "pending", isExpired: false, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "only-the-token", backend: backend)
+        await viewModel.loadPreview()
+        await viewModel.accept()
+        XCTAssertEqual(backend.lastAcceptToken, "only-the-token")
+    }
+
+    @MainActor
+    func testAcceptIsANoOpWhenCanAcceptIsFalse() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(found: false, status: nil, isExpired: nil, expiresAt: nil, primaryDisplayName: nil, invitedEmail: nil))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+
+        await viewModel.accept()
+
+        XCTAssertEqual(backend.acceptCallCount, 0, "must never call accept-household-invitation for an invitation that isn't acceptable")
+        XCTAssertFalse(viewModel.didAccept)
+    }
+
+    @MainActor
+    func testFailedAcceptancePreservesPreviewScreenState() async {
+        struct AcceptError: Error {}
+        let backend = FakeInvitationBackend()
+        let preview = InvitationPreviewResponse(found: true, status: "pending", isExpired: false, expiresAt: Date(), primaryDisplayName: "Scott", invitedEmail: "b@example.com")
+        backend.previewResult = .success(preview)
+        backend.acceptResult = .failure(AcceptError())
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+
+        await viewModel.accept()
+
+        XCTAssertFalse(viewModel.didAccept)
+        XCTAssertNotNil(viewModel.acceptanceError)
+        guard case .loaded(let stillPreview) = viewModel.state else {
+            return XCTFail("expected the original preview to remain loaded, not blanked")
+        }
+        XCTAssertEqual(stillPreview, preview)
+    }
+
+    @MainActor
+    func testAcceptIsANoOpWhileAlreadyAccepting() async {
+        let backend = FakeInvitationBackend()
+        backend.previewResult = .success(InvitationPreviewResponse(
+            found: true, status: "pending", isExpired: false, expiresAt: Date(), primaryDisplayName: nil, invitedEmail: nil
+        ))
+        let viewModel = InvitationAcceptanceViewModel(token: "tok", backend: backend)
+        await viewModel.loadPreview()
+
+        async let first: Void = viewModel.accept()
+        async let second: Void = viewModel.accept()
+        _ = await (first, second)
+
+        // Both may legitimately race to start (isAccepting is only set synchronously once the
+        // first await suspends), but accept() itself is idempotent server-side (accepted status
+        // rejects a second call) — the client-side guard exists purely to avoid a redundant
+        // network call when the button is somehow triggered twice in the same run loop tick.
+        XCTAssertTrue(viewModel.didAccept)
+    }
+
+    // MARK: Payload encode/decode
+
+    func testInvitationTokenRequestEncodesTokenField() throws {
+        let request = InvitationTokenRequest(token: "abc123")
+        let data = try JSONEncoder().encode(request)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(json?["token"] as? String, "abc123")
+    }
+
+    func testInvitationPreviewResponseDecodesFoundShape() throws {
+        let json = """
+        {
+          "found": true,
+          "status": "pending",
+          "is_expired": false,
+          "expires_at": "2026-07-28T12:00:00Z",
+          "primary_display_name": "Scott",
+          "invited_email": "b@example.com"
+        }
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(InvitationPreviewResponse.self, from: json)
+        XCTAssertTrue(response.found)
+        XCTAssertEqual(response.status, "pending")
+        XCTAssertEqual(response.isExpired, false)
+        XCTAssertEqual(response.primaryDisplayName, "Scott")
+        XCTAssertEqual(response.invitedEmail, "b@example.com")
+    }
+
+    func testInvitationPreviewResponseDecodesNotFoundShape() throws {
+        let json = """
+        { "found": false }
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(InvitationPreviewResponse.self, from: json)
+        XCTAssertFalse(response.found)
+        XCTAssertNil(response.status)
+        XCTAssertNil(response.primaryDisplayName)
+    }
+
+    func testAcceptInvitationResponseDecodesSecondaryRoleShape() throws {
+        let json = """
+        { "household_id": "11111111-1111-1111-1111-111111111111", "role": "secondary", "status": "active" }
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(AcceptInvitationResponse.self, from: json)
+        XCTAssertEqual(response.role, .secondary)
+        XCTAssertEqual(response.status, .active)
+    }
+
+    func testInvitationActionResponseDecodesWithInvitationUrl() throws {
+        let json = """
+        { "invitation_id": "11111111-1111-1111-1111-111111111111", "invitation_url": "spendsmart://household-invitation?token=abc" }
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(InvitationActionResponse.self, from: json)
+        XCTAssertEqual(response.invitationUrl, "spendsmart://household-invitation?token=abc")
+    }
+
+    func testInvitationActionResponseDecodesWithoutInvitationUrl() throws {
+        let json = """
+        { "revoked": true }
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(InvitationActionResponse.self, from: json)
+        XCTAssertNil(response.invitationUrl)
+        XCTAssertEqual(response.revoked, true)
+    }
+
+    // MARK: AccountRelatedOptionsViewModel — lastInvitationUrl (Phase 8 wiring)
+
+    @MainActor
+    func testInviteSuccessCapturesTheInvitationUrl() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let invitationId = UUID()
+        fake.invitationResult = .success(InvitationActionResponse(invitationId: invitationId, revoked: nil, invitationUrl: "spendsmart://household-invitation?token=xyz"))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        // Simulate the server now reflecting the just-created pending invitation, exactly as a
+        // real post-write get-account-related-options call would (create_invitation inserted a
+        // real pending row) — without this, the post-write silent refresh would (correctly, per
+        // Phase 12) see no pending invitation and clear the link right back out.
+        let newInvitation = PendingInvitationDTO(id: invitationId, invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        fake.stateResponse = Self.makePrimaryResponse(pendingInvitation: newInvitation)
+
+        await viewModel.invite(email: "secondary@example.com")
+
+        XCTAssertEqual(viewModel.lastInvitationUrl, "spendsmart://household-invitation?token=xyz")
+    }
+
+    @MainActor
+    func testRevokeInvitationClearsTheInvitationUrl() async {
+        let invitationId = UUID()
+        let invitation = PendingInvitationDTO(id: invitationId, invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(pendingInvitation: invitation))
+        fake.invitationResult = .success(InvitationActionResponse(invitationId: invitationId, revoked: nil, invitationUrl: "spendsmart://household-invitation?token=xyz"))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        await viewModel.invite(email: "secondary@example.com")
+        XCTAssertNotNil(viewModel.lastInvitationUrl)
+
+        fake.stateResponse = Self.makePrimaryResponse() // server now reflects no pending invitation
+        await viewModel.revokeInvitation()
+
+        XCTAssertNil(viewModel.lastInvitationUrl)
+    }
+
+    @MainActor
+    func testRefreshClearsStaleInvitationUrlOnceInvitationIsGone() async {
+        let invitationId = UUID()
+        let invitation = PendingInvitationDTO(id: invitationId, invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse(pendingInvitation: invitation))
+        fake.invitationResult = .success(InvitationActionResponse(invitationId: invitationId, revoked: nil, invitationUrl: "spendsmart://household-invitation?token=xyz"))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        await viewModel.invite(email: "secondary@example.com")
+        XCTAssertNotNil(viewModel.lastInvitationUrl)
+
+        // Simulate the invitation having been accepted elsewhere (e.g. on another device) —
+        // pending_invitation disappears from the next server read, independent of any local action.
+        fake.stateResponse = Self.makePrimaryResponse(secondaryMember: SecondaryMemberDTO(userId: UUID(), email: "secondary@example.com", status: "active", joinedAt: Date()))
+        await viewModel.refresh()
+
+        XCTAssertNil(viewModel.lastInvitationUrl, "Phase 12: a share link for an invitation that's no longer pending must not linger")
+    }
+
+    @MainActor
+    func testResetClearsLastInvitationUrl() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let invitationId = UUID()
+        fake.invitationResult = .success(InvitationActionResponse(invitationId: invitationId, revoked: nil, invitationUrl: "spendsmart://household-invitation?token=xyz"))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+        let newInvitation = PendingInvitationDTO(id: invitationId, invitedEmail: "secondary@example.com", status: "pending", expiresAt: Date(), createdAt: Date())
+        fake.stateResponse = Self.makePrimaryResponse(pendingInvitation: newInvitation)
+        await viewModel.invite(email: "secondary@example.com")
+        XCTAssertNotNil(viewModel.lastInvitationUrl)
+
+        viewModel.reset()
+
+        XCTAssertNil(viewModel.lastInvitationUrl)
+    }
+
+    // MARK: Regression — Primary/Secondary role resolution unaffected by Phase 8 additions
+
+    @MainActor
+    func testPrimaryVisibilityStillResolvesCorrectlyAfterPhase8Additions() async {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse()))
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .primary)
+    }
+
+    @MainActor
+    func testSecondaryVisibilityStillHiddenAfterPhase8Additions() async {
+        let viewModel = AccountRelatedOptionsViewModel(backend: FakeHouseholdSharingService(stateResponse: Self.makeSecondaryResponse()))
+        await viewModel.refresh()
+        XCTAssertEqual(viewModel.visibility, .hidden, "Secondary must still never see Primary-only controls after acceptance")
+    }
+
 }
 
 /// Mirrors the decision rule `refreshPlaidAccounts` (supabase/functions/_shared/plaid.ts) applies

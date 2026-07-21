@@ -273,6 +273,31 @@ enum PlaidTransactionImportService {
         return reconstructed
     }
 
+    /// Runs the exact same stale-UTC-midnight-date repair sweep `applySync` runs on every
+    /// transaction sync, but purely locally: no network call, no `PlaidSyncResult` required.
+    /// Exists so `UserDataStoreManager.resolve(for:)` can self-heal a user's already-persisted
+    /// Plaid transactions the moment their local store is attached — a user who never triggers an
+    /// actual transaction sync (e.g. only ever uses the Dashboard's balance-only per-account
+    /// Refresh, which never calls `applySync`) would otherwise carry a stale pre-fix date
+    /// forever. Saves at most once, and only if something actually changed — a no-op sweep never
+    /// touches the store. Same fetch-then-filter `source == .plaid` scoping as `applySync`,
+    /// so manual transactions are never in scope.
+    @discardableResult
+    static func repairStaleUTCMidnightDatesLocally(in context: ModelContext, calendar: Calendar = .current) throws -> Int {
+        let plaidTransactions = try context.fetch(FetchDescriptor<FinanceTransaction>())
+            .filter { $0.source == .plaid }
+        var repairedCount = 0
+        for transaction in plaidTransactions {
+            if repairStaleUTCMidnightDate(on: transaction, calendar: calendar) {
+                repairedCount += 1
+            }
+        }
+        if repairedCount > 0 {
+            try context.save()
+        }
+        return repairedCount
+    }
+
     /// Copies mutable, sync-safe fields from `dto` onto `existing` — never `id`, `source`,
     /// `countsTowardWeeklyBudget`, or `isExcludedFromReports`, which stay under the app's own
     /// control. Account/category association aren't touched here either: neither is resolved at

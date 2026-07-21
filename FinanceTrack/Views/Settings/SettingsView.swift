@@ -30,6 +30,7 @@ struct SettingsView: View {
     @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(PlaidConnectionManager.self) private var plaidConnection
     @Environment(AuthenticationService.self) private var authService
+    @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
     @State private var weeklyLimit: Decimal?
     @State private var monthlyGoal: Decimal?
@@ -45,6 +46,7 @@ struct SettingsView: View {
     @State private var isPresentingInsights = false
     @State private var isPresentingDataBackup = false
     @State private var isPresentingAccount = false
+    @State private var isPresentingAccountRelatedOptions = false
     #if DEBUG
     @State private var isPresentingSpendSenseTest = false
     #endif
@@ -146,6 +148,9 @@ struct SettingsView: View {
             .sheet(isPresented: $isPresentingAccount) {
                 AccountView()
             }
+            .sheet(isPresented: $isPresentingAccountRelatedOptions) {
+                AccountRelatedOptionsView()
+            }
             #if DEBUG
             .sheet(isPresented: $isPresentingSpendSenseTest) {
                 SpendSenseTestView()
@@ -199,25 +204,49 @@ struct SettingsView: View {
             DashboardSectionHeader(title: "Account")
 
             CardBackground {
-                Button {
-                    isPresentingAccount = true
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(authService.currentUserEmail ?? "Account")
-                                .font(Theme.bodyFont)
-                                .foregroundStyle(Theme.textPrimary)
-                            Text(authService.isEmailVerified ? "Verified" : "Not Verified")
-                                .font(Theme.captionFont)
-                                .foregroundStyle(authService.isEmailVerified ? Theme.statusGood : Theme.statusWarning)
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    Button {
+                        isPresentingAccount = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(authService.currentUserEmail ?? "Account")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text(authService.isEmailVerified ? "Verified" : "Not Verified")
+                                    .font(Theme.captionFont)
+                                    .foregroundStyle(authService.isEmailVerified ? Theme.statusGood : Theme.statusWarning)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
                         }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+
+                    // Primary-only — hidden entirely for a Secondary or until the server-verified
+                    // role has resolved (never inferred locally, see
+                    // AccountRelatedOptionsViewModel's own doc comment for why).
+                    if accountRelatedOptionsViewModel.visibility != .hidden {
+                        Divider().overlay(Theme.cardStroke)
+
+                        Button {
+                            isPresentingAccountRelatedOptions = true
+                        } label: {
+                            HStack {
+                                Text("Account Related Options")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }
