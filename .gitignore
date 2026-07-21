@@ -16,6 +16,7 @@ xcuserdata/
 .build/
 Packages/
 Package.resolved
+!FinanceTrack.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
 # Node
 node_modules/
