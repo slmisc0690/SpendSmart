@@ -518,3 +518,35 @@ verify_jwt = false
 # get-household-invitation-preview/index.ts's own header for scope).
 [functions.get-household-invitation-preview]
 verify_jwt = false
+
+# PHASE 8D — authored as backend foundation only; not deployed (see
+# get-my-pending-household-invitation/index.ts's own header for scope).
+[functions.get-my-pending-household-invitation]
+verify_jwt = false
+
+# PHASE 8D FOLLOW-UP — authored as backend foundation only; not deployed (see
+# decline-household-invitation/index.ts's own header for scope).
+[functions.decline-household-invitation]
+verify_jwt = false
+
+# MONTHLY SAVINGS SHARING — deployed to Production (see get-monthly-savings-summary/index.ts's own
+# header for scope). Missed in the initial deployment (CLI defaulted to verify_jwt = true, the
+# gateway-layer mismatch this file's own top comment explains); corrected here to match every
+# other function's convention.
+[functions.get-monthly-savings-summary]
+verify_jwt = false
+
+# MONTHLY SAVINGS SHARING — deployed to Production (see upsert-savings-summary/index.ts's own
+# header for scope). Same correction as get-monthly-savings-summary above.
+[functions.upsert-savings-summary]
+verify_jwt = false
+
+# USER B DASHBOARD PARITY — authored as backend foundation only; not deployed (see
+# get-dashboard-summary/index.ts's own header for scope).
+[functions.get-dashboard-summary]
+verify_jwt = false
+
+# USER B DASHBOARD PARITY — authored as backend foundation only; not deployed (see
+# upsert-dashboard-summary/index.ts's own header for scope).
+[functions.upsert-dashboard-summary]
+verify_jwt = false

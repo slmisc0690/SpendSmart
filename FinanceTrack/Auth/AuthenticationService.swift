@@ -39,6 +39,21 @@ final class AuthenticationService {
     private(set) var currentUserId: UUID?
     private(set) var currentUserEmail: String?
     private(set) var isEmailVerified = false
+    /// PROVEN real-device UX fix — a deliberately STICKY display-only mirror of
+    /// `currentUserEmail`/`isEmailVerified`. NOT security state: grants no access, gates nothing,
+    /// and is purely cosmetic. Updated alongside the real properties on every genuine sign-in
+    /// (`apply(session:)`, `refreshVerificationStatus()`) but — unlike them — is NEVER cleared by
+    /// `clearLocalSession()`/sign-out. `AccountView`/`SettingsView` (and anything else showing the
+    /// signed-in user's identity) live inside a `.id(userId)`-tagged subtree that SwiftUI can
+    /// atomically discard-and-rebuild the instant `currentUserId` changes — a view rebuilt AFTER
+    /// the real `isEmailVerified` has already cleared would otherwise capture the already-false
+    /// value and visibly flash "Not Verified" during teardown, no matter how it's captured
+    /// (`.onAppear`, a computed property, anything). Reading this stable mirror instead means the
+    /// displayed value simply never changes during a sign-out, regardless of how many times the
+    /// view is torn down and recreated in the process — the real security state
+    /// (`sessionState`/`currentUserId`/`isEmailVerified`) still clears immediately and correctly.
+    private(set) var lastDisplayedUserEmail: String?
+    private(set) var lastDisplayedIsEmailVerified = false
     /// True from the moment a password-recovery deep link is handled until `updatePassword`
     /// succeeds (or the user is otherwise routed away — see `clearPasswordRecoveryState`). The
     /// app's top-level routing (`FinanceTrackApp`) checks this BEFORE `sessionState`, so a
@@ -187,6 +202,8 @@ final class AuthenticationService {
         currentUserId = user.id
         currentUserEmail = user.email
         isEmailVerified = user.emailConfirmedAt != nil
+        lastDisplayedUserEmail = user.email
+        lastDisplayedIsEmailVerified = isEmailVerified
         // A fresh `user()` call implies a valid session exists; reflect that too in case this is
         // called right after a deep-link confirmation that this instance hasn't seen yet.
         sessionState = .signedIn
@@ -340,6 +357,8 @@ final class AuthenticationService {
         currentUserId = session.user.id
         currentUserEmail = session.user.email
         isEmailVerified = session.user.emailConfirmedAt != nil
+        lastDisplayedUserEmail = session.user.email
+        lastDisplayedIsEmailVerified = isEmailVerified
         sessionState = .signedIn
     }
 

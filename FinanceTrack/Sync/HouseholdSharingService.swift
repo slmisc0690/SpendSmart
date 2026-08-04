@@ -31,6 +31,71 @@ protocol HouseholdSharingService {
     /// Phase 8 — the sole mutation: accepts the invitation matching `token` for the
     /// currently-authenticated caller.
     func acceptInvitation(token: String) async throws -> AcceptInvitationResponse
+
+    /// Phase 8D — checks whether the currently-authenticated caller has a valid pending
+    /// invitation addressed to their own verified email, with no token/link needed.
+    func checkMyPendingInvitation() async throws -> MyPendingInvitationResponse
+
+    /// Phase 8D — accepts a SELF-DISCOVERED invitation (from `checkMyPendingInvitation`) by id
+    /// rather than by token. See migration 0015's own header for why this is an equally-secure,
+    /// differently-shaped acceptance path.
+    func acceptInvitation(invitationId: UUID) async throws -> AcceptInvitationResponse
+
+    /// Phase 8D follow-up — declines a SELF-DISCOVERED invitation (from
+    /// `checkMyPendingInvitation`) by id. See migration 0015's `decline_household_invitation_by_id`
+    /// header for why this is a distinct status value from the pre-existing `revoked`.
+    func declineInvitation(invitationId: UUID) async throws -> DeclineInvitationResponse
+
+    /// Phase 9 — reads normalized transactions for a Primary-owned Connected Account the caller
+    /// (an active Secondary) has been shown by `getAccountRelatedOptions`'s own
+    /// `primarySharedConnectedAccounts`. `plaidAccountId` must be one of those server-discovered
+    /// ids — never fabricated client-side. Unmodified, pre-existing Phase 4 endpoint; permission
+    /// is decided entirely server-side (see `get-connected-account-transactions`'s own header).
+    func getSharedConnectedAccountTransactions(plaidAccountId: UUID) async throws -> SharedConnectedAccountTransactionsResponse
+
+    /// Phase 9 — reads a Primary-owned Manual Account (plus its transactions) the caller has been
+    /// shown by `primarySharedManualAccounts`. Same "server-discovered id only" contract as above.
+    /// Unmodified, pre-existing Phase 5 endpoint.
+    func getSharedManualAccountData(manualAccountId: UUID) async throws -> SharedManualAccountDataResponse
+
+    /// Phase 9 — reads the Primary's Monthly Plan when `primaryMonthlyPlanShared` is true, using
+    /// the server-discovered `primaryUserId` (never the caller's own id, never fabricated).
+    /// Unmodified, pre-existing Phase 6 endpoint.
+    func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse
+
+    /// CLIENT UI PHASE — the Primary's own aggregate savings totals upload (`savedThisMonth`/
+    /// `totalSavingsToDate` only, never individual `SavingsEntry` rows). Caller identity comes
+    /// from the access token alone; there is no owner field to (mis)trust — `set_savings_summary`
+    /// always writes to the authenticated caller's own row.
+    func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse
+
+    /// CLIENT UI PHASE — reads the Primary's shared Monthly Savings aggregate when
+    /// `primaryMonthlySavingsShared` is true, using the server-discovered `primaryUserId`. Same
+    /// "server-discovered id only" contract as `getSharedMonthlyPlan`.
+    func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse
+
+    /// USER B DASHBOARD PARITY — the Primary's own authoritative Dashboard aggregate upload
+    /// (`actualSpentThisMonth`/`monthlySpendRemaining`/`weeklySpendingLimit`/`actualSpentThisWeek`/
+    /// `weeklyRemaining`, already privacy-filtered to only explicitly-shared accounts, plus the
+    /// optional `monthlySpendingBudget` consistency figure). Caller identity comes from the access
+    /// token alone; `set_dashboard_summary` always writes to the authenticated caller's own row.
+    func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse
+
+    /// USER B DASHBOARD PARITY — reads the Primary's shared, authoritative Dashboard aggregate
+    /// when `primaryMonthlyPlanShared` is true (the SAME gate `getSharedMonthlyPlan` uses), using
+    /// the server-discovered `primaryUserId`. Never a second independent calculation — this is the
+    /// exact number the Primary's own Dashboard shows.
+    func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse
+
+    /// LOCAL DATA RESTORE — reads ALL of the caller's own Manual Accounts (+ transactions) from
+    /// Supabase, for recovering a device whose local SwiftData store was wiped (fresh install, new
+    /// device) but whose data had already synced to the cloud. Owner-only: no id of any kind is
+    /// ever passed in the request — identity comes entirely from the caller's own access token,
+    /// same as `getAccountRelatedOptions`. See `get-my-manual-accounts`'s own header for why this
+    /// needed a new endpoint (`getSharedManualAccountData` requires an id the caller doesn't have
+    /// yet after a wipe) while Monthly Plan restore reuses `getSharedMonthlyPlan(ownerUserId:)`
+    /// unmodified (self-access was already authorized there).
+    func getMyManualAccounts() async throws -> MyManualAccountsResponse
 }
 
 private struct HouseholdSharingErrorBody: Decodable {
@@ -76,6 +141,50 @@ struct SupabaseHouseholdSharingService: HouseholdSharingService {
 
     func acceptInvitation(token: String) async throws -> AcceptInvitationResponse {
         try await post("accept-household-invitation", body: InvitationTokenRequest(token: token))
+    }
+
+    func checkMyPendingInvitation() async throws -> MyPendingInvitationResponse {
+        try await post("get-my-pending-household-invitation", body: EmptyRequest())
+    }
+
+    func acceptInvitation(invitationId: UUID) async throws -> AcceptInvitationResponse {
+        try await post("accept-household-invitation", body: InvitationIdRequest(invitationId: invitationId.uuidString))
+    }
+
+    func declineInvitation(invitationId: UUID) async throws -> DeclineInvitationResponse {
+        try await post("decline-household-invitation", body: InvitationIdRequest(invitationId: invitationId.uuidString))
+    }
+
+    func getSharedConnectedAccountTransactions(plaidAccountId: UUID) async throws -> SharedConnectedAccountTransactionsResponse {
+        try await post("get-connected-account-transactions", body: PlaidAccountIdRequest(plaidAccountId: plaidAccountId.uuidString))
+    }
+
+    func getSharedManualAccountData(manualAccountId: UUID) async throws -> SharedManualAccountDataResponse {
+        try await post("get-manual-account-data", body: ManualAccountIdRequest(manualAccountId: manualAccountId.uuidString))
+    }
+
+    func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse {
+        try await post("get-monthly-plan-data", body: OwnerUserIdRequest(ownerUserId: ownerUserId.uuidString))
+    }
+
+    func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse {
+        try await post("upsert-savings-summary", body: request)
+    }
+
+    func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse {
+        try await post("get-monthly-savings-summary", body: OwnerUserIdRequest(ownerUserId: ownerUserId.uuidString))
+    }
+
+    func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse {
+        try await post("upsert-dashboard-summary", body: request)
+    }
+
+    func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse {
+        try await post("get-dashboard-summary", body: OwnerUserIdRequest(ownerUserId: ownerUserId.uuidString))
+    }
+
+    func getMyManualAccounts() async throws -> MyManualAccountsResponse {
+        try await post("get-my-manual-accounts", body: EmptyRequest())
     }
 
     private func post<Body: Encodable, Response: Decodable>(_ path: String, body: Body) async throws -> Response {

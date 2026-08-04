@@ -3,14 +3,19 @@ import SwiftUI
 /// Premium hero card for the Monthly Summary screen. Mirrors `WeeklyBudgetHeroCard`'s visual
 /// language, but a monthly goal is optional — with no goal set it shows total spend only and a
 /// neutral message instead of a progress ring. All numbers are passed in already computed by
-/// `BudgetCalculator`; this view does no spending math itself.
+/// `BudgetCalculator`/`MonthlyPlanCalculator`; this view does no spending math itself. Monthly
+/// Savings Goal is edited only from Monthly Plan — this card has no editing affordance for it.
 struct MonthlySummaryHeroCard: View {
     let monthInterval: DateInterval
     let spent: Decimal
     let goal: Decimal?
+    /// The canonical `MonthlyPlanCalculator.monthlySpendRemaining` result — `nil` when browsing a
+    /// past/future month (see `MonthlySummaryView.currentMonthSpendRemaining`), since that figure
+    /// is only meaningful for the live, current month. Never `goal - spent` — that formula is
+    /// gone; it incorrectly ignored income, fixed bills, and buffer.
+    let monthlySpendRemaining: Decimal?
     var isPrivacyModeEnabled: Bool = false
     var warningThreshold: Double = 0.70
-    var onEditGoal: () -> Void
 
     private var hasGoal: Bool { (goal ?? 0) > 0 }
 
@@ -56,8 +61,10 @@ struct MonthlySummaryHeroCard: View {
                         WeeklyProgressView(spent: spent, limit: goal, status: status ?? .good)
 
                         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                            amountRow(title: "Remaining", amount: BudgetCalculator.remaining(limit: goal, spent: spent), emphasized: true)
-                            amountRow(title: "Spent", amount: spent, emphasized: false)
+                            if let monthlySpendRemaining {
+                                amountRow(title: "Remaining", amount: monthlySpendRemaining, emphasized: true)
+                            }
+                            amountRow(title: "Spent", amount: spent, emphasized: monthlySpendRemaining == nil)
                             amountRow(title: "Goal", amount: goal, emphasized: false)
                         }
                         Spacer(minLength: 0)
@@ -85,17 +92,6 @@ struct MonthlySummaryHeroCard: View {
                         }
                     }
                 }
-
-                Button(action: onEditGoal) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(hasGoal ? "Edit Monthly Goal" : "Set Monthly Goal")
-                            .font(Theme.captionFont)
-                    }
-                    .foregroundStyle(Theme.accent)
-                }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -117,13 +113,19 @@ struct MonthlySummaryHeroCard: View {
 }
 
 #Preview("With Goal") {
-    MonthlySummaryHeroCard(monthInterval: DateRangeHelper.currentMonthRange(), spent: 890, goal: 1400) {}
+    MonthlySummaryHeroCard(monthInterval: DateRangeHelper.currentMonthRange(), spent: 890, goal: 1400, monthlySpendRemaining: 610)
         .padding()
         .background(Theme.backgroundGradient)
 }
 
 #Preview("No Goal") {
-    MonthlySummaryHeroCard(monthInterval: DateRangeHelper.currentMonthRange(), spent: 890, goal: nil) {}
+    MonthlySummaryHeroCard(monthInterval: DateRangeHelper.currentMonthRange(), spent: 890, goal: nil, monthlySpendRemaining: nil)
+        .padding()
+        .background(Theme.backgroundGradient)
+}
+
+#Preview("Past Month") {
+    MonthlySummaryHeroCard(monthInterval: DateRangeHelper.lastMonthRange(), spent: 890, goal: 1400, monthlySpendRemaining: nil)
         .padding()
         .background(Theme.backgroundGradient)
 }

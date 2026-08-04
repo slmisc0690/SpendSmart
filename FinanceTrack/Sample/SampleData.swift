@@ -81,8 +81,11 @@ enum SampleData {
             IncomeSource.self,
             RecurringExpense.self,
             MonthlyPlanSettings.self,
+            SavingsEntry.self,
         ])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        // See UserDataStoreManager.makeUserContainer's own header for why cloudKitDatabase: .none
+        // is required on every ModelConfiguration once the app carries an iCloud entitlement.
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         return try! ModelContainer(for: schema, configurations: [config])
     }
 }

@@ -18,6 +18,20 @@ final class AutoBackupManager {
     private var observer: NSObjectProtocol?
     private var debounceTask: Task<Void, Never>?
     private let debounceDelay: Duration
+    /// Bumped by every `startObserving`/`stopObserving` call — captured by value into each
+    /// notification callback and each debounced `Task` at the moment they're created, then
+    /// re-checked immediately before touching `context`. This is the fix for a proven sign-out/
+    /// sign-in crash ("This model instance was destroyed by calling ModelContext.reset...
+    /// BudgetSettings/p1"): `ModelContext.didSave` was registered with `queue: nil`, so SwiftData
+    /// could invoke the callback on a background thread, racing `stopObserving()`'s main-thread
+    /// `removeObserver` — an already-in-flight delivery (or a debounce `Task` it had already
+    /// spawned) could still reach `performBackup` and fetch `BudgetSettings` from the outgoing
+    /// user's `ModelContext` after `userDataStore.detach()` released its owning `ModelContainer`.
+    /// Moving to `queue: .main` closes the cross-thread half of the race; this generation check
+    /// closes the remainder (a callback/Task already queued on the main thread before
+    /// `stopObserving()` ran). Not a timing delay — a structural "is this still the current
+    /// observation" check, so a stale callback becomes a guaranteed no-op instead of a race.
+    private var generation = 0
 
     init(debounceDelay: Duration = .seconds(3)) {
         self.debounceDelay = debounceDelay
@@ -38,12 +52,16 @@ final class AutoBackupManager {
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
+        generation += 1
+        let observationGeneration = generation
+        // `queue: .main` — see `generation`'s own doc comment for why `queue: nil` (delivery on
+        // whatever thread SwiftData posts from) was the root cause of a real crash.
         observer = NotificationCenter.default.addObserver(
             forName: ModelContext.didSave,
             object: context,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
-            self?.scheduleBackup(context: context)
+            self?.scheduleBackup(context: context, generation: observationGeneration)
         }
     }
 
@@ -60,22 +78,30 @@ final class AutoBackupManager {
         }
         debounceTask?.cancel()
         debounceTask = nil
+        // Invalidates any callback/Task created under the outgoing observation before this call
+        // — see `generation`'s own doc comment.
+        generation += 1
     }
 
     /// Cancels any pending debounced backup and restarts the debounce window — repeated saves in
     /// quick succession (e.g. typing) keep pushing the actual write back rather than firing one
-    /// per keystroke.
-    private func scheduleBackup(context: ModelContext) {
+    /// per keystroke. No-ops if `generation` has already moved on from `callGeneration` (this
+    /// observation was stopped after the notification fired but before this ran).
+    private func scheduleBackup(context: ModelContext, generation callGeneration: Int) {
+        guard callGeneration == generation else { return }
         debounceTask?.cancel()
         debounceTask = Task { [weak self, debounceDelay] in
             try? await Task.sleep(for: debounceDelay)
             guard !Task.isCancelled else { return }
-            await self?.performBackup(context: context)
+            await self?.performBackup(context: context, generation: callGeneration)
         }
     }
 
     @MainActor
-    private func performBackup(context: ModelContext) async {
+    private func performBackup(context: ModelContext, generation callGeneration: Int) async {
+        // No-ops if `generation` has already moved on from `callGeneration` — the outgoing user's
+        // context may already be orphaned by the time this debounce window elapses.
+        guard callGeneration == generation else { return }
         do {
             let settings = try context.fetch(FetchDescriptor<BudgetSettings>()).first
             guard settings?.autoBackupEnabled ?? true else { return }

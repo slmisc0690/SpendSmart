@@ -17,6 +17,19 @@
 // 0013's set_sharing_permission also performs at the database level, so a foreign item_id is
 // rejected at BOTH layers independently, never relying on either alone.
 //
+// PHASE 8D — SECONDARY CONNECTED/MANUAL ACCOUNT SHARING: an active Secondary caller may ALSO
+// reach this endpoint, but only for category="connectedAccounts" OR category="manualAccounts",
+// each with a non-null item_id they themselves own — never a global toggle, never monthlyPlan
+// (this phase's own locked "Secondary gets only Share Connected Account + Share Manual Account"
+// requirement). Each category is delegated to its own migration-0015 function
+// (set_secondary_connected_account_sharing / set_secondary_manual_account_sharing), both of which
+// independently re-derive the caller's own household from their ACTIVE SECONDARY membership
+// (never trusted from the client) and perform their own item-ownership re-check below — the
+// connectedAccounts check mirrors the Primary path's own plaid_accounts/plaid_items join;
+// manualAccounts checks manual_accounts.owner_user_id directly, since that table carries its own
+// owner column. Every other Secondary request (global, monthlyPlan, or no item_id) is rejected
+// with 403, matching the existing Primary-only 403 shape.
+//
 // Request body: { category: "connectedAccounts"|"manualAccounts"|"monthlyPlan",
 //                  item_id: string|null, is_shared: boolean }
 
@@ -69,6 +82,60 @@ Deno.serve(async (req) => {
     if (stateError) throw stateError;
 
     const state = stateData as Record<string, unknown> | null;
+
+    if (state?.role === "secondary") {
+      // PHASE 8D — the ONLY writes a Secondary may ever make through this endpoint: their own
+      // Connected Account or their own Manual Account, per-item, nothing else.
+      if (parsed.itemId === null || (parsed.category !== "connectedAccounts" && parsed.category !== "manualAccounts")) {
+        return jsonResponse({ error: "A Secondary may only share their own individual Connected or Manual Accounts" }, 403);
+      }
+
+      if (parsed.category === "connectedAccounts") {
+        const { data: ownedAccount, error: ownedAccountError } = await supabase
+          .from("plaid_accounts")
+          .select("id, plaid_items!inner(user_id)")
+          .eq("id", parsed.itemId)
+          .eq("plaid_items.user_id", userId)
+          .maybeSingle();
+        if (ownedAccountError) throw ownedAccountError;
+        if (!ownedAccount) {
+          return jsonResponse({ error: "item_id is not a Connected Account you own" }, 403);
+        }
+
+        const { data: resultId, error: setError } = await supabase.rpc("set_secondary_connected_account_sharing", {
+          p_requesting_user_id: userId,
+          p_item_id: parsed.itemId,
+          p_is_shared: is_shared,
+        });
+        if (setError) throw setError;
+
+        logPlaidOperation({ operation: "update-sharing-permission", outcome: "secondary_connected_success" });
+        return jsonResponse({ sharing_permission_id: resultId });
+      }
+
+      // category === "manualAccounts"
+      const { data: ownedManualAccount, error: ownedManualAccountError } = await supabase
+        .from("manual_accounts")
+        .select("id")
+        .eq("id", parsed.itemId)
+        .eq("owner_user_id", userId)
+        .maybeSingle();
+      if (ownedManualAccountError) throw ownedManualAccountError;
+      if (!ownedManualAccount) {
+        return jsonResponse({ error: "item_id is not a Manual Account you own" }, 403);
+      }
+
+      const { data: resultId, error: setError } = await supabase.rpc("set_secondary_manual_account_sharing", {
+        p_requesting_user_id: userId,
+        p_item_id: parsed.itemId,
+        p_is_shared: is_shared,
+      });
+      if (setError) throw setError;
+
+      logPlaidOperation({ operation: "update-sharing-permission", outcome: "secondary_manual_success" });
+      return jsonResponse({ sharing_permission_id: resultId });
+    }
+
     if (!state?.household_id || state.role !== "primary") {
       return jsonResponse({ error: "Only an active household Primary may update sharing permissions" }, 403);
     }

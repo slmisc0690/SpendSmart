@@ -19,6 +19,7 @@ struct DataBackupView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(AutoBackupManager.self) private var autoBackupManager
+    @Environment(CloudBackupManager.self) private var cloudBackupManager
 
     @State private var manualExportURL: URL?
     @State private var isPresentingFileImporter = false
@@ -28,6 +29,13 @@ struct DataBackupView: View {
     @State private var alertMessage = ""
     @State private var isPresentingAlert = false
     @State private var autoBackupFiles: [URL] = []
+    /// `nil` = not yet checked; `[]` (empty, non-nil) = iCloud Drive is on but no daily backup has
+    /// been written yet; a populated array is newest-day-first (see
+    /// `SpendSmartBackupService.cloudBackupFilenames`'s own header for why filename sort order
+    /// already matches date order). Distinguishing `nil` from `[]` is what lets
+    /// `iCloudBackupsSection` show "iCloud Drive isn't available" only when it's genuinely
+    /// unreachable, never merely because a fresh install hasn't backed up yet.
+    @State private var cloudBackupFilenames: [String]?
 
     private var settings: BudgetSettings? { settingsList.first }
 
@@ -47,6 +55,7 @@ struct DataBackupView: View {
                         importPreviewSection(pendingDocument)
                     }
                     automaticBackupsSection
+                    iCloudBackupsSection
                 }
                 .padding(.vertical, Theme.Spacing.lg)
             }
@@ -59,6 +68,7 @@ struct DataBackupView: View {
             }
             .toolbarBackground(.hidden, for: .navigationBar)
             .task { refreshAutoBackupFiles() }
+            .task { refreshCloudBackupFilenames() }
             .onAppear { prepareManualExport() }
             .fileImporter(isPresented: $isPresentingFileImporter, allowedContentTypes: [.json]) { result in
                 switch result {
@@ -264,6 +274,119 @@ struct DataBackupView: View {
         }
     }
 
+    // MARK: - iCloud daily backups
+
+    /// One row per calendar day with a saved iCloud snapshot (newest first, at most
+    /// `retentionDaysBinding`'s own current value's worth of distinct days) — tapping a day loads
+    /// it into the SAME `pendingDocument`/`importPreviewSection`/replace-confirmation flow every
+    /// other restore path in this screen already uses, so picking a day previews counts before
+    /// committing exactly like every other restore option here.
+    private var iCloudBackupsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "iCloud Daily Backups")
+
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    Text("A snapshot is saved to your own iCloud account whenever your data changes — one per day. Restoring pulls a specific day back onto this device.")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
+
+                    Stepper(value: retentionDaysBinding, in: 1...365) {
+                        HStack {
+                            Text("Days of Backups to Save")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textPrimary)
+                            Spacer()
+                            Text("\(retentionDaysBinding.wrappedValue)")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+
+                    if let lastBackupError = cloudBackupManager.lastBackupError {
+                        Text("Last attempt failed: \(lastBackupError)")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(Theme.statusOver)
+                    }
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    switch cloudBackupFilenames {
+                    case nil:
+                        Text("Checking iCloud…")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    case .some(let filenames) where filenames.isEmpty:
+                        Text(CloudBackupManager.ubiquityBackupDirectory() == nil
+                             ? "iCloud Drive isn't available for SpendSmart. Make sure you're signed into iCloud and iCloud Drive is turned on for this app in Settings."
+                             : "No iCloud backups have been saved yet.")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    case .some(let filenames):
+                        ForEach(Array(filenames.enumerated()), id: \.element) { index, filename in
+                            if index > 0 {
+                                Divider().overlay(Theme.cardStroke)
+                            }
+                            Button {
+                                loadCloudBackup(filename: filename)
+                            } label: {
+                                actionRow(
+                                    icon: "icloud.and.arrow.down",
+                                    title: SpendSmartBackupService.cloudBackupDate(fromFilename: filename)?.formatted(date: .abbreviated, time: .omitted) ?? filename,
+                                    subtitle: "Restore this day's snapshot"
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    /// Same get/set-`BudgetSettings` pattern `automaticBackupsSection`'s own "Auto Backup Enabled"
+    /// toggle uses right below this section — creates the settings row on first write if none
+    /// exists yet, otherwise updates the existing one. Reads/writes through
+    /// `CloudBackupManager.normalizedRetentionDays` so the displayed value always matches what
+    /// `performBackup` will actually use (never showing a raw `nil`/0/negative stored value the
+    /// backup itself would silently treat as "use the default").
+    private var retentionDaysBinding: Binding<Int> {
+        Binding(
+            get: { CloudBackupManager.normalizedRetentionDays(settings?.cloudBackupRetentionDays) },
+            set: { newValue in
+                if let settings {
+                    settings.cloudBackupRetentionDays = newValue
+                    settings.updatedAt = .now
+                } else {
+                    let created = BudgetSettings(cloudBackupRetentionDays: newValue)
+                    modelContext.insert(created)
+                }
+            }
+        )
+    }
+
+    private func refreshCloudBackupFilenames() {
+        guard let directory = CloudBackupManager.ubiquityBackupDirectory() else {
+            cloudBackupFilenames = []
+            return
+        }
+        cloudBackupFilenames = SpendSmartBackupService.cloudBackupFilenames(in: directory)
+    }
+
+    private func loadCloudBackup(filename: String) {
+        guard let directory = CloudBackupManager.ubiquityBackupDirectory() else {
+            showAlert(title: "iCloud Unavailable", message: "iCloud Drive isn't available right now.")
+            return
+        }
+        do {
+            let data = try Data(contentsOf: directory.appendingPathComponent(filename))
+            pendingDocument = try SpendSmartBackupService.decode(data)
+        } catch {
+            showAlert(title: "Invalid Backup", message: "This iCloud backup couldn't be read.")
+        }
+    }
+
     @ViewBuilder
     private func actionRow(icon: String, title: String, subtitle: String) -> some View {
         HStack(spacing: Theme.Spacing.sm) {
@@ -352,4 +475,5 @@ struct DataBackupView: View {
     DataBackupView()
         .modelContainer(SampleData.previewContainer)
         .environment(AutoBackupManager())
+        .environment(CloudBackupManager())
 }

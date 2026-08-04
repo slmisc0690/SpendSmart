@@ -22,13 +22,13 @@ final class UserDataIsolationTests: XCTestCase {
     ])
 
     private func makeInMemoryContext() -> ModelContext {
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try! ModelContainer(for: Self.schema, configurations: [config])
         return ModelContext(container)
     }
 
     private func makeInMemoryContainer() -> ModelContainer {
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         return try! ModelContainer(for: Self.schema, configurations: [config])
     }
 
@@ -91,6 +91,41 @@ final class UserDataIsolationTests: XCTestCase {
         let accountsInAAgain = try ModelContext(containerAAgain).fetch(FetchDescriptor<Account>())
         XCTAssertEqual(accountsInAAgain.count, 1, "returning to User A must find their data intact")
         XCTAssertEqual(accountsInAAgain.first?.name, "User A's Checking")
+    }
+
+    /// POST-PHASE-10 CORRECTION regression test — a real device crash ("This model instance was
+    /// destroyed by calling ModelContext.reset... PersistentIdentifier: BudgetSettings/p1")
+    /// occurred switching from User B back to User A. `BudgetSettings` specifically (not just
+    /// `Account`, which `testResolveCreatesIsolatedStoresPerUser` already covers) must be fully
+    /// isolated across an A→B→A switch: User B must never see User A's settings, and User A's own
+    /// settings must survive intact after `detach()`+`resolve()` twice.
+    func testBudgetSettingsIsolatedAcrossUserSwitchAndDetach() async throws {
+        let manager = UserDataStoreManager(
+            defaults: makeTestDefaults(),
+            userStoresBaseDirectoryOverride: makeTempDirectory(),
+            legacyContainerProvider: { self.makeInMemoryContainer() }
+        )
+        let userA = UUID()
+        let userB = UUID()
+
+        await manager.resolve(for: userA)
+        let containerA = try XCTUnwrap(manager.modelContainer)
+        let contextA = ModelContext(containerA)
+        contextA.insert(BudgetSettings(weeklySpendingLimit: 400))
+        try contextA.save()
+
+        manager.detach()
+        await manager.resolve(for: userB)
+        let containerB = try XCTUnwrap(manager.modelContainer)
+        let settingsInB = try ModelContext(containerB).fetch(FetchDescriptor<BudgetSettings>())
+        XCTAssertTrue(settingsInB.isEmpty, "User B must not see User A's BudgetSettings row")
+
+        manager.detach()
+        await manager.resolve(for: userA)
+        let containerAAgain = try XCTUnwrap(manager.modelContainer)
+        let settingsInAAgain = try ModelContext(containerAAgain).fetch(FetchDescriptor<BudgetSettings>())
+        XCTAssertEqual(settingsInAAgain.count, 1, "returning to User A must find their BudgetSettings intact")
+        XCTAssertEqual(settingsInAAgain.first?.weeklySpendingLimit, 400)
     }
 
     func testUserSwitchDoesNotReuseModelContainer() async throws {
@@ -403,7 +438,7 @@ final class UserDataIsolationTests: XCTestCase {
         let userA = UUID()
 
         let storeURL = try manager.storeURL(for: userA)
-        let seedConfig = ModelConfiguration(schema: Self.schema, url: storeURL)
+        let seedConfig = ModelConfiguration(schema: Self.schema, url: storeURL, cloudKitDatabase: .none)
         let seedContainer = try ModelContainer(for: Self.schema, configurations: [seedConfig])
         let seedContext = ModelContext(seedContainer)
         let staleDate = staleUTCMidnightJuly18()
@@ -481,7 +516,7 @@ final class UserDataIsolationTests: XCTestCase {
         manager.detach()
 
         let storeURLB = try manager.storeURL(for: userB)
-        let seedConfig = ModelConfiguration(schema: Self.schema, url: storeURLB)
+        let seedConfig = ModelConfiguration(schema: Self.schema, url: storeURLB, cloudKitDatabase: .none)
         let seedContainer = try ModelContainer(for: Self.schema, configurations: [seedConfig])
         let seedContext = ModelContext(seedContainer)
         let staleDate = staleUTCMidnightJuly18()
@@ -502,5 +537,110 @@ final class UserDataIsolationTests: XCTestCase {
                 .first { $0.externalTransactionId == "user-b-stale-row" }
         )
         XCTAssertEqual(Calendar.current.component(.day, from: reloaded.date), 18, "each user must get their own one-time repair sweep, independent of any other user already swept on this device")
+    }
+
+    // MARK: - Favorites Bar per-user isolation
+
+    /// Required test 9/10/11/12 — User A and User B must maintain completely different favorite
+    /// selections AND orders; signing out must never expose the outgoing user's favorites; signing
+    /// back in as User A must restore exactly what User A left. Mirrors
+    /// `testBudgetSettingsIsolatedAcrossUserSwitchAndDetach` exactly — same real `resolve`/`detach`
+    /// flow, same per-user isolated store, no special-casing needed since `FavoritesSettings`
+    /// carries no `userId` of its own (see that model's own header).
+    func testFavoritesSettingsIsolatedAcrossUserSwitchAndDetach() async throws {
+        let manager = UserDataStoreManager(
+            defaults: makeTestDefaults(),
+            userStoresBaseDirectoryOverride: makeTempDirectory(),
+            legacyContainerProvider: { self.makeInMemoryContainer() }
+        )
+        let userA = UUID()
+        let userB = UUID()
+
+        await manager.resolve(for: userA)
+        let containerA = try XCTUnwrap(manager.modelContainer)
+        let contextA = ModelContext(containerA)
+        let favoritesA = FavoritesSettings(orderedDestinationIDs: [
+            FavoriteDestinationID.backup.rawValue,
+            FavoriteDestinationID.insights.rawValue,
+        ])
+        contextA.insert(favoritesA)
+        try contextA.save()
+
+        manager.detach()
+        await manager.resolve(for: userB)
+        let containerB = try XCTUnwrap(manager.modelContainer)
+        let favoritesInB = try ModelContext(containerB).fetch(FetchDescriptor<FavoritesSettings>())
+        XCTAssertTrue(favoritesInB.isEmpty, "User B must not see any row from User A's favorites — no favorites must flash from the previous account")
+
+        // User B selects a DIFFERENT set, in a DIFFERENT order, proving count/selection/order can
+        // all diverge independently between the two users.
+        let contextB = ModelContext(containerB)
+        let favoritesB = FavoritesSettings(orderedDestinationIDs: [
+            FavoriteDestinationID.connectedAccounts.rawValue,
+            FavoriteDestinationID.monthlyPlan.rawValue,
+            FavoriteDestinationID.addToSavings.rawValue,
+        ])
+        contextB.insert(favoritesB)
+        try contextB.save()
+
+        manager.detach()
+        await manager.resolve(for: userA)
+        let containerAAgain = try XCTUnwrap(manager.modelContainer)
+        let favoritesInAAgain = try ModelContext(containerAAgain).fetch(FetchDescriptor<FavoritesSettings>())
+        XCTAssertEqual(favoritesInAAgain.count, 1, "returning to User A must find their own FavoritesSettings row, and only theirs")
+        XCTAssertEqual(favoritesInAAgain.first?.orderedDestinationIDs, [
+            FavoriteDestinationID.backup.rawValue,
+            FavoriteDestinationID.insights.rawValue,
+        ], "User A's exact selection AND order must be restored unchanged")
+
+        manager.detach()
+        await manager.resolve(for: userB)
+        let containerBAgain = try XCTUnwrap(manager.modelContainer)
+        let favoritesInBAgain = try ModelContext(containerBAgain).fetch(FetchDescriptor<FavoritesSettings>())
+        XCTAssertEqual(favoritesInBAgain.first?.orderedDestinationIDs, [
+            FavoriteDestinationID.connectedAccounts.rawValue,
+            FavoriteDestinationID.monthlyPlan.rawValue,
+            FavoriteDestinationID.addToSavings.rawValue,
+        ], "User B's own distinct selection AND order must remain intact and independent of User A's")
+        XCTAssertNotEqual(
+            favoritesInAAgain.first?.orderedDestinationIDs,
+            favoritesInBAgain.first?.orderedDestinationIDs,
+            "User A and User B must maintain completely different favorite selections/orders"
+        )
+    }
+
+    /// Corrective-pass Part 11 — an EXISTING per-user store (created before this user ever visited
+    /// Favorites, exactly the real-device scenario: an install that predates a fix, or simply a
+    /// user who has never opened Profile ▸ Favorites) has zero `FavoritesSettings` rows. Confirms
+    /// the store still opens successfully, a canonical record can be created via the SAME
+    /// `resolveCanonicalRecord` path the real screen uses, the save durably persists, and
+    /// REOPENING the container (detach + resolve again, not just re-reading the same in-memory
+    /// object) restores the exact selection — proving this isn't only true against a fresh
+    /// in-memory test store.
+    func testExistingDeviceStoreWithNoFavoritesRowCanCreateAndPersistAcrossReopen() async throws {
+        let manager = UserDataStoreManager(
+            defaults: makeTestDefaults(),
+            userStoresBaseDirectoryOverride: makeTempDirectory(),
+            legacyContainerProvider: { self.makeInMemoryContainer() }
+        )
+        let userId = UUID()
+
+        await manager.resolve(for: userId)
+        let container = try XCTUnwrap(manager.modelContainer)
+        let context = ModelContext(container)
+
+        let existingRows = try context.fetch(FetchDescriptor<FavoritesSettings>())
+        XCTAssertTrue(existingRows.isEmpty, "a store that predates this user ever opening Favorites must have zero rows")
+
+        let record = FavoritesSettings.resolveCanonicalRecord(existing: existingRows, in: context)
+        record.addFavorite(.insights)
+        try context.save()
+
+        manager.detach()
+        await manager.resolve(for: userId)
+        let reopenedContainer = try XCTUnwrap(manager.modelContainer)
+        let reopenedRows = try ModelContext(reopenedContainer).fetch(FetchDescriptor<FavoritesSettings>())
+        XCTAssertEqual(reopenedRows.count, 1, "reopening the store must find exactly the one canonical record, not a fresh empty one")
+        XCTAssertEqual(reopenedRows.first?.validDestinationIDs, [.insights], "the selection must survive the store being closed and reopened, not just remain in memory")
     }
 }

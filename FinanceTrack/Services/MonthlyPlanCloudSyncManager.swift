@@ -44,6 +44,10 @@ final class MonthlyPlanCloudSyncManager {
     private var debounceTask: Task<Void, Never>?
     private let debounceDelay: Duration
     private let backend: MonthlyPlanSyncService
+    /// Bumped by every `startObserving`/`stopObserving` call — same proven fix as
+    /// `AutoBackupManager.generation`/`ManualDataCloudSyncManager.generation` (see either's own
+    /// doc comment for the full sign-out/sign-in race this closes).
+    private var generation = 0
 
     init(debounceDelay: Duration = .seconds(3), backend: MonthlyPlanSyncService = SupabaseMonthlyPlanSyncService()) {
         self.debounceDelay = debounceDelay
@@ -63,14 +67,16 @@ final class MonthlyPlanCloudSyncManager {
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
+        generation += 1
+        let observationGeneration = generation
         observer = NotificationCenter.default.addObserver(
             forName: ModelContext.didSave,
             object: context,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
-            self?.scheduleSync(context: context, userId: userId, immediate: false)
+            self?.scheduleSync(context: context, userId: userId, immediate: false, generation: observationGeneration)
         }
-        scheduleSync(context: context, userId: userId, immediate: true)
+        scheduleSync(context: context, userId: userId, immediate: true, generation: observationGeneration)
     }
 
     /// Stops observing entirely and cancels any pending debounced sync — called on sign-out,
@@ -83,21 +89,24 @@ final class MonthlyPlanCloudSyncManager {
         }
         debounceTask?.cancel()
         debounceTask = nil
+        generation += 1
     }
 
-    private func scheduleSync(context: ModelContext, userId: UUID, immediate: Bool) {
+    private func scheduleSync(context: ModelContext, userId: UUID, immediate: Bool, generation callGeneration: Int) {
+        guard callGeneration == generation else { return }
         debounceTask?.cancel()
         debounceTask = Task { [weak self, debounceDelay] in
             if !immediate {
                 try? await Task.sleep(for: debounceDelay)
                 guard !Task.isCancelled else { return }
             }
-            await self?.performSync(context: context, userId: userId)
+            await self?.performSync(context: context, userId: userId, generation: callGeneration)
         }
     }
 
     @MainActor
-    private func performSync(context: ModelContext, userId: UUID) async {
+    private func performSync(context: ModelContext, userId: UUID, generation callGeneration: Int) async {
+        guard callGeneration == generation else { return }
         do {
             // Fetch-then-filter in plain Swift, not an enum/UUID-equality-on-optional inside
             // #Predicate — matching PlaidLocalDataCleanupService's/ManualDataCloudSyncManager's own

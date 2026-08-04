@@ -17,6 +17,16 @@ final class MonthlyPlanSettings {
     /// limit straight into `BudgetSettings.weeklySpendingLimit`. When false (default), the user
     /// must tap "Use Recommended Weekly Limit" explicitly.
     var autoUpdateWeeklyBudgetFromPlan: Bool
+    /// MONTHLY PLAN + SCENARIO CORRECTIONS PHASE (new, additive, defaults to `nil`) — the user's
+    /// manually-set Planned Weekly Spending amount, distinct from `BudgetSettings.weeklySpendingLimit`
+    /// (a DERIVED, non-user-editable actual-spending figure — see that field's own header;
+    /// investigation confirmed it is not the same concept and manual editing of it was
+    /// intentionally removed in a prior phase). `nil` means "automatic" (Average Monthly Flexible
+    /// Spending ÷ 4, see `MonthlyPlanCalculator.automaticPlannedWeeklySpending`) — NEVER a
+    /// truthy/nonzero check to distinguish "no override" from a deliberately configured `$0.00`
+    /// override, matching the same `Decimal?` convention already established for
+    /// `monthlySavingsGoal`'s Scenario override.
+    var plannedWeeklySpendingOverride: Decimal?
     var createdAt: Date
     var updatedAt: Date
 
@@ -32,6 +42,7 @@ final class MonthlyPlanSettings {
         bufferAmount: Decimal? = nil,
         useRecommendedWeeklyBudget: Bool = false,
         autoUpdateWeeklyBudgetFromPlan: Bool = false,
+        plannedWeeklySpendingOverride: Decimal? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now,
         ownerUserID: UUID? = nil
@@ -41,6 +52,7 @@ final class MonthlyPlanSettings {
         self.bufferAmount = bufferAmount
         self.useRecommendedWeeklyBudget = useRecommendedWeeklyBudget
         self.autoUpdateWeeklyBudgetFromPlan = autoUpdateWeeklyBudgetFromPlan
+        self.plannedWeeklySpendingOverride = plannedWeeklySpendingOverride
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.ownerUserID = ownerUserID

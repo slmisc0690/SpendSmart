@@ -5,6 +5,18 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+# "Debug Preview" — a third build configuration, sibling to the standard Debug/Release pair, that
+# exists SOLELY to let a Debug build compile against the phase2-sharing-test Preview Supabase
+# project instead of Production. It is of type `debug` (so it still gets DEBUG-conditional code,
+# symbols, etc.) and is additionally distinguished by the SPENDSMART_PREVIEW_BACKEND compile
+# condition set below, under `targets.FinanceTrack.settings.configs`. Release is untouched and can
+# never see this configuration or condition — see SupabaseConfig.swift's own `#if DEBUG &&
+# SPENDSMART_PREVIEW_BACKEND` guard for the matching source-level protection.
+configs:
+  Debug: debug
+  Debug Preview: debug
+  Release: release
+
 packages:
   LinkKit:
     url: https://github.com/plaid/plaid-link-ios-spm.git
@@ -55,6 +67,14 @@ targets:
         ENABLE_PREVIEWS: true
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 2UZJX3TEG4
+      configs:
+        # Only this one configuration ever sets SPENDSMART_PREVIEW_BACKEND — Release's settings
+        # are untouched, so Release can never resolve to Preview regardless of scheme. `$(inherited)`
+        # plus an explicit `DEBUG` keeps the DEBUG condition alongside it (a target-level override
+        # would otherwise replace, not add to, the DEBUG value xcodegen's `debug` config type sets
+        # at the project level) — see SupabaseConfig.swift's `#if DEBUG && SPENDSMART_PREVIEW_BACKEND`.
+        "Debug Preview":
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DEBUG SPENDSMART_PREVIEW_BACKEND"
     dependencies:
       - package: LinkKit
       - package: Supabase
@@ -66,11 +86,26 @@ targets:
     # PlaidOAuthReturn for the app-side recognition boundary. xcodegen writes the actual
     # .entitlements file at the path below; do not hand-edit it, it is regenerated on every
     # `xcodegen generate`.
+    #
+    # ICLOUD BACKUP — CloudBackupManager writes/prunes dated JSON snapshots into this app's own
+    # iCloud Documents ubiquity container (never CloudKit records — plain files, matching
+    # SpendSmartBackupService's existing local-backup shape exactly). Requires a paid Apple
+    # Developer Program membership to register the `iCloud.com.scott.financetrack` container; on
+    # first build from Xcode itself (not a bare `xcodebuild` CLI run) with a signed-in Apple ID,
+    # Xcode may need to auto-register this container against the team — if a CLI build ever fails
+    # here on code signing/provisioning, open the project in Xcode once and let Signing &
+    # Capabilities resolve it, then CLI builds work again.
     entitlements:
       path: FinanceTrack/FinanceTrack.entitlements
       properties:
         com.apple.developer.associated-domains:
           - applinks:plaid.sldevapps.com
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.scott.financetrack
+        com.apple.developer.icloud-services:
+          - CloudDocuments
+        com.apple.developer.ubiquity-container-identifiers:
+          - iCloud.com.scott.financetrack
 
   FinanceTrackTests:
     type: bundle.unit-test
@@ -96,5 +131,19 @@ schemes:
       config: Debug
       targets:
         - FinanceTrackTests
+    archive:
+      config: Release
+  # DEBUG-ONLY, Preview-backend counterpart to the scheme above — Run always uses the "Debug
+  # Preview" configuration (SPENDSMART_PREVIEW_BACKEND set, see targets.FinanceTrack.settings.configs
+  # above), so selecting this scheme is the only way to build against phase2-sharing-test. No test
+  # action: unit tests keep running under the normal FinanceTrack scheme/Debug config, unaffected by
+  # backend selection. Archive still resolves to Release — even archiving from this scheme can never
+  # ship a Preview-pointed build.
+  FinanceTrack Preview:
+    build:
+      targets:
+        FinanceTrack: all
+    run:
+      config: "Debug Preview"
     archive:
       config: Release

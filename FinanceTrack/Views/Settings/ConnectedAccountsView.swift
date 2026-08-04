@@ -1320,9 +1320,13 @@ struct ConnectedAccountsView: View {
         #if DEBUG
         print("[SpendSmartBuild] transaction sync started")
         #endif
-        let result = try await backend.syncTransactions(connectionId: connectionId)
-        let outcome = try PlaidTransactionImportService.applySync(result, context: modelContext)
-        plaidConnection.markSynced(connectionId: connectionId)
+        // DASHBOARD / CONNECTED ACCOUNTS REFRESH PARITY — delegates to the same shared
+        // `PlaidConnectionManager.syncAndImportTransactions` every other manual refresh entry
+        // point (Dashboard, normal and DEBUG-unlimited) now uses, rather than this view keeping
+        // its own separate copy of the sync/import/markSynced sequence. See that method's own doc
+        // comment for why a single shared implementation replaced three independently-maintained
+        // copies of the same steps.
+        let outcome = try await plaidConnection.syncAndImportTransactions(connectionId: connectionId, context: modelContext)
         lastSyncSummaryByConnectionId[connectionId] = Self.summaryMessage(for: outcome)
         #if DEBUG
         print("[SpendSmartBuild] transaction sync completed: inserted \(outcome.insertedCount), updated \(outcome.updatedCount), removed \(outcome.removedCount), mergedFromPending \(outcome.mergedFromPendingCount)")

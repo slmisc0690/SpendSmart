@@ -1,12 +1,16 @@
 import SwiftUI
 
 /// Hero card on the dashboard: current week range, spending progress ring, remaining/spent/limit
-/// figures, and a plain-English status message.
+/// figures, a Monthly Remaining running total, and a plain-English status message.
 struct SpendingCardView: View {
     let spent: Decimal
     let limit: Decimal
     let status: SpendingStatus
     let weekInterval: DateInterval
+    /// Canonical `MonthlyPlanCalculator.monthlySpendRemaining` result — see
+    /// `DashboardView.monthlySpendRemaining`. Passed in already computed; this view does no
+    /// money math of its own beyond `remaining` below.
+    let monthlyRemaining: Decimal
     var isPrivacyModeEnabled: Bool = false
 
     private var remaining: Decimal {
@@ -36,6 +40,7 @@ struct SpendingCardView: View {
                         amountRow(title: "Remaining", amount: remaining, emphasized: true)
                         amountRow(title: "Spent", amount: spent, emphasized: false)
                         amountRow(title: "Limit", amount: limit, emphasized: false)
+                        amountRow(title: "Monthly Remaining", amount: monthlyRemaining, emphasized: false)
                     }
                     Spacer(minLength: 0)
                 }
@@ -64,7 +69,7 @@ struct SpendingCardView: View {
 }
 
 #Preview {
-    SpendingCardView(spent: 210, limit: 350, status: .warning, weekInterval: DateRangeHelper.currentWeekRange())
+    SpendingCardView(spent: 210, limit: 350, status: .warning, weekInterval: DateRangeHelper.currentWeekRange(), monthlyRemaining: 2500)
         .padding()
         .background(Theme.backgroundGradient)
 }

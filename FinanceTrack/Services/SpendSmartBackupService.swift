@@ -274,6 +274,11 @@ enum SpendSmartBackupService {
         let bufferAmount: DecimalValue?
         let useRecommendedWeeklyBudget: Bool
         let autoUpdateWeeklyBudgetFromPlan: Bool
+        /// MONTHLY PLAN + SCENARIO CORRECTIONS PHASE (Part 14, additive, optional) — `nil` decodes
+        /// cleanly from any backup written before this field existed (plain `Codable` synthesis
+        /// treats a missing key as `nil` for an `Optional` property), matching `bufferAmount`'s own
+        /// established pattern.
+        let plannedWeeklySpendingOverride: DecimalValue?
         let createdAt: Date
         let updatedAt: Date
     }
@@ -617,6 +622,7 @@ enum SpendSmartBackupService {
                 bufferAmount: dto.bufferAmount?.value,
                 useRecommendedWeeklyBudget: dto.useRecommendedWeeklyBudget,
                 autoUpdateWeeklyBudgetFromPlan: dto.autoUpdateWeeklyBudgetFromPlan,
+                plannedWeeklySpendingOverride: dto.plannedWeeklySpendingOverride?.value,
                 createdAt: dto.createdAt,
                 updatedAt: dto.updatedAt
             )
@@ -667,6 +673,60 @@ enum SpendSmartBackupService {
         for file in files[count...] {
             try? FileManager.default.removeItem(at: file)
         }
+    }
+
+    // MARK: - iCloud daily backups (CloudBackupManager)
+
+    /// One filename per CALENDAR DAY (never time-of-day, unlike `autoBackupFilename`) — writing
+    /// again on the same day overwrites the same file rather than accumulating one per edit, so
+    /// "how many days of history exist" is exactly "how many files exist," no separate collapse
+    /// step needed. `date`'s current CALENDAR DAY in the device's own time zone is what's encoded
+    /// — this is a device-local backup schedule, not a UTC one (see `filenameFormatter`'s own
+    /// `.current` time zone, shared with every other filename helper in this file).
+    static let cloudBackupFilenamePrefix = "SpendSmart-CloudBackup-"
+
+    static func cloudBackupFilename(date: Date = .now) -> String {
+        "\(cloudBackupFilenamePrefix)\(filenameFormatter(format: "yyyy-MM-dd").string(from: date)).json"
+    }
+
+    /// Parses the calendar day encoded in a `cloudBackupFilename(date:)`-produced name — `nil` for
+    /// anything that isn't one (a foreign file that happened to land in the same directory, or a
+    /// name a future version stops producing). Never derived from the file's own modification
+    /// date, which iCloud's own sync/coordination machinery can change independently of the
+    /// calendar day this backup was actually taken for.
+    static func cloudBackupDate(fromFilename filename: String) -> Date? {
+        guard filename.hasPrefix(cloudBackupFilenamePrefix), filename.hasSuffix(".json") else { return nil }
+        let start = filename.index(filename.startIndex, offsetBy: cloudBackupFilenamePrefix.count)
+        let end = filename.index(filename.endIndex, offsetBy: -".json".count)
+        guard start < end else { return nil }
+        let dateString = String(filename[start..<end])
+        return filenameFormatter(format: "yyyy-MM-dd").date(from: dateString)
+    }
+
+    /// Every iCloud daily-backup filename in `directory`, newest calendar day first — filenames
+    /// sort lexically identically to date order (`yyyy-MM-dd`), so no separate date parse is
+    /// needed just to order them.
+    static func cloudBackupFilenames(in directory: URL) -> [String] {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return files
+            .filter { $0.hasPrefix(cloudBackupFilenamePrefix) && $0.hasSuffix(".json") }
+            .sorted(by: >)
+    }
+
+    /// `true` when `filename`'s own encoded calendar day is more than `retentionDays - 1` days
+    /// before `referenceDate`'s calendar day — i.e. `retentionDays == 7` keeps today plus the 6
+    /// preceding calendar days (7 distinct days total), pruning anything older. An unparseable
+    /// filename is never pruned by this rule (see `cloudBackupDate(fromFilename:)`'s own header —
+    /// a foreign file some other process left behind should never be silently deleted here).
+    static func isCloudBackupExpired(filename: String, referenceDate: Date = .now, retentionDays: Int = 7) -> Bool {
+        guard let backupDate = cloudBackupDate(fromFilename: filename) else { return false }
+        let calendar = Calendar(identifier: .gregorian)
+        guard
+            let backupDay = calendar.startOfDay(for: backupDate) as Date?,
+            let referenceDay = calendar.startOfDay(for: referenceDate) as Date?,
+            let ageInDays = calendar.dateComponents([.day], from: backupDay, to: referenceDay).day
+        else { return false }
+        return ageInDays > retentionDays - 1
     }
 }
 
@@ -767,6 +827,7 @@ private extension SpendSmartBackupService.MonthlyPlanSettingsDTO {
             bufferAmount: settings.bufferAmount.map(SpendSmartBackupService.DecimalValue.init),
             useRecommendedWeeklyBudget: settings.useRecommendedWeeklyBudget,
             autoUpdateWeeklyBudgetFromPlan: settings.autoUpdateWeeklyBudgetFromPlan,
+            plannedWeeklySpendingOverride: settings.plannedWeeklySpendingOverride.map(SpendSmartBackupService.DecimalValue.init),
             createdAt: settings.createdAt,
             updatedAt: settings.updatedAt
         )

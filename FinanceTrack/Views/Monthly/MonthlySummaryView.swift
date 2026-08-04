@@ -8,13 +8,15 @@ struct MonthlySummaryView: View {
     @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactions: [FinanceTransaction]
     @Query private var settingsList: [BudgetSettings]
+    @Query private var incomeSources: [IncomeSource]
+    @Query private var recurringExpenses: [RecurringExpense]
+    @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
 
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedMonthAnchor: Date = .now
-    @State private var isPresentingEditGoal = false
     @State private var isPresentingAddAccount = false
     @State private var selectedFilter: TransactionListFilter = .allCounted
 
@@ -40,6 +42,23 @@ struct MonthlySummaryView: View {
 
     private var monthlyGoal: Decimal? {
         settings?.monthlyGoal
+    }
+
+    /// The canonical `MonthlyPlanCalculator.monthlySpendRemaining` result — only meaningful for
+    /// the CURRENT month (it reflects live, ongoing spending against a budget derived from
+    /// today's income/bills/goal/buffer inputs, not a historical figure), so this is `nil` when
+    /// browsing a past or future month via `MonthSelectorView`. Built from the same canonical
+    /// calculator functions `MonthlyPlanView`/`DashboardView` already use — never a duplicated
+    /// formula.
+    private var currentMonthSpendRemaining: Decimal? {
+        guard isCurrentMonth else { return nil }
+        let income = MonthlyPlanCalculator.estimatedMonthlyIncome(incomeSources, in: monthInterval)
+        let fixedExpenses = MonthlyPlanCalculator.estimatedMonthlyFixedExpenses(recurringExpenses, in: monthInterval)
+        let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
+        let buffer = monthlyPlanSettingsList.first?.bufferAmount ?? 0
+        let moneyAfterBills = MonthlyPlanCalculator.moneyAfterBills(income: income, fixedExpenses: fixedExpenses)
+        let spendingBudget = MonthlyPlanCalculator.monthlySpendingBudget(moneyAfterBills: moneyAfterBills, savingsGoal: goal, bufferAmount: buffer)
+        return MonthlyPlanCalculator.monthlySpendRemaining(monthlySpendingBudget: spendingBudget, actualMonthlySpending: spentThisMonth)
     }
 
     private var categoryTotals: [BudgetCalculator.CategoryTotal] {
@@ -146,9 +165,6 @@ struct MonthlySummaryView: View {
                 }
             }
             .toolbarBackground(.hidden, for: .navigationBar)
-            .sheet(isPresented: $isPresentingEditGoal) {
-                MonthlyGoalEditView(settings: settings)
-            }
             .sheet(isPresented: $isPresentingAddAccount) {
                 AddAccountView()
             }
@@ -185,11 +201,10 @@ struct MonthlySummaryView: View {
             monthInterval: monthInterval,
             spent: spentThisMonth,
             goal: monthlyGoal,
+            monthlySpendRemaining: currentMonthSpendRemaining,
             isPrivacyModeEnabled: privacyMode.isEnabled,
             warningThreshold: settings?.warningThreshold ?? 0.70
-        ) {
-            isPresentingEditGoal = true
-        }
+        )
         .padding(.horizontal, Theme.Spacing.lg)
     }
 

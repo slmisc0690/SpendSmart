@@ -32,11 +32,29 @@ struct SettingsView: View {
     @Environment(AuthenticationService.self) private var authService
     @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
+    /// REVISED PRODUCT DIRECTION — always derived, display-only snapshots now (never manually
+    /// edited from this screen). Still a primitive `@State` snapshot, matching every other
+    /// `BudgetSettings`-backed value below, per the PROVEN sign-out crash fix architecture.
     @State private var weeklyLimit: Decimal?
     @State private var monthlyGoal: Decimal?
-    /// True only for the duration of a programmatic counterpart-field update inside
-    /// `saveWeeklyLimit()`/`saveMonthlyGoal()` — see `labeledAmountField`'s `onChange` guard.
-    @State private var isSyncingCounterpartField = false
+    /// PROVEN real-device crash fix ("This model instance was destroyed by calling ModelContext
+    /// .reset... BudgetSettings", read via `includePendingTransactions`'s Binding getter) — every
+    /// value `body` needs from `BudgetSettings` is snapshotted here, exactly mirroring the
+    /// pre-existing `weeklyLimit`/`monthlyGoal` pattern above. `SettingsView` is a `TabView` child
+    /// that stays mounted for as long as any of its own sheets (e.g. `AccountView`, presented
+    /// during sign-out) are showing — a live `Binding` getter reading `settings.<property>`
+    /// directly is re-evaluated at times outside this view's control (any SwiftUI re-render while
+    /// still mounted), including possibly after the signed-out user's `ModelContext` has been
+    /// invalidated. A `@State` primitive has no such risk: `body` never touches the `BudgetSettings`
+    /// model to read these values, only to WRITE them, and writes only ever happen from a
+    /// user-initiated toggle action, never a passive re-render.
+    @State private var includePendingTransactions = true
+    @State private var weekStartsOnSunday = true
+    @State private var spendSenseEnabled = true
+    @State private var showMonthlySpendingQuickStat = true
+    @State private var showSavedThisMonthQuickStat = true
+    @State private var requireFaceIDSetting = false
+    @State private var hideBalancesByDefault = false
     @State private var faceIDToggleErrorMessage: String?
     @State private var isPresentingSecurityNotes = false
     @State private var isPresentingResetConfirmation = false
@@ -47,8 +65,20 @@ struct SettingsView: View {
     @State private var isPresentingDataBackup = false
     @State private var isPresentingAccount = false
     @State private var isPresentingAccountRelatedOptions = false
+    @State private var isPresentingFavorites = false
+    /// LOCAL DATA RESTORE — drives the "Restore from Cloud" row's inline status. `nil` = idle
+    /// (default state, including after a successful restore's brief confirmation fades away via
+    /// user navigation — this is never auto-dismissed on a timer, only replaced by the next action).
+    @State private var isRestoringFromCloud = false
+    @State private var restoreFromCloudResultMessage: String?
     #if DEBUG
     @State private var isPresentingSpendSenseTest = false
+    @State private var isPresentingSharedDataDiagnostics = false
+    /// DEBUG-only developer preference — never synced, never tied to any specific authenticated
+    /// user's data (see `DeveloperOptions.refreshLimitEnabledKey`'s own header for why plain
+    /// standard `UserDefaults` is correct here, unlike this project's per-user-scoped settings).
+    /// Defaults to `true` (normal, quota-limited behavior) on first launch.
+    @AppStorage(DeveloperOptions.refreshLimitEnabledKey) private var refreshLimitEnabled = true
     #endif
 
     private var settings: BudgetSettings {
@@ -64,25 +94,51 @@ struct SettingsView: View {
         categories.filter { !$0.isArchived }
     }
 
-    private var hasIncomeDataForProjection: Bool {
-        MonthlyPlanCalculator.hasIncomeDataForProjection(incomeSources)
+    /// LOCAL DATA RESTORE — user-initiated only (never automatic), matching this app's existing
+    /// Connected Accounts restore pattern (`ConnectedAccountsView.refreshConnectionStatusFromServer`,
+    /// which restores from `list-connections` every time that screen appears). This one is a manual
+    /// button rather than an auto-run-on-appear because, unlike Connected Accounts, writing
+    /// Monthly Plan/Manual Account rows back into SwiftData is a real local mutation — the user
+    /// should choose when that happens, not have it happen silently. See
+    /// `LocalDataRestoreService`'s own header for exactly what is/isn't recoverable and why this
+    /// is always safe to re-run (upsert-by-id, never overwrites an existing local row).
+    private func restoreFromCloud() {
+        guard let userId = authService.currentUserId else { return }
+        isRestoringFromCloud = true
+        restoreFromCloudResultMessage = nil
+        Task {
+            defer { isRestoringFromCloud = false }
+            do {
+                let summary = try await LocalDataRestoreService.restore(context: modelContext, userId: userId)
+                let total = summary.incomeSourcesRestored + summary.recurringExpensesRestored
+                    + summary.manualAccountsRestored + summary.manualTransactionsRestored
+                    + (summary.monthlyPlanRestored ? 1 : 0)
+                restoreFromCloudResultMessage = total > 0
+                    ? "Restored \(summary.manualAccountsRestored) account(s), \(summary.manualTransactionsRestored) transaction(s), \(summary.incomeSourcesRestored) income source(s), \(summary.recurringExpensesRestored) bill(s)."
+                    : "Nothing new to restore — your local data is already up to date."
+            } catch {
+                restoreFromCloudResultMessage = "Restore failed: \(error.localizedDescription)"
+            }
+        }
     }
 
-    /// Weekly-limit savings projection, computed once via `MonthlyPlanCalculator` — never
-    /// duplicated here. Only the final projected number is ever shown; income/bill totals and
-    /// lists stay private to Monthly Plan itself.
-    private var projectedSavingsFromWeeklyLimit: Decimal {
+    /// WEEKLY SPENDING UNIFICATION — the canonical Effective Planned Weekly Spending, computed
+    /// the same way `MonthlyPlanView.plannedWeeklySpending` does (income/fixed-expenses/savings-
+    /// goal/buffer via the existing leaf calculator functions, then
+    /// `MonthlyPlanCalculator.effectivePlannedWeeklySpending`, respecting a custom override) —
+    /// never a duplicated or alternate formula. Used only to keep Budget Settings' derived values
+    /// current when this screen appears; the authoritative, always-current sync also runs from
+    /// `MonthlyPlanView`'s own lifecycle hooks. Deliberately NOT actual-spending-adjusted (unlike
+    /// the prior `currentMonthlySpendRemaining`) — Effective Planned Weekly Spending is a stable
+    /// planning figure, never reduced by spending that's already happened.
+    private var currentEffectivePlannedWeeklySpending: Decimal {
         let month = DateRangeHelper.currentMonthRange()
         let income = MonthlyPlanCalculator.estimatedMonthlyIncome(incomeSources, in: month)
         let fixedExpenses = MonthlyPlanCalculator.estimatedMonthlyFixedExpenses(recurringExpenses, in: month)
+        let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
         let buffer = monthlyPlanSettingsList.first?.bufferAmount ?? 0
-        let availableAfterBills = MonthlyPlanCalculator.availableAfterBills(income: income, fixedExpenses: fixedExpenses, bufferAmount: buffer)
-
-        let spendingWeeks = DateRangeHelper.weeksOverlapping(month, weekStartsOnSunday: settings.weekStartsOnSunday).count
-        let weeklyLimit = self.weeklyLimit ?? settings.weeklySpendingLimit
-        let monthlyBudget = MonthlyPlanCalculator.monthlySpendingBudget(weeklyLimit: weeklyLimit, spendingWeeksInMonth: spendingWeeks)
-
-        return MonthlyPlanCalculator.projectedSavingsFromWeeklyLimit(availableAfterBills: availableAfterBills, monthlySpendingBudget: monthlyBudget)
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: goal, bufferAmount: buffer)
+        return MonthlyPlanCalculator.effectivePlannedWeeklySpending(override: monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: flexible)
     }
 
     var body: some View {
@@ -91,7 +147,9 @@ struct SettingsView: View {
                 VStack(spacing: Theme.Spacing.lg) {
                     header
                     accountSection
+                    favoritesSection
                     budgetSection
+                    quickStatsSection
                     planningSection
                     spendSenseSection
                     securitySection
@@ -123,8 +181,25 @@ struct SettingsView: View {
                 }
             }
             .onAppear {
+                // REVISED PRODUCT DIRECTION — reconciles ANY pre-existing/stale Budget Settings
+                // values to the Monthly Plan's own derived formula the moment this screen appears
+                // (covers both new users and users who had values from before this formula
+                // existed). Safe to call before the primitive snapshots below are set: it only
+                // writes to the live `settings` model, never reads back from `body`.
+                let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
+                let expectedWeeklyLimit = currentEffectivePlannedWeeklySpending
+                if settings.monthlyGoal != goal || settings.weeklySpendingLimit != expectedWeeklyLimit {
+                    settings.applyMonthlyPlanAutoCalculate(monthlyPlanSavingsGoal: goal, monthlySpendRemaining: expectedWeeklyLimit * 4)
+                }
                 weeklyLimit = settings.weeklySpendingLimit
                 monthlyGoal = settings.monthlyGoal
+                includePendingTransactions = settings.includePendingTransactions
+                weekStartsOnSunday = settings.weekStartsOnSunday
+                spendSenseEnabled = settings.spendSenseEnabled ?? true
+                showMonthlySpendingQuickStat = settings.showMonthlySpendingQuickStat ?? true
+                showSavedThisMonthQuickStat = settings.showSavedThisMonthQuickStat ?? true
+                requireFaceIDSetting = settings.requireFaceID
+                hideBalancesByDefault = settings.hideBalancesByDefault
                 biometricAuth.isFaceIDRequired = settings.requireFaceID
             }
             .sheet(isPresented: $isPresentingSecurityNotes) {
@@ -134,7 +209,10 @@ struct SettingsView: View {
                 ConnectedAccountsView()
             }
             .sheet(isPresented: $isPresentingMonthlyPlan) {
-                MonthlyPlanView()
+                // Decides once, before presenting anything, between User B's own owned plan and
+                // (for an active Secondary with Monthly Plan currently shared) the Primary's real
+                // plan directly — see `MonthlyPlanEntryView`'s own header.
+                MonthlyPlanEntryView()
             }
             .sheet(isPresented: $isPresentingCategoryManagement) {
                 CategoryManagementView()
@@ -151,9 +229,15 @@ struct SettingsView: View {
             .sheet(isPresented: $isPresentingAccountRelatedOptions) {
                 AccountRelatedOptionsView()
             }
+            .sheet(isPresented: $isPresentingFavorites) {
+                FavoritesConfigurationView()
+            }
             #if DEBUG
             .sheet(isPresented: $isPresentingSpendSenseTest) {
                 SpendSenseTestView()
+            }
+            .sheet(isPresented: $isPresentingSharedDataDiagnostics) {
+                SharedDataDiagnosticsView()
             }
             #endif
             .confirmationDialog(
@@ -210,12 +294,18 @@ struct SettingsView: View {
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(authService.currentUserEmail ?? "Account")
+                                // PROVEN real-device UX fix — reads the sticky display-only
+                                // mirror, never the live currentUserEmail/isEmailVerified, which
+                                // clear immediately on sign-out while this row (SettingsView
+                                // itself, the AccountView sheet's own presenter) is still
+                                // mounted. See AuthenticationService.lastDisplayedUserEmail's own
+                                // doc comment for the full reasoning.
+                                Text(authService.lastDisplayedUserEmail ?? "Account")
                                     .font(Theme.bodyFont)
                                     .foregroundStyle(Theme.textPrimary)
-                                Text(authService.isEmailVerified ? "Verified" : "Not Verified")
+                                Text(authService.lastDisplayedIsEmailVerified ? "Verified" : "Not Verified")
                                     .font(Theme.captionFont)
-                                    .foregroundStyle(authService.isEmailVerified ? Theme.statusGood : Theme.statusWarning)
+                                    .foregroundStyle(authService.lastDisplayedIsEmailVerified ? Theme.statusGood : Theme.statusWarning)
                             }
                             Spacer()
                             Image(systemName: "chevron.right")
@@ -225,9 +315,12 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
 
-                    // Primary-only — hidden entirely for a Secondary or until the server-verified
-                    // role has resolved (never inferred locally, see
-                    // AccountRelatedOptionsViewModel's own doc comment for why).
+                    // Hidden entirely until the server-verified role has resolved (never inferred
+                    // locally, see AccountRelatedOptionsViewModel's own doc comment for why). Once
+                    // resolved: Primary/no-household see "Account Related Options"; an active
+                    // Secondary (Phase 8D) sees only "Share Connected Account" — the same row
+                    // leads to AccountRelatedOptionsView either way, which renders the correct
+                    // role-scoped content itself.
                     if accountRelatedOptionsViewModel.visibility != .hidden {
                         Divider().overlay(Theme.cardStroke)
 
@@ -235,7 +328,7 @@ struct SettingsView: View {
                             isPresentingAccountRelatedOptions = true
                         } label: {
                             HStack {
-                                Text("Account Related Options")
+                                Text(accountRelatedOptionsViewModel.visibility == .secondary ? "Share Connected Account" : "Account Related Options")
                                     .font(Theme.bodyFont)
                                     .foregroundStyle(Theme.textPrimary)
                                 Spacer()
@@ -252,6 +345,40 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - A3. Favorites
+
+    /// Locked entry point — "Profile ▸ Favorites" is this row, reached from Settings exactly like
+    /// every other configuration destination (`Categories`, `Data Backup`, ...). Deliberately no
+    /// second configuration entry point anywhere on the Dashboard itself.
+    private var favoritesSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Favorites")
+
+            CardBackground {
+                Button {
+                    isPresentingFavorites = true
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Favorites")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("Choose what appears on your Dashboard Favorites Bar")
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
     // MARK: - B. Budget Settings
 
     private var budgetSection: some View {
@@ -260,19 +387,19 @@ struct SettingsView: View {
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    labeledAmountField(title: "Weekly Spending Limit", amount: $weeklyLimit, onSubmit: saveWeeklyLimit)
-                    weeklySpendingLimitHelperRow
+                    labeledAmountField(title: "Weekly Spending Limit", amount: $weeklyLimit, isDisabled: true)
                     Divider().overlay(Theme.cardStroke)
-                    labeledAmountField(title: "Monthly Savings Goal", amount: $monthlyGoal, onSubmit: saveMonthlyGoal)
-                    monthlySavingsGoalHelperRow
+                    labeledAmountField(title: "Monthly Savings Goal", amount: $monthlyGoal, isDisabled: true)
+                    derivedBudgetValuesHelperRow
                     Divider().overlay(Theme.cardStroke)
 
                     TransactionToggleRow(
                         title: "Include Pending Transactions",
                         subtitle: "Count pending transactions toward your totals",
                         isOn: Binding(
-                            get: { settings.includePendingTransactions },
+                            get: { includePendingTransactions },
                             set: { newValue in
+                                includePendingTransactions = newValue
                                 settings.includePendingTransactions = newValue
                                 settings.updatedAt = .now
                             }
@@ -285,8 +412,9 @@ struct SettingsView: View {
                         title: "Week Starts on Sunday",
                         subtitle: "Turn off for a Monday–Sunday week",
                         isOn: Binding(
-                            get: { settings.weekStartsOnSunday },
+                            get: { weekStartsOnSunday },
                             set: { newValue in
+                                weekStartsOnSunday = newValue
                                 settings.weekStartsOnSunday = newValue
                                 settings.updatedAt = .now
                             }
@@ -298,107 +426,62 @@ struct SettingsView: View {
         }
     }
 
-    /// Rendered directly under Weekly Spending Limit. Shows content only when the CALCULATED
-    /// result belongs here — i.e. the user just edited Monthly Savings Goal, so this field's
-    /// value is the derived one (`weeklyMonthlySyncSource == .monthly`) — or when neither field
-    /// has ever been driven through the synced path yet (`nil`, the original Monthly-Plan-
-    /// projection estimate, which has always been associated with the weekly limit). Renders
-    /// nothing at all when `.weekly` (that case's calculated result belongs under Monthly
-    /// Savings Goal instead — see `monthlySavingsGoalHelperRow`) — never both at once.
-    @ViewBuilder
-    private var weeklySpendingLimitHelperRow: some View {
-        switch settings.weeklyMonthlySyncSource {
-        case .weekly:
-            EmptyView()
-        case .monthly:
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Weekly Spend Goal")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.textTertiary)
-                Text("Keeping your Weekly Spend at \(settings.weeklySpendingLimit.formatted(.currency(code: "USD").precision(.fractionLength(2)))) could help you reach your monthly savings goal.")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.statusGood)
-            }
-        case nil:
-            // Estimates what sticking to the weekly limit above would leave you with at month's
-            // end. Reads only the final projected number from Monthly Plan — never income or
-            // bill totals. Unchanged original behavior for a user who has never used the synced
-            // fields; always associated with the weekly limit, since that's the number the
-            // estimate is actually projected from.
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Estimated Savings This Month")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.textTertiary)
-
-                if !hasIncomeDataForProjection {
-                    Text("Add income and bills in Monthly Plan to calculate this estimate — there isn't enough information yet.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.textTertiary)
-                } else if projectedSavingsFromWeeklyLimit >= 0 {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text("You could save about")
-                        PrivacyAmountView(
-                            amount: projectedSavingsFromWeeklyLimit,
-                            isPrivacyModeEnabled: privacyMode.isEnabled,
-                            font: Theme.captionFont,
-                            color: Theme.statusGood
-                        )
-                        Text("this month.")
-                    }
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.statusGood)
-                } else {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text("This weekly limit may overspend by")
-                        PrivacyAmountView(
-                            amount: abs(projectedSavingsFromWeeklyLimit),
-                            isPrivacyModeEnabled: privacyMode.isEnabled,
-                            font: Theme.captionFont,
-                            color: Theme.statusOver
-                        )
-                        Text(".")
-                    }
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.statusOver)
-                }
-
-                if hasIncomeDataForProjection {
-                    Text("Estimated income minus planned bills and your Monthly Plan buffer, minus your Weekly Spending Limit for every week this month.")
-                        .font(.system(size: 11, weight: .regular, design: .rounded))
-                        .foregroundStyle(Theme.textTertiary)
-                }
-            }
-        }
+    /// REVISED PRODUCT DIRECTION — replaces the prior dual-editable-field helper rows (which
+    /// described "which field did you just edit" — no longer applicable now that neither field
+    /// is ever manually edited). Shown once, under Monthly Savings Goal, explaining that both
+    /// values are always derived from the Monthly Plan.
+    private var derivedBudgetValuesHelperRow: some View {
+        Text("Automatically calculated from your Monthly Plan savings goal and projected savings.")
+            .font(Theme.captionFont)
+            .foregroundStyle(Theme.textTertiary)
     }
 
-    /// Rendered directly under Monthly Savings Goal. Shows content only when the user just
-    /// edited Weekly Spending Limit, so THIS field's value is the derived one
-    /// (`weeklyMonthlySyncSource == .weekly`) — empty otherwise, so this and
-    /// `weeklySpendingLimitHelperRow` never both show content for the same state.
-    @ViewBuilder
-    private var monthlySavingsGoalHelperRow: some View {
-        if settings.weeklyMonthlySyncSource == .weekly {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Weekly Spend Goal")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.textTertiary)
-                // `.firstTextBaseline` (not the HStack default `.center`) is what keeps the
-                // amount aligned with the FIRST line of the sentence rather than vertically
-                // centered against the whole (possibly two-line, on narrow widths) text block —
-                // without it, a wrapped sentence pushes the amount down to visually "float"
-                // between the two lines instead of reading as part of the same row.
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("This amount reflects what you could save this month:")
-                    PrivacyAmountView(
-                        amount: settings.monthlyGoal ?? 0,
-                        isPrivacyModeEnabled: privacyMode.isEnabled,
-                        font: Theme.captionFont,
-                        color: Theme.statusGood
+    // MARK: - B1. Quick Stats visibility
+
+    private var quickStatsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Quick Stats")
+
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    TransactionToggleRow(
+                        title: "Show Monthly Spending",
+                        subtitle: "Show the Monthly Spending Quick Stat on the Dashboard",
+                        isOn: Binding(
+                            get: { showMonthlySpendingQuickStat },
+                            set: { newValue in
+                                showMonthlySpendingQuickStat = newValue
+                                settings.showMonthlySpendingQuickStat = newValue
+                                settings.updatedAt = .now
+                            }
+                        )
                     )
+
+                    // LOCKED PRODUCT RULE — a Secondary never gets this toggle: their shared
+                    // savings Quick Stat visibility is controlled exclusively by the Primary's own
+                    // "Share Monthly Savings" permission (Account Related Options), not by a local
+                    // per-device preference. Role comes from `accountRelatedOptionsViewModel`
+                    // (server-sourced), never from `BudgetSettings` — this does not touch the
+                    // primitive-snapshot rule above.
+                    if accountRelatedOptionsViewModel.response?.role != .secondary {
+                        Divider().overlay(Theme.cardStroke)
+
+                        TransactionToggleRow(
+                            title: "Show Saved This Month",
+                            subtitle: "Show the Saved This Month Quick Stat on the Dashboard",
+                            isOn: Binding(
+                                get: { showSavedThisMonthQuickStat },
+                                set: { newValue in
+                                    showSavedThisMonthQuickStat = newValue
+                                    settings.showSavedThisMonthQuickStat = newValue
+                                    settings.updatedAt = .now
+                                }
+                            )
+                        )
+                    }
                 }
-                .font(Theme.captionFont)
-                .foregroundStyle(Theme.statusGood)
             }
+            .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 
@@ -469,8 +552,9 @@ struct SettingsView: View {
                         title: "Enable Spend Sense",
                         subtitle: "Local financial guidance based on your data",
                         isOn: Binding(
-                            get: { settings.spendSenseEnabled ?? true },
+                            get: { spendSenseEnabled },
                             set: { newValue in
+                                spendSenseEnabled = newValue
                                 settings.spendSenseEnabled = newValue
                                 settings.updatedAt = .now
                             }
@@ -505,14 +589,18 @@ struct SettingsView: View {
                         title: "Require Face ID",
                         subtitle: "Lock SpendSmart until you authenticate",
                         isOn: Binding(
-                            get: { settings.requireFaceID },
+                            get: { requireFaceIDSetting },
                             set: { newValue in
                                 if newValue {
                                     // OFF -> ON requires a successful biometric check first —
                                     // the toggle visually stays off until this completes (and
                                     // snaps back off if it fails), never flipping on speculatively.
+                                    // `requireFaceIDSetting` itself is only set true inside
+                                    // `enableFaceIDIfAuthenticated()`'s success branch, so this
+                                    // exact prior behavior is preserved.
                                     Task { await enableFaceIDIfAuthenticated() }
                                 } else {
+                                    requireFaceIDSetting = false
                                     settings.requireFaceID = false
                                     settings.updatedAt = .now
                                     biometricAuth.isFaceIDRequired = false
@@ -533,8 +621,9 @@ struct SettingsView: View {
                         title: "Hide Balances by Default",
                         subtitle: "Start each launch with Privacy Mode on",
                         isOn: Binding(
-                            get: { settings.hideBalancesByDefault },
+                            get: { hideBalancesByDefault },
                             set: { newValue in
+                                hideBalancesByDefault = newValue
                                 settings.hideBalancesByDefault = newValue
                                 settings.updatedAt = .now
                             }
@@ -552,7 +641,7 @@ struct SettingsView: View {
                         )
                     )
 
-                    if settings.requireFaceID {
+                    if requireFaceIDSetting {
                         Divider().overlay(Theme.cardStroke)
                         Button {
                             biometricAuth.lock()
@@ -679,6 +768,39 @@ struct SettingsView: View {
 
                     Divider().overlay(Theme.cardStroke)
 
+                    Button {
+                        restoreFromCloud()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Restore from Cloud")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text("Recover Monthly Plan and Manual Accounts already synced to the cloud")
+                                    .font(Theme.captionFont)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            Spacer()
+                            if isRestoringFromCloud {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "icloud.and.arrow.down")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isRestoringFromCloud)
+
+                    if let restoreFromCloudResultMessage {
+                        Text(restoreFromCloudResultMessage)
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+
+                    Divider().overlay(Theme.cardStroke)
+
                     HStack {
                         Text("Export CSV")
                             .font(Theme.bodyFont)
@@ -709,33 +831,82 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - E2. Debug (DEBUG builds only — never present in Release/TestFlight/App Store)
+    // MARK: - E2. Developer Options (DEBUG builds only — never present in Release/TestFlight/App Store)
 
     #if DEBUG
     private var debugSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Debug")
+            DashboardSectionHeader(title: "Developer Options")
 
             CardBackground {
-                Button {
-                    isPresentingSpendSenseTest = true
-                } label: {
-                    HStack {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    Button {
+                        isPresentingSpendSenseTest = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Spend Sense Test")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text("DEBUG only \u{2014} exercises the real Spend Sense engine without saving data")
+                                    .font(Theme.captionFont)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    // CONNECTED ACCOUNT REFRESH — DEBUG unlimited testing (locked requirement):
+                    // ON (default) preserves the exact normal, server-quota-limited manual refresh
+                    // behavior. OFF lets a developer repeatedly exercise the balance+transaction
+                    // refresh workflow on their OWN accounts without the 2/day/account production
+                    // restriction — see `PlaidConnectionManager`'s own DEBUG-only bypass method for
+                    // exactly how this stays safe (a different, already-unlimited existing Plaid
+                    // operation, never a client flag the server is asked to trust).
+                    Toggle(isOn: $refreshLimitEnabled) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Spend Sense Test")
+                            Text("Refresh Limit")
                                 .font(Theme.bodyFont)
                                 .foregroundStyle(Theme.textPrimary)
-                            Text("DEBUG only \u{2014} exercises the real Spend Sense engine without saving data")
+                            Text("DEBUG only \u{2014} OFF removes the 2/day/account limit for your own Connected Accounts during testing")
                                 .font(Theme.captionFont)
                                 .foregroundStyle(Theme.textTertiary)
                         }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.textTertiary)
                     }
+                    .tint(Theme.accent)
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    // SHARED DATA DIAGNOSTICS — read-only, on-device view of the same shared-state
+                    // information already surfaced by AccountRelatedOptionsViewModel's own DEBUG
+                    // console log (see SharedDataDiagnosticsView's own header). No new fetch, no
+                    // refresh, no state change of any kind.
+                    Button {
+                        isPresentingSharedDataDiagnostics = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Shared Data Diagnostics")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text("DEBUG only \u{2014} read-only view of current shared-state for a Secondary")
+                                    .font(Theme.captionFont)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }
@@ -818,55 +989,22 @@ struct SettingsView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
-    @ViewBuilder
-    private func labeledAmountField(title: String, amount: Binding<Decimal?>, onSubmit: @escaping () -> Void) -> some View {
+    /// REVISED PRODUCT DIRECTION — read-only display of a Budget Settings amount. `onSubmit`
+    /// removed entirely: both call sites (Weekly Spending Limit, Monthly Savings Goal) always
+    /// pass `isDisabled: true` now, since neither field is ever manually editable.
+    private func labeledAmountField(title: String, amount: Binding<Decimal?>, isDisabled: Bool) -> some View {
         HStack {
             Text(title)
                 .font(Theme.bodyFont)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(isDisabled ? Theme.textTertiary : Theme.textPrimary)
             Spacer()
             CurrencyAmountField(
                 amount: amount,
                 style: .inline,
+                isDisabled: isDisabled,
                 accessibilityLabel: title
             )
-            // Suppressed while a sync commit is programmatically updating the OTHER field's
-            // state below (see `isSyncingCounterpartField`) — without this guard, that
-            // programmatic update would itself be seen as "the user edited this field" and
-            // recursively re-trigger the other save function.
-            .onChange(of: amount.wrappedValue) { _, _ in
-                if !isSyncingCounterpartField { onSubmit() }
-            }
         }
-    }
-
-    /// Applies the canonical sync (`BudgetSettings.applyWeeklySpendingLimitCommit`) and mirrors
-    /// the result into this screen's own local `monthlyGoal` `@State` (so the visible field
-    /// updates immediately, without requiring the user to leave and return to Settings). The
-    /// state write is wrapped in `isSyncingCounterpartField` so `labeledAmountField`'s
-    /// `onChange` treats it as programmatic, never as a second user edit — this is what
-    /// prevents a recursive call into `saveMonthlyGoal()`.
-    private func saveWeeklyLimit() {
-        guard let weeklyLimit, weeklyLimit >= 0 else { return }
-        settings.applyWeeklySpendingLimitCommit(weeklyLimit)
-
-        isSyncingCounterpartField = true
-        monthlyGoal = settings.monthlyGoal
-        isSyncingCounterpartField = false
-    }
-
-    /// Applies the canonical sync (`BudgetSettings.applyMonthlySavingsGoalCommit`) — same
-    /// model-write-plus-visible-state-write reasoning as `saveWeeklyLimit()` above. Only
-    /// mirrors into `weeklyLimit`'s local state when an actual numeric goal was committed;
-    /// clearing the field to `nil` ("no monthly goal") never touches the weekly field.
-    private func saveMonthlyGoal() {
-        if let monthlyGoal, monthlyGoal < 0 { return }
-        settings.applyMonthlySavingsGoalCommit(monthlyGoal)
-        guard monthlyGoal != nil else { return }
-
-        isSyncingCounterpartField = true
-        weeklyLimit = settings.weeklySpendingLimit
-        isSyncingCounterpartField = false
     }
 
     /// Turning "Require Face ID" ON must succeed a real biometric check first — never flips the
@@ -877,6 +1015,7 @@ struct SettingsView: View {
         faceIDToggleErrorMessage = nil
         await biometricAuth.authenticate(reason: "Enable Face ID for SpendSmart", surfaceErrors: true)
         if biometricAuth.isUnlocked {
+            requireFaceIDSetting = true
             settings.requireFaceID = true
             settings.updatedAt = .now
             biometricAuth.isFaceIDRequired = true
@@ -895,11 +1034,25 @@ struct SettingsView: View {
         modelContext.insert(freshSettings)
         Category.makeDefaultSet().forEach { modelContext.insert($0) }
 
+        // REVISED PRODUCT DIRECTION — resetAllData wipes FinanceTransaction/Account/Category/
+        // BudgetSettings but deliberately never touches MonthlyPlanSettings, so an existing
+        // Monthly Plan savings goal survives this reset. Re-derive immediately rather than
+        // leaving the fresh BudgetSettings at its own zero/nil defaults regardless.
+        let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
+        // income/fixed bills/buffer/any custom override are untouched by this reset, so
+        // `currentEffectivePlannedWeeklySpending` still reflects them correctly.
+        freshSettings.applyMonthlyPlanAutoCalculate(monthlyPlanSavingsGoal: goal, monthlySpendRemaining: currentEffectivePlannedWeeklySpending * 4)
+
         privacyMode.isEnabled = freshSettings.hideBalancesByDefault
         biometricAuth.isFaceIDRequired = freshSettings.requireFaceID
         biometricAuth.isUnlocked = true
         weeklyLimit = freshSettings.weeklySpendingLimit
-        monthlyGoal = nil
+        monthlyGoal = freshSettings.monthlyGoal
+        includePendingTransactions = freshSettings.includePendingTransactions
+        weekStartsOnSunday = freshSettings.weekStartsOnSunday
+        spendSenseEnabled = freshSettings.spendSenseEnabled ?? true
+        requireFaceIDSetting = freshSettings.requireFaceID
+        hideBalancesByDefault = freshSettings.hideBalancesByDefault
     }
 }
 

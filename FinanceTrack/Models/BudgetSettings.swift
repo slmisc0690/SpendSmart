@@ -1,26 +1,23 @@
 import Foundation
 import SwiftData
 
-/// Which of the two directly-synced fields (`weeklySpendingLimit`/`monthlyGoal`) the user most
-/// recently, explicitly edited — drives which explanatory message `SettingsView` shows under
-/// Weekly Spending Limit. `nil` means neither has ever been edited through the synced path
-/// (e.g. an existing user's settings from before this sync existed).
-enum WeeklyMonthlySyncSource: String, Codable {
-    case weekly
-    case monthly
-}
-
 /// Singleton-style settings record for the user's budget configuration.
 /// The app expects exactly one `BudgetSettings` instance; a default is created on first launch
 /// by `RootView` in `FinanceTrackApp.swift` if none exists yet.
 @Model
 final class BudgetSettings {
     var id: UUID
+    /// Always derived — see `applyMonthlyPlanAutoCalculate`. Manual editing of this field was
+    /// removed; the Monthly Plan's own `monthlySavingsGoal`, its optional buffer, and
+    /// `MonthlyPlanCalculator.monthlySpendRemaining` (which itself uses
+    /// `BudgetCalculator.monthlySpent` for actual spending) are the sole authoritative inputs.
     var weeklySpendingLimit: Decimal
     var weekStartsOnSunday: Bool
     var includePendingTransactions: Bool
     var hideBalancesByDefault: Bool
     var requireFaceID: Bool
+    /// Always derived — see `applyMonthlyPlanAutoCalculate`. Manual editing of this field was
+    /// removed; it always mirrors `MonthlyPlanSettings.monthlySavingsGoal`.
     var monthlyGoal: Decimal?
     /// Percentage (0...1) of the limit at which spending is flagged as "warning" rather than "good".
     /// Defaults to 0.70, matching the dashboard's 0–69% "on track" / 70–99% "getting close" /
@@ -35,6 +32,18 @@ final class BudgetSettings {
     /// can't backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates
     /// with no issue. Every read site treats `nil` as "on" via `?? true`.
     var autoBackupEnabled: Bool?
+    /// How many distinct calendar days of iCloud daily backups `CloudBackupManager` keeps before
+    /// pruning the oldest — user-configurable (Data Backup screen), since backup file size here is
+    /// negligible (tens of KB/day) and it's the user's own iCloud storage being spent. Defaults to
+    /// 7. Every read site treats `nil`, `0`, or negative as "use the default 7" via
+    /// `CloudBackupManager.normalizedRetentionDays(_:)` — never a literal 0-day retention, which
+    /// would prune every backup immediately including the one just written.
+    ///
+    /// Optional (rather than a plain `Int`) so it migrates cleanly for installs that already had a
+    /// `BudgetSettings` record before this field existed — SwiftData's lightweight migration can't
+    /// backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates with no
+    /// issue. Same pattern as `autoBackupEnabled` immediately above.
+    var cloudBackupRetentionDays: Int?
     /// Whether Spend Sense (local, deterministic financial observations) is enabled. Defaults to
     /// on — Spend Sense never networks or reads/writes Supabase; this only ever governs whether
     /// its local, on-device output is shown.
@@ -44,13 +53,22 @@ final class BudgetSettings {
     /// can't backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates
     /// with no issue. Every read site treats `nil` as "on" via `?? true`.
     var spendSenseEnabled: Bool?
-    /// Set whenever the user explicitly commits either `weeklySpendingLimit` or `monthlyGoal`
-    /// through the direct two-way sync (see `SettingsView.saveWeeklyLimit`/`saveMonthlyGoal` and
-    /// `WeeklyLimitEditView`/`MonthlyGoalEditView`'s `commitAutosaveNow`). Optional so a
-    /// lightweight SwiftData migration backfills every pre-existing record as `nil` — "never
-    /// synced through this path yet" — rather than guessing which field an existing user
-    /// considers primary.
-    var weeklyMonthlySyncSource: WeeklyMonthlySyncSource?
+    /// Whether the Dashboard's "Monthly Spending" Quick Stat is shown. Defaults to on.
+    ///
+    /// Optional (rather than a plain `Bool`) so it migrates cleanly for installs that already had
+    /// a `BudgetSettings` record before this field existed — SwiftData's lightweight migration
+    /// can't backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates
+    /// with no issue. Every read site treats `nil` as "on" via `?? true`.
+    var showMonthlySpendingQuickStat: Bool?
+    /// Whether the Dashboard's Saved This Month / Total Savings to Date Quick Stat is shown.
+    /// Defaults to on. Controls the Dashboard Quick Stat only — never hides the Monthly Plan
+    /// "Saved This Month" card itself.
+    ///
+    /// Optional (rather than a plain `Bool`) so it migrates cleanly for installs that already had
+    /// a `BudgetSettings` record before this field existed — SwiftData's lightweight migration
+    /// can't backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates
+    /// with no issue. Every read site treats `nil` as "on" via `?? true`.
+    var showSavedThisMonthQuickStat: Bool?
     var updatedAt: Date
 
     init(
@@ -63,8 +81,10 @@ final class BudgetSettings {
         monthlyGoal: Decimal? = nil,
         warningThreshold: Double = 0.70,
         autoBackupEnabled: Bool = true,
+        cloudBackupRetentionDays: Int = 7,
         spendSenseEnabled: Bool = true,
-        weeklyMonthlySyncSource: WeeklyMonthlySyncSource? = nil,
+        showMonthlySpendingQuickStat: Bool = true,
+        showSavedThisMonthQuickStat: Bool = true,
         updatedAt: Date = .now
     ) {
         self.id = id
@@ -76,35 +96,33 @@ final class BudgetSettings {
         self.monthlyGoal = monthlyGoal
         self.warningThreshold = warningThreshold
         self.autoBackupEnabled = autoBackupEnabled
+        self.cloudBackupRetentionDays = cloudBackupRetentionDays
         self.spendSenseEnabled = spendSenseEnabled
-        self.weeklyMonthlySyncSource = weeklyMonthlySyncSource
+        self.showMonthlySpendingQuickStat = showMonthlySpendingQuickStat
+        self.showSavedThisMonthQuickStat = showSavedThisMonthQuickStat
         self.updatedAt = updatedAt
     }
 
-    /// The single, canonical implementation of the direct Weekly Spending Limit -> Monthly
-    /// Savings Goal sync, called by every commit site (`SettingsView.saveWeeklyLimit`,
-    /// `WeeklyLimitEditView.commitAutosaveNow`) so the real persisted-model behavior is
-    /// identical everywhere and directly unit-testable without hosting any SwiftUI view.
-    func applyWeeklySpendingLimitCommit(_ weeklyLimit: Decimal) {
-        weeklySpendingLimit = weeklyLimit
-        monthlyGoal = weeklyLimit * 4
-        weeklyMonthlySyncSource = .weekly
-        updatedAt = .now
-    }
-
-    /// The single, canonical implementation of the direct Monthly Savings Goal -> Weekly
-    /// Spending Limit sync, called by every commit site (`SettingsView.saveMonthlyGoal`,
-    /// `MonthlyGoalEditView.commitAutosaveNow`). `nil` means "clear the goal" — a deliberate
-    /// distinct state that never touches `weeklySpendingLimit`.
-    func applyMonthlySavingsGoalCommit(_ goal: Decimal?) {
-        guard let goal else {
-            monthlyGoal = nil
-            updatedAt = .now
-            return
-        }
-        monthlyGoal = goal
-        weeklySpendingLimit = goal / 4
-        weeklyMonthlySyncSource = .monthly
+    /// The single, canonical implementation of the Monthly Plan → Budget Settings derived-value
+    /// sync — the ONLY way `monthlyGoal`/`weeklySpendingLimit` are ever set. Budget Settings no
+    /// longer supports manual editing of either field at all (see `MonthlyGoalEditView`/
+    /// `WeeklyLimitEditView`, both now permanently read-only, and `SettingsView`'s own inline
+    /// fields, also permanently disabled). Every call site (`MonthlyPlanView`'s lifecycle hooks,
+    /// `SettingsView`'s `onAppear` reconciliation and reset-to-factory-defaults path) calls this
+    /// one method so the real persisted-model behavior is identical everywhere.
+    ///
+    /// Formula (locked product behavior — never 4.33, always exactly 4):
+    ///   monthlyGoal = monthlyPlanSavingsGoal
+    ///   weeklySpendingLimit = monthlySpendRemaining / 4
+    ///
+    /// `monthlySpendRemaining` must always be the existing, unmodified
+    /// `MonthlyPlanCalculator.monthlySpendRemaining` result (built from money after bills, the
+    /// savings goal, the optional buffer, and `BudgetCalculator.monthlySpent` — actual spending
+    /// subtracted exactly once, never reimplemented here) — already clamped at 0, so no further
+    /// clamping is needed at this step.
+    func applyMonthlyPlanAutoCalculate(monthlyPlanSavingsGoal: Decimal, monthlySpendRemaining: Decimal) {
+        monthlyGoal = monthlyPlanSavingsGoal
+        weeklySpendingLimit = monthlySpendRemaining / 4
         updatedAt = .now
     }
 }

@@ -133,12 +133,25 @@ final class UserDataStoreManager {
             RecurringExpense.self,
             MonthlyPlanSettings.self,
             PendingCloudDeletion.self,
+            SavingsEntry.self,
+            FavoritesSettings.self,
         ])
     }
 
+    /// ICLOUD BACKUP ENTITLEMENT FIX — `cloudKitDatabase: .none` on every `ModelConfiguration` in
+    /// this app (this one, `makeLegacyContainer` below, and every test's own in-memory container)
+    /// is REQUIRED once the app carries an `icloud-container-identifiers` entitlement (added for
+    /// `CloudBackupManager`'s plain-file iCloud Documents backups — never SwiftData/CloudKit
+    /// sync). `ModelConfiguration`'s own default is `cloudKitDatabase: .automatic`, which detects
+    /// that entitlement and starts validating this schema against CloudKit's stricter rules (every
+    /// relationship must have an explicit inverse) — a real-device-confirmed crash
+    /// ("CloudKit integration requires that all relationships have an inverse") the moment the
+    /// entitlement was added, even though this app has never used and will never use SwiftData's
+    /// own CloudKit mirroring feature. `.none` opts every container back out explicitly, restoring
+    /// the exact pre-entitlement local-only behavior.
     private func makeUserContainer(for userId: UUID) throws -> ModelContainer {
         let url = try storeURL(for: userId)
-        let config = ModelConfiguration(schema: Self.schema, url: url)
+        let config = ModelConfiguration(schema: Self.schema, url: url, cloudKitDatabase: .none)
         return try ModelContainer(for: Self.schema, configurations: [config])
     }
 
@@ -147,9 +160,10 @@ final class UserDataStoreManager {
     /// resolves to the same pre-existing store that already holds any real local data, without
     /// this codebase ever hardcoding/guessing SwiftData's own default path resolution. Read-only
     /// use only: never attached to the UI, never written to by anything in this type. This is the
-    /// default `legacyContainerProvider` in production; tests substitute their own provider.
+    /// default `legacyContainerProvider` in production; tests substitute their own provider. See
+    /// `makeUserContainer`'s own header for why `cloudKitDatabase: .none` is required here too.
     static func makeLegacyContainer() throws -> ModelContainer {
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false, cloudKitDatabase: .none)
         return try ModelContainer(for: schema, configurations: [config])
     }
 

@@ -10,7 +10,6 @@ struct MonthlyOutlookCard: View {
     let actualMonthlySpend: Decimal
     let projectedSavings: Decimal
     let status: SpendingStatus
-    let recommendedWeeklyLimit: Decimal
     var isPrivacyModeEnabled: Bool = false
 
     private var statusLabel: String {
@@ -46,20 +45,6 @@ struct MonthlyOutlookCard: View {
                         color: projectedSavings >= 0 ? Theme.statusGood : Theme.statusOver
                     )
                 }
-
-                HStack(spacing: 6) {
-                    Image(systemName: "target")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("Recommended weekly limit:")
-                        .font(Theme.captionFont)
-                    PrivacyAmountView(
-                        amount: recommendedWeeklyLimit,
-                        isPrivacyModeEnabled: isPrivacyModeEnabled,
-                        font: Theme.captionFont.weight(.semibold),
-                        color: Theme.textPrimary
-                    )
-                }
-                .foregroundStyle(Theme.textTertiary)
             }
         }
     }
@@ -88,9 +73,9 @@ struct MonthlyOutlookCard: View {
 
 #Preview {
     VStack(spacing: 16) {
-        MonthlyOutlookCard(budgetedMonthlySpend: 1400, actualMonthlySpend: 610, projectedSavings: 685, status: .good, recommendedWeeklyLimit: 339)
-        MonthlyOutlookCard(budgetedMonthlySpend: nil, actualMonthlySpend: 1200, projectedSavings: 120, status: .warning, recommendedWeeklyLimit: 250)
-        MonthlyOutlookCard(budgetedMonthlySpend: 1000, actualMonthlySpend: 1600, projectedSavings: -300, status: .over, recommendedWeeklyLimit: 200)
+        MonthlyOutlookCard(budgetedMonthlySpend: 1400, actualMonthlySpend: 610, projectedSavings: 685, status: .good)
+        MonthlyOutlookCard(budgetedMonthlySpend: nil, actualMonthlySpend: 1200, projectedSavings: 120, status: .warning)
+        MonthlyOutlookCard(budgetedMonthlySpend: 1000, actualMonthlySpend: 1600, projectedSavings: -300, status: .over)
     }
     .padding()
     .background(Theme.backgroundGradient)

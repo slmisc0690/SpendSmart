@@ -7,15 +7,47 @@ struct DashboardView: View {
     @Query private var incomeSources: [IncomeSource]
     @Query private var recurringExpenses: [RecurringExpense]
     @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
+    @Query private var savingsEntries: [SavingsEntry]
+    /// Sorted deterministically (`\.id`), matching `FavoritesConfigurationView`'s own identically-
+    /// sorted `@Query` — a proven real-device bug had these two screens each resolving `.first`
+    /// against an UNSORTED query, so if more than one `FavoritesSettings` row ever existed
+    /// (possible before the create-on-every-access bug in that screen was fixed —  see
+    /// `FavoritesSettings.resolveCanonicalRecord`'s own header), the two screens could disagree on
+    /// which row was canonical. This screen NEVER creates or merges rows itself (see
+    /// `favoriteDestinations`'s own header) — it only ever needs to agree with Settings on which
+    /// existing row to read.
+    @Query(sort: \FavoritesSettings.id) private var favoritesSettingsList: [FavoritesSettings]
 
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(PlaidConnectionManager.self) private var plaidConnection
+    @Environment(\.modelContext) private var modelContext
+    #if DEBUG
+    /// DEBUG-BUILD-ONLY — mirrors the same key `SettingsView`'s "Developer Options > Refresh
+    /// Limit" toggle writes, via `@AppStorage`'s own built-in cross-view reactivity. Compiles out
+    /// entirely in Release (see `DeveloperOptions`'s own header).
+    @AppStorage(DeveloperOptions.refreshLimitEnabledKey) private var refreshLimitEnabled = true
+    #endif
+    /// PHASE 10 — the same instance `RootView.task` already keeps refreshed for every signed-in
+    /// user (see that type's own header); read-only here, purely to surface
+    /// `response?.primarySharedConnectedAccounts` for an active Secondary. Never mutated from this
+    /// view, and never referenced by `testDashboardStillNeverCallsPlaidDirectlyAfterRawBalanceRestore`'s
+    /// own forbidden-string list, since none of Plaid's own sync/refresh types are touched here.
+    @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
+    /// CLIENT UI PHASE — existing app-lifecycle mechanism (same as `MonthlyPlanView`'s own use)
+    /// keeping the server's Monthly Savings aggregate current across a calendar-month rollover
+    /// without any polling/timer. See `syncSavingsSummaryIfNeeded()`.
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isPresentingSetBudget = false
     @State private var isPresentingAddExpense = false
     @State private var isPresentingSettings = false
     @State private var isPresentingMonthlySummary = false
     @State private var isPresentingActivity = false
+    /// Non-`nil` while a Favorites Bar destination's sheet is presented — drives the single
+    /// `.sheet(item:)` below (`destinationView(for:)`), which routes to each destination's existing
+    /// canonical view unmodified. Never a second copy of any of those screens' own logic.
+    @State private var presentedFavoriteDestination: FavoriteDestinationID?
     @State private var selectedWeekIndex: Int?
     /// nil means "no explicit choice yet" — `effectiveActivityTab` below falls back to
     /// `ActivityTabPresenter.defaultTab`, same pattern as `selectedWeekIndex`/`effectiveWeekIndex`.
@@ -30,7 +62,34 @@ struct DashboardView: View {
     /// simply gets a graceful 429 on tap, handled the same way as any other failed refresh.
     @State private var rateLimitedAccountKeys: Set<String> = []
 
+    /// CLIENT CORRECTION — TARGET ARCHITECTURE: a Secondary's This Week, Monthly Spending Quick
+    /// Stat, Monthly Outlook, AND Week-by-Week all derive from this ONE authoritative shared
+    /// aggregate (never four independent fetches, never a duplicated calculation) — the Primary's
+    /// own already-computed `dashboard_summary` row, never a second, independent reconstruction
+    /// from raw shared transactions. Owned here (not by a leaf subview) so every section that needs
+    /// it reads the same in-flight/loaded/failed state. Fully transient — never written to
+    /// SwiftData, never holds a stale previous-Primary's data (see `secondaryDashboardSummaryLoadKey`'s
+    /// own doc comment for why a role/primary change always produces a fresh instance rather than
+    /// reusing a stale one). `SharedMonthlyOutlookViewModel` (the raw-reconstruction path this
+    /// replaced for Dashboard purposes) remains in use elsewhere, unmodified, by the separate
+    /// `SharedMonthlyPlanView` Settings screen only.
+    @State private var dashboardSummaryViewModel: SharedDashboardSummaryViewModel?
+
     private var settings: BudgetSettings? { settingsList.first }
+
+    /// The Favorites Bar's own content: valid (non-stale) AND currently-eligible favorites, in the
+    /// user's saved order. Deliberately a non-mutating, filtered PROJECTION — merely rendering the
+    /// Dashboard must never itself write to `FavoritesSettings` (that would be exactly the kind of
+    /// passive-render side effect this project's own sign-out safety rules forbid) — see
+    /// `FavoritesConfigurationView.onAppear`'s explicit, user-visible-context
+    /// `reconcileEligibility` call for where stale/ineligible entries actually get pruned from
+    /// storage. An empty result here is what hides the bar entirely — see `favoritesBarSection`.
+    private var favoriteDestinations: [FavoriteDestinationID] {
+        guard let favorites = favoritesSettingsList.first else { return [] }
+        return favorites.validDestinationIDs.filter {
+            FavoriteDestinationID.isEligible($0, accountRelatedOptionsVisibility: accountRelatedOptionsViewModel.visibility)
+        }
+    }
 
     private var weekInterval: DateInterval {
         DateRangeHelper.currentWeekRange(weekStartsOnSunday: settings?.weekStartsOnSunday ?? true)
@@ -52,13 +111,17 @@ struct DashboardView: View {
         BudgetCalculator.monthlySpent(transactions, in: monthInterval, includePending: includePending)
     }
 
+    /// URGENT REGRESSION FIX — computed live via the same shared `effectivePlannedWeeklySpending`
+    /// authority every other consumer uses (`plannedWeeklySpendingForOutlook`, below), never
+    /// `settings?.weeklySpendingLimit` directly. That stored field is only a snapshot, refreshed
+    /// solely when Monthly Plan/Settings happen to run their own sync — reading it here could show
+    /// a stale (or default-zero) number on a Dashboard opened before either of those screens ever
+    /// ran. `nil` (no custom override) means Automatic mode, never "unconfigured": Automatic
+    /// mode's own value (Flexible Spending Available ÷ 4) is still a real, positive weekly amount
+    /// whenever Flexible Spending Available is positive — it is never $0 merely because no custom
+    /// override was ever entered.
     private var weeklyLimit: Decimal {
-        settings?.weeklySpendingLimit ?? 0
-    }
-
-    /// A budget only "exists" for dashboard purposes once a positive weekly limit has been set.
-    private var hasWeeklyBudget: Bool {
-        weeklyLimit > 0
+        plannedWeeklySpendingForOutlook
     }
 
     private var status: SpendingStatus {
@@ -69,8 +132,121 @@ struct DashboardView: View {
         )
     }
 
-    private var remainingThisWeek: Decimal {
-        BudgetCalculator.remaining(limit: weeklyLimit, spent: spentThisWeek)
+    private var savedThisMonth: Decimal {
+        SavingsCalculator.savedThisMonth(savingsEntries, in: monthInterval)
+    }
+
+    private var totalSavingsToDate: Decimal {
+        SavingsCalculator.totalSavingsToDate(savingsEntries)
+    }
+
+    private var showMonthlySpendingQuickStat: Bool {
+        settings?.showMonthlySpendingQuickStat ?? true
+    }
+
+    /// TARGET ARCHITECTURE — for a Secondary, Monthly Spending must reflect the Primary's
+    /// authorized shared Actual spending, never this device's own local transactions (which for a
+    /// Secondary are normally near-empty and would otherwise silently look like real data). A
+    /// Primary's own visibility/behavior is completely unchanged — `showMonthlySpendingQuickStat`
+    /// alone, exactly as before this correction.
+    private var monthlySpendingQuickStatVisible: Bool {
+        guard isSecondary else { return showMonthlySpendingQuickStat }
+        guard accountRelatedOptionsLoaded, secondaryOutlookAuthorized,
+              case .loaded(.some) = dashboardSummaryViewModel?.state
+        else { return false }
+        return showMonthlySpendingQuickStat
+    }
+
+    private var monthlySpendingQuickStatAmount: Decimal {
+        if isSecondary, let summary = sharedDashboardSummary {
+            return summary.actualSpentThisMonth
+        }
+        return spentThisMonth
+    }
+
+    private var showSavedThisMonthQuickStat: Bool {
+        settings?.showSavedThisMonthQuickStat ?? true
+    }
+
+    /// LOCKED PRODUCT RULE — a Secondary never uses their own local `SavingsEntry` records to
+    /// populate a savings Quick Stat; they see a separate, server-backed shared Quick Stat instead
+    /// (see `SharedSavedThisMonthQuickStatCard`), gated by `Share Monthly Savings`, not by this
+    /// device's own `showSavedThisMonthQuickStat` preference.
+    private var isSecondary: Bool {
+        accountRelatedOptionsViewModel.response?.role == .secondary
+    }
+
+    /// CLIENT UI PHASE — reconciles the server's Monthly Savings aggregate whenever this Primary's
+    /// Dashboard loads/returns to the foreground. Best-effort, no-op for a Secondary (who has no
+    /// own summary to push) — see `SavingsSummarySyncService`'s own header.
+    ///
+    /// CRASH FIX — two independent `EXC_BAD_ACCESS` risks on `@Query`-backed properties
+    /// (`savingsEntries` here), both handled before either is ever touched:
+    /// (1) TEARDOWN — `.task` cancellation is cooperative: when a sign-out/user-switch tears down
+    /// this view (and its `@Query`-backed `ModelContainer`) while this task is still suspended on
+    /// `await`, SwiftUI marks the task cancelled but does not stop it from resuming. The
+    /// `Task.isCancelled` guard below is the same idiom already used for this exact class of
+    /// teardown race elsewhere in this app — see `AutoBackupManager`/`ManualDataCloudSyncManager`/
+    /// `MonthlyPlanCloudSyncManager`.
+    /// (2) FRESH-ATTACH — on a fresh sign-in, `RootView` (and everything under it, including this
+    /// view) mounts under a brand-new `.id(userId)` identity with a just-attached
+    /// `.modelContainer(container)`; a `.task` can start running in the very same runloop turn,
+    /// before SwiftData has finished wiring this view's `@Query` observation machinery to that new
+    /// container — a real-device-confirmed crash, distinct from (1) since `Task.isCancelled` is
+    /// still `false` here (nothing has torn down; the container is simply not fully attached yet).
+    /// `Task.yield()` defers to the next main-actor turn — the same "let SwiftUI's already-
+    /// triggered pass finish first" idiom `FinanceTrackApp`'s own deferred `userDataStore.detach()`
+    /// call uses — giving that attachment a turn to complete before any `@Query` read is attempted.
+    private func syncSavingsSummaryIfNeeded() async {
+        guard !Task.isCancelled else { return }
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        guard !isSecondary else { return }
+        await SavingsSummarySyncService.sync(entries: savingsEntries)
+    }
+
+    /// USER B DASHBOARD PARITY — pushes this Primary's own authoritative Dashboard aggregate
+    /// whenever the Dashboard loads/returns to the foreground, mirroring
+    /// `syncSavingsSummaryIfNeeded`'s own trigger/no-op-for-Secondary posture exactly. Best-effort:
+    /// a failed push is silently retried on the next trigger (see
+    /// `PrimaryDashboardSummarySyncService`'s own header). Computed from the FULL local
+    /// `transactions` collection — the exact same set `monthlyPlanSummary` above sums over — never
+    /// a second, per-account-filtered subset (see that service's own header for why: the single
+    /// `monthlyPlan` sharing permission already gates the entire aggregate). `authoritativeWeeklyLimit`
+    /// passes this same view's own `weeklyLimit` (the value actually displayed above) through
+    /// verbatim, so the uploaded `weekly_spending_limit` can never diverge from what this device is
+    /// currently showing — the sync service itself no longer recomputes it independently.
+    ///
+    /// MONTHLY OUTLOOK + SCENARIO PERIOD-CASH-FLOW CORRECTION — `monthlyOutlookBudgeted` now
+    /// passes `plannedMonthlySpendingForOutlook` (Planned Weekly Spending × 4, this view's own
+    /// authoritative planning value — the same figure `monthlyOutlookSection` displays as
+    /// "Budgeted"), never `BudgetSettings.monthlyGoal` (which mirrors the Savings Goal, not
+    /// planned spending — that was the root cause of the prior $0.00 Budgeted defect when the
+    /// Savings Goal was $0). `currentWeekIndex` passes
+    /// `currentWeekComparisonIndexForUpload` — the SAME `weeklyComparisons.firstIndex(where:
+    /// { $0.weekInterval.contains(.now) })` logic `currentWeekComparisonIndex`/`effectiveWeekIndex`
+    /// use for display, but WITHOUT their `?? 0`/manual-selection fallbacks, so a month with no
+    /// week actually containing today uploads `nil` (→ `NULL` current-plan-week fields) rather than
+    /// a guessed Week 1.
+    private func syncDashboardSummaryIfNeeded() async {
+        guard !Task.isCancelled else { return }
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        guard !isSecondary else { return }
+        await PrimaryDashboardSummarySyncService.sync(
+            transactions: transactions,
+            incomeSources: incomeSources,
+            recurringExpenses: recurringExpenses,
+            planSettings: monthlyPlanSettingsList.first,
+            authoritativeWeeklyLimit: weeklyLimit,
+            monthlyOutlookBudgeted: plannedMonthlySpendingForOutlook,
+            currentWeekIndex: currentWeekComparisonIndexForUpload,
+            weekInterval: weekInterval,
+            monthInterval: monthInterval,
+            weekStartsOnSunday: settings?.weekStartsOnSunday ?? true,
+            includePending: includePending,
+            warningThreshold: settings?.warningThreshold ?? 0.70
+        )
     }
 
     /// Every selectable Recent Activity source — one per connected Plaid account actually
@@ -120,7 +296,19 @@ struct DashboardView: View {
             incomeSources: incomeSources,
             recurringExpenses: recurringExpenses,
             planSettings: monthlyPlanSettingsList.first,
-            weeklyBudgetLimit: weeklyLimit,
+            // CRASH FIX — must NOT be `weeklyLimit`: `weeklyLimit` now equals
+            // `plannedWeeklySpendingForOutlook`, which reads `monthlyPlanSummary.
+            // flexibleSpendingAvailable` — passing `weeklyLimit` here created a direct evaluation
+            // cycle (`weeklyLimit` → `plannedWeeklySpendingForOutlook` → `monthlyPlanSummary` →
+            // `weeklyLimit` → ...), an infinite recursion that stack-overflows on every access,
+            // surfacing as a deterministic `EXC_BAD_ACCESS` (real-device-confirmed) wherever the
+            // guard page happened to be hit — not a timing/teardown race, since this recursion is
+            // pure synchronous computed-property evaluation with no `await` anywhere in the chain.
+            // The raw stored field is exactly what `weeklyLimit` itself evaluated to before it was
+            // changed to route through the live formula, so this restores the same non-circular
+            // input `Summary`'s own fields (other than `flexibleSpendingAvailable`, which never
+            // depended on this parameter in the first place) always received.
+            weeklyBudgetLimit: settings?.weeklySpendingLimit ?? 0,
             transactions: transactions,
             weekInterval: weekInterval,
             weekStartsOnSunday: settings?.weekStartsOnSunday ?? true,
@@ -129,30 +317,82 @@ struct DashboardView: View {
         )
     }
 
+    /// The canonical running monthly balance: money after bills, minus the Monthly Savings Goal
+    /// and optional Buffer, minus actual qualifying spending so far this month — built from
+    /// `monthlyPlanSummary`'s own already-computed fields (never a duplicated income/bills/
+    /// spending calculation) via `MonthlyPlanCalculator.moneyAfterBills`/`monthlySpendingBudget`/
+    /// `monthlySpendRemaining`. This is the same authoritative result that drives
+    /// `BudgetSettings.weeklySpendingLimit` (see `MonthlyPlanView.applyBudgetAutoCalculateIfNeeded`).
+    // MARK: - MONTHLY OUTLOOK + SCENARIO PERIOD-CASH-FLOW CORRECTION — Planned Weekly Spending
+    // planning path (Part 1/3/4). ONE SHARED CALCULATION PATH — every value below routes through
+    // `MonthlyPlanCalculator`'s planning functions applied to `monthlyPlanSummary` (itself
+    // unchanged), the exact same public functions `MonthlyPlanView`'s Planning section and
+    // `PrimaryDashboardSummarySyncService.sync` use — never a second, competing formula written
+    // here. `monthlyPlanSummary.projectedMonthlySavings` (the legacy actual-spending formula)
+    // remains untouched and unused by this section.
+
+    private var plannedWeeklySpendingForOutlook: Decimal {
+        MonthlyPlanCalculator.effectivePlannedWeeklySpending(
+            override: monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride,
+            flexibleSpendingAvailable: monthlyPlanSummary.flexibleSpendingAvailable
+        )
+    }
+
+    private var plannedMonthlySpendingForOutlook: Decimal {
+        MonthlyPlanCalculator.plannedMonthlySpending(plannedWeeklySpending: plannedWeeklySpendingForOutlook)
+    }
+
+    private var projectedMonthlySavingsForOutlook: Decimal {
+        let additional = MonthlyPlanCalculator.additionalPlannedSavings(
+            flexibleSpendingAvailable: monthlyPlanSummary.flexibleSpendingAvailable,
+            plannedMonthlySpending: plannedMonthlySpendingForOutlook
+        )
+        return MonthlyPlanCalculator.projectedSavingsFromPlannedSpending(
+            monthlySavingsGoal: monthlyPlanSummary.monthlySavingsGoal,
+            additionalPlannedSavings: additional
+        )
+    }
+
+    private var projectedStatusForOutlook: SpendingStatus {
+        MonthlyPlanCalculator.monthlyPlanStatus(projectedSavings: projectedMonthlySavingsForOutlook, savingsGoal: monthlyPlanSummary.monthlySavingsGoal)
+    }
+
+    private var monthlySpendRemaining: Decimal {
+        let moneyAfterBills = MonthlyPlanCalculator.moneyAfterBills(
+            income: monthlyPlanSummary.estimatedMonthlyIncome,
+            fixedExpenses: monthlyPlanSummary.estimatedMonthlyFixedExpenses
+        )
+        let spendingBudget = MonthlyPlanCalculator.monthlySpendingBudget(
+            moneyAfterBills: moneyAfterBills,
+            savingsGoal: monthlyPlanSummary.monthlySavingsGoal,
+            bufferAmount: monthlyPlanSummary.bufferAmount
+        )
+        return MonthlyPlanCalculator.monthlySpendRemaining(
+            monthlySpendingBudget: spendingBudget,
+            actualMonthlySpending: monthlyPlanSummary.actualSpentThisMonth
+        )
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     header
-
-                    PremiumActionButton(title: "Add Expense", systemIconName: "plus") {
-                        isPresentingAddExpense = true
-                    }
-                    .padding(.horizontal, Theme.Spacing.lg)
+                    favoritesBarSection
 
                     weeklyCardSection
                     quickStatsSection
                     connectedAccountsSection
-                    monthlyOutlookSection
-                    weekByWeekSection
+                    monthlyOutlookAndWeekByWeekSection
                     recentActivitySection
                 }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: favoriteDestinations)
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationBarHidden(true)
             .sheet(isPresented: $isPresentingSetBudget) {
-                WeeklyLimitEditView(settings: settings)
+                WeeklyLimitEditView(limit: plannedWeeklySpendingForOutlook)
             }
             .sheet(isPresented: $isPresentingAddExpense) {
                 AddExpenseView()
@@ -169,12 +409,51 @@ struct DashboardView: View {
                 // this file, and opened with whatever tab is currently selected here.
                 ExpenseListView(initialTab: effectiveActivityTab)
             }
+            .sheet(item: $presentedFavoriteDestination) { destination in
+                favoriteDestinationView(for: destination)
+            }
+            .task {
+                await syncSavingsSummaryIfNeeded()
+            }
+            .task {
+                await syncDashboardSummaryIfNeeded()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    Task { await syncSavingsSummaryIfNeeded() }
+                    Task { await syncDashboardSummaryIfNeeded() }
+                }
+            }
+            // CLIENT CORRECTION — `RootView.task`'s own single, fire-and-forget
+            // `accountRelatedOptionsViewModel.refresh()` call is the only launch-time trigger
+            // anywhere in the app; if it fails (real-device network hiccup, cold-start token not
+            // yet warm), nothing previously retried it for the rest of the session short of a
+            // background/foreground cycle, silently leaving every Secondary-gated Dashboard
+            // section (`accountRelatedOptionsLoaded`) stuck showing nothing. `refresh()` itself is
+            // safe to call redundantly — it coalesces onto an already-in-flight request and never
+            // re-shows a loading placeholder once `.loaded` (see that view model's own header) —
+            // so giving Dashboard its own independent chance costs nothing extra on the happy path
+            // and closes the single-point-of-failure on the unhappy one. No polling/timer: exactly
+            // one call, tied to this view's own appearance, same as every other `.task` here.
+            .task {
+                await accountRelatedOptionsViewModel.refresh()
+            }
+            .task(id: secondaryDashboardSummaryLoadKey) {
+                await loadDashboardSummaryIfNeeded()
+            }
         }
         .preferredColorScheme(.dark)
     }
 
     // MARK: - Header
 
+    /// LOCKED PLACEMENT — Settings stays in the upper-right; "+ Add Expense" is now a SMALLER
+    /// icon-only control (reusing `HeaderIconButton`, same as Settings/Privacy) stacked directly
+    /// beneath the Settings/Privacy row, rather than the old full-width `PremiumActionButton` row.
+    /// Its own trigger/destination is completely unchanged — still `isPresentingAddExpense` /
+    /// `AddExpenseView()`, only the control that sets it is smaller. Freed-up width is what lets
+    /// `favoritesBarSection` (rendered directly below, in its own centered full-content-width row)
+    /// occupy the Dashboard's larger central horizontal area.
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
@@ -189,69 +468,288 @@ struct DashboardView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             Spacer()
-            HStack(spacing: Theme.Spacing.sm) {
-                HeaderIconButton(systemName: privacyMode.isEnabled ? "eye.slash.fill" : "eye.fill") {
-                    privacyMode.toggle()
+            VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
+                HStack(spacing: Theme.Spacing.sm) {
+                    HeaderIconButton(systemName: privacyMode.isEnabled ? "eye.slash.fill" : "eye.fill") {
+                        privacyMode.toggle()
+                    }
+                    HeaderIconButton(systemName: "gearshape.fill") {
+                        isPresentingSettings = true
+                    }
                 }
-                HeaderIconButton(systemName: "gearshape.fill") {
-                    isPresentingSettings = true
+                HStack(spacing: Theme.Spacing.xs) {
+                    // Purely visual — the button below still carries the ONE spoken
+                    // "Add Expense" accessibility label, so this text is hidden from VoiceOver
+                    // rather than combined with it (avoids a duplicated announcement). The `+`
+                    // button's own trigger/destination is completely unchanged.
+                    Text("Add Expense")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textSecondary)
+                        .accessibilityHidden(true)
+                    HeaderIconButton(systemName: "plus") {
+                        isPresentingAddExpense = true
+                    }
+                    .accessibilityLabel("Add Expense")
                 }
             }
         }
         .padding(.horizontal, Theme.Spacing.lg)
     }
 
+    // MARK: - Favorites Bar
+
+    /// LOCKED VISIBILITY — hidden entirely at zero favorites: no empty heading, no empty capsule,
+    /// no reserved blank space (an `EmptyView()` branch contributes nothing to the surrounding
+    /// `VStack`'s layout, so `weeklyCardSection` etc. simply lay out as if this row weren't there
+    /// at all). The "Favorites" heading and the capsule are DELIBERATELY inside the SAME
+    /// `if !favoriteDestinations.isEmpty` branch — one condition, never two — so neither can ever
+    /// appear or disappear independently of the other. Appears the moment `favoriteDestinations`
+    /// goes from empty to non-empty, and disappears the moment it goes back to empty — both
+    /// together, via the same `.transition` (applied to the whole `VStack`, heading included),
+    /// driven by `favoriteDestinations` itself changing (see the `.animation(value:)` on this
+    /// view's outer `VStack` in `body`). `Reduce Motion` collapses the transition to a plain,
+    /// motion-free cross-fade.
+    ///
+    /// CENTERED HEADING — deliberately NOT `DashboardSectionHeader` (the leading-aligned
+    /// `HStack { Text; Spacer }` every OTHER Dashboard section uses — `quickStatsSection`/
+    /// `connectedAccountsSection` keep using it, untouched). This is the one section whose heading
+    /// must sit centered directly above its own content, matching `FavoritesBarView`'s own capsule
+    /// (which centers itself — content-sized, never full-width — within the same available width).
+    /// Same font/color as `DashboardSectionHeader` (`Theme.headlineFont`/`Theme.textPrimary`), same
+    /// `Theme.Spacing.lg` horizontal padding as the capsule directly below it — centering both
+    /// within the identical available width is what keeps the heading's center aligned with the
+    /// capsule's own center at every favorite count (1 through the 6-item maximum), since the
+    /// capsule's content-driven width still centers within that same space regardless of how many
+    /// buttons it holds.
+    @ViewBuilder
+    private var favoritesBarSection: some View {
+        if !favoriteDestinations.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                Text("Favorites")
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, Theme.Spacing.lg)
+
+                FavoritesBarView(destinations: favoriteDestinations) { destination in
+                    presentedFavoriteDestination = destination
+                }
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
+            .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.92)))
+        }
+    }
+
+    /// Routes to each destination's existing canonical view, completely unmodified — never a
+    /// second copy of any of these screens' own logic/data ownership. Matches exactly what
+    /// `SettingsView` itself already presents for the same five sheets (`MonthlyPlanEntryView`,
+    /// `ConnectedAccountsView`, `AccountRelatedOptionsView`, `DataBackupView`, `InsightsView`) plus
+    /// `AddSavingsEntryView` (canonically sheet-presented from `MonthlyPlanView`, and equally safe
+    /// to present standalone here since it takes no parameters and owns no external state).
+    @ViewBuilder
+    private func favoriteDestinationView(for destination: FavoriteDestinationID) -> some View {
+        switch destination {
+        case .monthlyPlan: MonthlyPlanEntryView()
+        case .addToSavings: AddSavingsEntryView()
+        case .connectedAccounts: ConnectedAccountsView()
+        case .accountSharing: AccountRelatedOptionsView()
+        case .backup: DataBackupView()
+        case .insights: InsightsView()
+        }
+    }
+
     // MARK: - Weekly hero card
 
+    /// TARGET ARCHITECTURE — a Secondary's This Week must reflect the Primary's authorized shared
+    /// weekly comparison (from the same `SharedMonthlyOutlookViewModel` summary already driving
+    /// Monthly Outlook/Week-by-Week — never a second calculation), never this device's own local
+    /// `BudgetSettings.weeklySpendingLimit` (which is a local, per-device preference, never synced
+    /// from the Primary, and normally unset for a Secondary).
+    ///
+    /// URGENT REGRESSION FIX — for the Primary, the normal `SpendingCardView` now ALWAYS renders,
+    /// in both Automatic and Custom weekly mode, exactly like every other Dashboard section. The
+    /// removed empty-state gate incorrectly treated `plannedWeeklySpendingOverride == nil`
+    /// (Automatic mode) and a deliberate custom zero limit the same way — not configured — and
+    /// hid the real card behind a setup prompt Scott never asked for. Neither state has any
+    /// bearing on whether Monthly Plan data exists; Automatic mode's own value (Flexible Spending
+    /// Available ÷ 4) is a real number the moment income/bills exist, with nothing left for the
+    /// user to set up first. Tapping the card still reaches the same `WeeklyLimitEditView` sheet
+    /// the removed button used to (Automatic mode shown as Automatic, Custom mode shown with its
+    /// real amount) — see `isPresentingSetBudget`'s own sheet below; the card's own appearance is
+    /// unchanged (no redesign).
     @ViewBuilder
     private var weeklyCardSection: some View {
-        if hasWeeklyBudget {
-            SpendingCardView(
-                spent: spentThisWeek,
-                limit: weeklyLimit,
-                status: status,
-                weekInterval: weekInterval,
-                isPrivacyModeEnabled: privacyMode.isEnabled
-            )
-            .padding(.horizontal, Theme.Spacing.lg)
-        } else {
-            NoBudgetCard {
-                isPresentingSetBudget = true
+        if accountRelatedOptionsLoaded {
+            if isSecondary {
+                // USER B DASHBOARD PARITY — reads the Primary's own authoritative, already-computed
+                // shared aggregate (`sharedDashboardSummary`) — never a second independent
+                // reconstruction from raw shared transactions. Guarantees exact parity with the
+                // Primary's own Dashboard by construction: there is only one formula, computed once,
+                // on the Primary's device.
+                if secondaryOutlookAuthorized, let summary = sharedDashboardSummary {
+                    SpendingCardView(
+                        spent: summary.actualSpentThisWeek,
+                        limit: summary.weeklySpendingLimit,
+                        status: BudgetCalculator.status(spent: summary.actualSpentThisWeek, limit: summary.weeklySpendingLimit, warningThreshold: settings?.warningThreshold ?? 0.70),
+                        weekInterval: sharedCurrentWeekInterval,
+                        monthlyRemaining: summary.monthlySpendRemaining,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                    .padding(.horizontal, Theme.Spacing.lg)
+                }
+                // else: not authorized, or shared data not yet loaded — nothing, never a fake
+                // local "set a budget" prompt for a Secondary.
+            } else {
+                SpendingCardView(
+                    spent: spentThisWeek,
+                    limit: weeklyLimit,
+                    status: status,
+                    weekInterval: weekInterval,
+                    monthlyRemaining: monthlySpendRemaining,
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                )
+                .padding(.horizontal, Theme.Spacing.lg)
+                .contentShape(Rectangle())
+                .onTapGesture { isPresentingSetBudget = true }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Edit Weekly Limit")
             }
-            .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 
     // MARK: - Quick stats
 
-    private var quickStatsSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Quick Stats")
+    /// CLIENT CORRECTION — savings-related Quick Stats must not pick a Primary/local vs.
+    /// Secondary/shared branch while role is still unknown (`accountRelatedOptionsViewModel.state`
+    /// not yet `.loaded`), since `isSecondary` defaults to `false` during `.idle`/`.loading` and
+    /// would otherwise transiently render the LOCAL card for what may actually be a Secondary.
+    /// Mirrors `MonthlyPlanEntryView`'s own "LOADING, NOT FLICKER" gate on the same state.
+    private var accountRelatedOptionsLoaded: Bool {
+        if case .loaded = accountRelatedOptionsViewModel.state { return true }
+        return false
+    }
 
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.sm), GridItem(.flexible())], spacing: Theme.Spacing.sm) {
-                Button {
-                    isPresentingMonthlySummary = true
-                } label: {
-                    StatCard(
-                        title: "Monthly Spending",
-                        systemIconName: "chart.pie.fill",
-                        amount: spentThisMonth,
-                        subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                        accentColor: Theme.accent,
-                        isPrivacyModeEnabled: privacyMode.isEnabled
-                    )
+    /// TARGET ARCHITECTURE — the single authorization gate for every shared-Monthly-Outlook-backed
+    /// Dashboard section (This Week, Monthly Spending, Monthly Outlook, Week-by-Week): role/state
+    /// authoritatively known AND the Primary currently shares Monthly Plan.
+    private var secondaryOutlookAuthorized: Bool {
+        accountRelatedOptionsLoaded && isSecondary && accountRelatedOptionsViewModel.response?.primaryMonthlyPlanShared == true
+    }
+
+    private var secondaryOutlookPrimaryUserId: UUID? {
+        guard secondaryOutlookAuthorized else { return nil }
+        return accountRelatedOptionsViewModel.response?.primaryUserId
+    }
+
+    /// USER B DASHBOARD PARITY — depends only on authorization + primary user id (not a shared
+    /// account list) since `dashboard_summary` carries only the Primary's already-filtered
+    /// aggregate, never a per-account list this device would need to react to directly.
+    private var secondaryDashboardSummaryLoadKey: String {
+        guard let primaryUserId = secondaryOutlookPrimaryUserId else { return "unauthorized" }
+        return primaryUserId.uuidString
+    }
+
+    /// Creates (or replaces, on a Primary/user change) the authoritative shared Dashboard summary
+    /// view model and loads it — or drops it entirely once no longer authorized, matching every
+    /// other shared view model's own "state simply isn't reachable once unauthorized" clearing
+    /// mechanism.
+    @MainActor
+    private func loadDashboardSummaryIfNeeded() async {
+        guard let primaryUserId = secondaryOutlookPrimaryUserId else {
+            dashboardSummaryViewModel = nil
+            return
+        }
+        let viewModel: SharedDashboardSummaryViewModel
+        if let existing = dashboardSummaryViewModel, existing.primaryUserId == primaryUserId {
+            viewModel = existing
+        } else {
+            viewModel = SharedDashboardSummaryViewModel(primaryUserId: primaryUserId)
+            dashboardSummaryViewModel = viewModel
+        }
+        await viewModel.load()
+    }
+
+    /// The loaded authoritative shared Dashboard aggregate, if any — the SAME numbers the
+    /// Primary's own Dashboard already shows (already privacy-filtered on the Primary's device).
+    /// This Week/Monthly Spending Quick Stat/Monthly Outlook/Week-by-Week all read from this
+    /// directly — a single canonical source, never a second independent reconstruction.
+    private var sharedDashboardSummary: SharedDashboardSummaryDTO? {
+        guard case .loaded(let summary?) = dashboardSummaryViewModel?.state else { return nil }
+        return summary
+    }
+
+    /// Same current-week interval `SharedMonthlyOutlookViewModel.load()` itself used to compute
+    /// `summary.actualSpentThisWeek` — recomputed here only for display (the card's own week-range
+    /// label), never for any spend arithmetic of its own.
+    private var sharedCurrentWeekInterval: DateInterval {
+        DateRangeHelper.currentWeekRange(weekStartsOnSunday: true)
+    }
+
+    /// LOCKED PRODUCT RULE — a Secondary's local `showSavedThisMonthQuickStat` preference is never
+    /// consulted for the shared card (that Settings toggle isn't even shown to a Secondary — see
+    /// `SettingsView.quickStatsSection`); the Primary's `Share Monthly Savings` permission is the
+    /// only thing gating `sharedSavingsQuickStatVisible` below.
+    private var showLocalSavedThisMonthQuickStat: Bool {
+        accountRelatedOptionsLoaded && !isSecondary && showSavedThisMonthQuickStat
+    }
+
+    private var sharedSavingsQuickStatVisible: Bool {
+        accountRelatedOptionsLoaded && isSecondary && (accountRelatedOptionsViewModel.response?.primaryMonthlySavingsShared ?? false)
+    }
+
+    @ViewBuilder
+    private var quickStatsSection: some View {
+        if monthlySpendingQuickStatVisible || showLocalSavedThisMonthQuickStat || sharedSavingsQuickStatVisible {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                DashboardSectionHeader(title: "Quick Stats")
+
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.sm), GridItem(.flexible())], spacing: Theme.Spacing.sm) {
+                    if monthlySpendingQuickStatVisible {
+                        if isSecondary {
+                            // No tap target for the shared figure — same "no navigation into an
+                            // unaudited local-only detail screen" precedent as every other shared
+                            // Quick Stat card in this file.
+                            StatCard(
+                                title: "Monthly Spending",
+                                systemIconName: "chart.pie.fill",
+                                amount: monthlySpendingQuickStatAmount,
+                                subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                                accentColor: Theme.accent,
+                                isPrivacyModeEnabled: privacyMode.isEnabled
+                            )
+                        } else {
+                            Button {
+                                isPresentingMonthlySummary = true
+                            } label: {
+                                StatCard(
+                                    title: "Monthly Spending",
+                                    systemIconName: "chart.pie.fill",
+                                    amount: monthlySpendingQuickStatAmount,
+                                    subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                                    accentColor: Theme.accent,
+                                    isPrivacyModeEnabled: privacyMode.isEnabled
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    if showLocalSavedThisMonthQuickStat {
+                        SavedThisMonthQuickStatCard(
+                            savedThisMonth: savedThisMonth,
+                            totalSavingsToDate: totalSavingsToDate,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    }
+                    if sharedSavingsQuickStatVisible, let primaryUserId = accountRelatedOptionsViewModel.response?.primaryUserId {
+                        // Fresh `SharedMonthlySavingsViewModel` per presentation — see that type's
+                        // own header for why revocation needs no explicit clearing: the moment
+                        // `sharedSavingsQuickStatVisible` flips false, SwiftUI removes this whole
+                        // branch (and the view model with it).
+                        SharedSavedThisMonthQuickStatCard(primaryUserId: primaryUserId, isPrivacyModeEnabled: privacyMode.isEnabled)
+                    }
                 }
-                .buttonStyle(.plain)
-                StatCard(
-                    title: "Available This Week",
-                    systemIconName: "target",
-                    amount: remainingThisWeek,
-                    subtitle: hasWeeklyBudget ? "Left to spend" : "Set a weekly budget",
-                    accentColor: hasWeeklyBudget ? (status == .over ? Theme.statusOver : Theme.accentSecondary) : Theme.textTertiary,
-                    isPrivacyModeEnabled: privacyMode.isEnabled
-                )
+                .padding(.horizontal, Theme.Spacing.lg)
             }
-            .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 
@@ -264,22 +762,85 @@ struct DashboardView: View {
         ConnectedAccountsDashboardPresenter.displays(for: plaidConnection.connections)
     }
 
+    /// Every Primary-owned Connected Account currently, effectively shared with this Secondary —
+    /// already scoped server-side (migration 0016's `get_secondary_shared_data`, re-verified
+    /// against the canonical evaluator) via `AccountRelatedOptionsViewModel`'s own already-running
+    /// discovery refresh (see `RootView.task`). Empty for a Primary, an unrelated user, or a
+    /// Secondary nothing is currently shared with.
+    private var sharedConnectedAccounts: [SharedConnectedAccountDTO] {
+        accountRelatedOptionsViewModel.response?.primarySharedConnectedAccounts ?? []
+    }
+
+    /// POST-PHASE-10 CORRECTION, PHASE B PARITY FIX STEP 1 — a shared account renders using the
+    /// exact same `ConnectedAccountBalanceRow` component and card as an owned account (no visible
+    /// "Shared" badge, no stripped-down summary row). `SharedConnectedAccountDTO` (migration
+    /// 0017's extension of `get_secondary_shared_data`) now also carries
+    /// `currentBalance`/`availableBalance`/`creditLimit`/`accountType`/`updatedAt`, the same
+    /// non-secret fields the owner's own listing already exposes — fed through the exact same
+    /// `PlaidBalanceFormatter.rows(for:)` an owned account's row uses, so a credit card's shared
+    /// balance reads "Balance Owed" and a checking account's reads "Current Balance" identically
+    /// to what the Primary sees. For an account the Primary hasn't refreshed yet, every one of
+    /// those fields is still `nil` from the server, so `primaryRow`/`updatedAt` stay `nil` here
+    /// too — `ConnectedAccountBalanceRow` renders that as its existing, honest "Balance not
+    /// refreshed yet" state, same as an owned-but-never-synced account; nothing is ever
+    /// fabricated. `connectionId`/`accountId` remain synthetic/`nil` and `onRefresh` is never
+    /// supplied for a shared display (see `connectedAccountsSection`'s own gating), so a shared
+    /// row can never become eligible for `refreshConnectedAccount(_:)` — viewing a shared balance
+    /// never triggers a new Plaid request and never consumes the Primary's own refresh allowance;
+    /// this reads only the Primary's already-cached, already-authorized `plaid_accounts` row.
+    private var sharedConnectedAccountDisplays: [ConnectedAccountsDashboardPresenter.Display] {
+        sharedConnectedAccounts.map { account in
+            let balance = PlaidAccountBalance(
+                accountId: account.plaidAccountId.uuidString,
+                name: account.name,
+                officialName: nil,
+                mask: account.mask,
+                type: account.accountType,
+                subtype: nil,
+                currentBalance: account.currentBalance,
+                availableBalance: account.availableBalance,
+                creditLimit: account.creditLimit,
+                isoCurrencyCode: nil,
+                unofficialCurrencyCode: nil
+            )
+            return ConnectedAccountsDashboardPresenter.Display(
+                id: "shared-connected-\(account.id.uuidString)",
+                connectionId: "shared",
+                accountId: nil,
+                institutionName: account.name ?? "Connected Account",
+                primaryRow: PlaidBalanceFormatter.rows(for: balance).first,
+                updatedAt: account.updatedAt
+            )
+        }
+    }
+
+    /// PHASE B PARITY FIX — an owned Dashboard row has never been tappable (only its Refresh
+    /// button is interactive; see `refreshConnectedAccount(_:)`'s own doc comment). A shared row
+    /// previously broke that parity by opening `SharedConnectedAccountDetailView` on tap, which
+    /// this file's own real-device testing found inconsistent with User A's equivalent card. The
+    /// detail/transactions screen this used to open is NOT removed from the app — it remains
+    /// reachable from Settings > Account Related Options > "Shared with You"
+    /// (`AccountRelatedOptionsView.swift`'s own `SharedByPrimarySectionView`), and the account's
+    /// transactions also already appear in the normal Activity/Expenses screen alongside owned
+    /// transactions (see `ExpenseListView`'s shared-activity composition) — exactly mirroring how
+    /// an owned account's transactions are only ever browsed there, never via a Dashboard tap.
     @ViewBuilder
     private var connectedAccountsSection: some View {
-        if !connectedAccountBalanceDisplays.isEmpty {
+        let displays = connectedAccountBalanceDisplays + sharedConnectedAccountDisplays
+        if !displays.isEmpty {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 DashboardSectionHeader(title: "Connected Accounts")
                 CardBackground {
                     VStack(spacing: Theme.Spacing.sm) {
-                        ForEach(Array(connectedAccountBalanceDisplays.enumerated()), id: \.element.id) { index, display in
+                        ForEach(Array(displays.enumerated()), id: \.element.id) { index, display in
                             ConnectedAccountBalanceRow(
                                 display: display,
                                 isPrivacyModeEnabled: privacyMode.isEnabled,
                                 isRefreshing: refreshingAccountKeys.contains(display.id),
                                 isRateLimited: rateLimitedAccountKeys.contains(display.id),
-                                onRefresh: { refreshConnectedAccount(display) }
+                                onRefresh: connectedAccountBalanceDisplays.contains(display) ? { refreshConnectedAccount(display) } : nil
                             )
-                            if index < connectedAccountBalanceDisplays.count - 1 {
+                            if index < displays.count - 1 {
                                 Divider().overlay(Theme.cardStroke)
                             }
                         }
@@ -298,6 +859,11 @@ struct DashboardView: View {
     /// the no-balance-cached-yet placeholder row, which never renders a Refresh button in the
     /// first place (see `ConnectedAccountBalanceRow`), so a nil here means the button that fired
     /// this call is stale and there is nothing to refresh — a silent no-op, not an error.
+    /// CONNECTED ACCOUNT REFRESH CONSISTENCY — one tap now updates both balance and transactions
+    /// (see `PlaidConnectionManager.refreshAccountBalanceAndTransactions`'s own doc comment for
+    /// why this is still exactly one claimed 2/day/account event, not two). This view still never
+    /// names the backend service type or any Plaid sync/refresh helper directly — only the
+    /// already-injected `PlaidConnectionManager`, unchanged from before this task.
     private func refreshConnectedAccount(_ display: ConnectedAccountsDashboardPresenter.Display) {
         guard let accountId = display.accountId else { return }
         guard !refreshingAccountKeys.contains(display.id) else { return }
@@ -305,30 +871,77 @@ struct DashboardView: View {
         Task {
             defer { refreshingAccountKeys.remove(display.id) }
             do {
-                _ = try await plaidConnection.refreshAccountBalance(connectionId: display.connectionId, accountId: accountId)
+                #if DEBUG
+                if !refreshLimitEnabled {
+                    // DEBUG unlimited testing path (Developer Options > Refresh Limit = OFF) —
+                    // see `PlaidConnectionManager`'s own DEBUG-only method for exactly how this
+                    // stays safe (a different, already-unlimited existing Plaid operation, never
+                    // a client flag the server is asked to trust). Compiles out of Release.
+                    _ = try await plaidConnection.refreshAccountBalanceAndTransactionsIgnoringDevelopmentQuota(
+                        connectionId: display.connectionId,
+                        accountId: accountId,
+                        context: modelContext
+                    )
+                    rateLimitedAccountKeys.remove(display.id)
+                    return
+                }
+                #endif
+                _ = try await plaidConnection.refreshAccountBalanceAndTransactions(
+                    connectionId: display.connectionId,
+                    accountId: accountId,
+                    context: modelContext
+                )
                 rateLimitedAccountKeys.remove(display.id)
             } catch PlaidBackendError.rateLimited {
                 rateLimitedAccountKeys.insert(display.id)
             } catch {
-                // Any other failure (network, environment mismatch, reauth-required, etc.) — the
-                // button simply returns to its idle state so the user can try again; no raw
-                // backend error is ever surfaced here per the product spec.
+                // Any other failure (network, environment mismatch, reauth-required, a
+                // transaction-sync failure after a successful balance refresh, etc.) — the button
+                // simply returns to its idle state so the user can try again; no raw backend
+                // error is ever surfaced here per the product spec. A balance update that already
+                // succeeded before a later transaction-sync failure is never rolled back — see
+                // `refreshAccountBalanceAndTransactions`'s own ordering/failure-semantics doc.
             }
         }
     }
 
     // MARK: - Monthly outlook
 
+    /// CLIENT CORRECTION — real-device fix: the Dashboard's Monthly Outlook/Week-by-Week
+    /// previously always used this device's OWN local `monthlyPlanSummary` unconditionally, for
+    /// every role — for a Secondary (who normally has no local Monthly Plan data of their own),
+    /// that rendered an honest-looking but meaningless "$0.00 everywhere" outlook, never the
+    /// Primary's real shared plan. A LATER revision (`SharedMonthlyOutlookViewModel`-backed)
+    /// reconstructed its own summary from raw shared transactions, inheriting the same defect class
+    /// already fixed for `dashboard_summary`'s other fields, and rendered every week in the month
+    /// instead of a single current week. USER B DASHBOARD PARITY (canonical) fix: read the SAME
+    /// Primary-pushed `dashboard_summary` aggregate This Week/Monthly Spending already use — never a
+    /// second calculator, never raw transactions, never more than the single canonical current week.
+    @ViewBuilder
+    private var monthlyOutlookAndWeekByWeekSection: some View {
+        if accountRelatedOptionsLoaded {
+            if isSecondary {
+                if secondaryOutlookAuthorized, dashboardSummaryViewModel != nil {
+                    SharedMonthlyOutlookSection(viewModel: dashboardSummaryViewModel, isPrivacyModeEnabled: privacyMode.isEnabled)
+                }
+                // else: Primary hasn't shared Monthly Plan, or shared data hasn't loaded yet —
+                // no fake local $0.00 outlook.
+            } else {
+                monthlyOutlookSection
+                weekByWeekSection
+            }
+        }
+    }
+
     private var monthlyOutlookSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Monthly Outlook")
 
             MonthlyOutlookCard(
-                budgetedMonthlySpend: settings?.monthlyGoal,
+                budgetedMonthlySpend: plannedMonthlySpendingForOutlook,
                 actualMonthlySpend: monthlyPlanSummary.actualSpentThisMonth,
-                projectedSavings: monthlyPlanSummary.projectedMonthlySavings,
-                status: monthlyPlanSummary.projectedStatus,
-                recommendedWeeklyLimit: monthlyPlanSummary.recommendedWeeklySpendingLimit,
+                projectedSavings: projectedMonthlySavingsForOutlook,
+                status: projectedStatusForOutlook,
                 isPrivacyModeEnabled: privacyMode.isEnabled
             )
             .padding(.horizontal, Theme.Spacing.lg)
@@ -352,6 +965,16 @@ struct DashboardView: View {
             return currentWeekComparisonIndex
         }
         return selectedWeekIndex
+    }
+
+    /// USER B DASHBOARD PARITY — the canonical current-plan-week index uploaded to
+    /// `dashboard_summary`, computed with the SAME `weeklyComparisons.firstIndex(where:
+    /// { $0.weekInterval.contains(.now) })` rule `currentWeekComparisonIndex` above uses, but
+    /// WITHOUT its display-only `?? 0` fallback: when no week actually contains today (shouldn't
+    /// happen in practice, but must never be silently guessed), this is `nil` and the upload omits
+    /// current-plan-week data entirely rather than defaulting to Week 1.
+    private var currentWeekComparisonIndexForUpload: Int? {
+        weeklyComparisons.firstIndex(where: { $0.weekInterval.contains(.now) })
     }
 
     private func weekMenuLabel(for index: Int) -> String {
@@ -587,29 +1210,190 @@ private struct HeaderIconButton: View {
     }
 }
 
-/// Shown on the dashboard when accounts exist but no weekly spending limit has been set yet.
-private struct NoBudgetCard: View {
-    var onSetBudget: () -> Void
+/// One Quick Stat tile showing two related savings figures together — Saved This Month (this
+/// month's manually-recorded total, via `SavingsCalculator.savedThisMonth`) and the cumulative
+/// Total Savings to Date (`SavingsCalculator.totalSavingsToDate`). Kept as a single purpose-built
+/// card rather than forcing a second value into `StatCard`'s single-subtitle slot, which would
+/// make a full monetary figure read as a caption.
+private struct SavedThisMonthQuickStatCard: View {
+    let savedThisMonth: Decimal
+    let totalSavingsToDate: Decimal
+    var isPrivacyModeEnabled: Bool = false
 
     var body: some View {
-        CardBackground {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("This Week")
-                        .font(Theme.headlineFont)
-                        .foregroundStyle(Theme.textPrimary)
-                    Text("No weekly budget set")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.textTertiary)
-                }
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Image(systemName: "banknote.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.statusGood)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Theme.statusGood.opacity(0.16)))
 
-                Text("Set a weekly spending limit to see how much you have left to spend.")
-                    .font(Theme.bodyFont)
+            PrivacyAmountView(
+                amount: savedThisMonth,
+                isPrivacyModeEnabled: isPrivacyModeEnabled,
+                font: Theme.amountFont(19),
+                color: Theme.textPrimary
+            )
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Saved This Month")
+                    .font(Theme.captionFont)
                     .foregroundStyle(Theme.textSecondary)
-
-                PremiumActionButton(title: "Set Weekly Budget", action: onSetBudget)
+                HStack(spacing: 3) {
+                    Text("Total:")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Theme.textTertiary)
+                    PrivacyAmountView(
+                        amount: totalSavingsToDate,
+                        isPrivacyModeEnabled: isPrivacyModeEnabled,
+                        font: .system(size: 11, weight: .medium, design: .rounded),
+                        color: Theme.textTertiary
+                    )
+                }
+                .lineLimit(1)
             }
         }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .fill(Theme.cardSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .strokeBorder(Theme.cardStroke, lineWidth: 1)
+        )
+    }
+}
+
+/// CLIENT UI PHASE — Secondary-only read-only counterpart to `SavedThisMonthQuickStatCard` above.
+/// Fully transient (see `SharedMonthlySavingsViewModel`'s own header): loads from
+/// `get-monthly-savings-summary` on appear, never touches SwiftData, never inserts a local
+/// `SavingsEntry`, and renders NOTHING (not even a placeholder) while loading or once revoked —
+/// only `.loaded(let summary)` with a non-nil `summary` ever produces the tile, reusing
+/// `SavedThisMonthQuickStatCard` verbatim so a Secondary's shared figure looks identical to a
+/// Primary's own. No tap target of any kind — same as the Primary's own card, this offers no
+/// savings-edit navigation.
+private struct SharedSavedThisMonthQuickStatCard: View {
+    let primaryUserId: UUID
+    let isPrivacyModeEnabled: Bool
+
+    @State private var viewModel: SharedMonthlySavingsViewModel
+
+    init(primaryUserId: UUID, isPrivacyModeEnabled: Bool) {
+        self.primaryUserId = primaryUserId
+        self.isPrivacyModeEnabled = isPrivacyModeEnabled
+        _viewModel = State(initialValue: SharedMonthlySavingsViewModel(primaryUserId: primaryUserId))
+    }
+
+    var body: some View {
+        Group {
+            switch viewModel.state {
+            case .loading, .loaded(nil):
+                EmptyView()
+            case .loaded(let summary?):
+                SavedThisMonthQuickStatCard(
+                    savedThisMonth: summary.savedThisMonth,
+                    totalSavingsToDate: summary.totalSavingsToDate,
+                    isPrivacyModeEnabled: isPrivacyModeEnabled
+                )
+            case .failed(let message):
+                // CLIENT CORRECTION — a genuine failure must never look identical to "not
+                // shared"/"still loading" (both of which render nothing above). Minimal,
+                // non-blocking: same `Text(message)` convention `SharedPrimaryDataViews.swift`
+                // already uses for every other shared-data failure state.
+                Text(message)
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.statusOver)
+            }
+        }
+        .task(id: primaryUserId) {
+            await viewModel.load()
+        }
+    }
+}
+
+/// USER B DASHBOARD PARITY (canonical) — Secondary-only Dashboard counterpart to the local
+/// `monthlyOutlookSection`/`weekByWeekSection` above. Reads the SAME Primary-pushed
+/// `dashboard_summary` aggregate This Week/Monthly Spending Quick Stat already use — never a
+/// second calculator, never raw shared transactions, never more than the single canonical current
+/// week. Renders nothing while loading, on failure, or once the Primary's Monthly Plan is no
+/// longer shared (`.loaded(nil)`) — never a fabricated $0.00 outlook. For a loaded summary whose
+/// Monthly Outlook or current-plan-week fields are `nil` (an older row predating this field
+/// extension, or a Primary with no valid current-week comparison) — an honest "not available yet"
+/// message, never the previously-shown incorrect reconstructed values.
+private struct SharedMonthlyOutlookSection: View {
+    /// TARGET ARCHITECTURE — owned by `DashboardView` itself (`dashboardSummaryViewModel`), not
+    /// this leaf view, so This Week and the Monthly Spending Quick Stat can read the SAME loaded/
+    /// loading/failed state without a second independent fetch. Loading itself is driven entirely
+    /// by `DashboardView`'s own `.task(id: secondaryDashboardSummaryLoadKey)` — this view only
+    /// renders.
+    let viewModel: SharedDashboardSummaryViewModel?
+    let isPrivacyModeEnabled: Bool
+
+    var body: some View {
+        content
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch viewModel?.state {
+        case nil, .loading, .loaded(nil):
+            EmptyView()
+        case .failed(let message):
+            // CLIENT CORRECTION — a genuine failure must never look identical to "Primary hasn't
+            // shared Monthly Plan" (both previously rendered nothing). Same minimal,
+            // non-blocking `Text(message)` convention already used by the shared savings card.
+            Text(message)
+                .font(Theme.captionFont)
+                .foregroundStyle(Theme.statusOver)
+                .padding(.horizontal, Theme.Spacing.lg)
+        case .loaded(let summary?):
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    DashboardSectionHeader(title: "Monthly Outlook")
+                    if let status = summary.monthlyOutlookStatus,
+                       let actual = summary.monthlyOutlookActual,
+                       let projectedSavings = summary.monthlyOutlookProjectedSavings {
+                        MonthlyOutlookCard(
+                            budgetedMonthlySpend: summary.monthlyOutlookBudgeted,
+                            actualMonthlySpend: actual,
+                            projectedSavings: projectedSavings,
+                            status: status,
+                            isPrivacyModeEnabled: isPrivacyModeEnabled
+                        )
+                        .padding(.horizontal, Theme.Spacing.lg)
+                    } else {
+                        unavailableText.padding(.horizontal, Theme.Spacing.lg)
+                    }
+                }
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    DashboardSectionHeader(title: "Week-by-Week")
+                    if let currentPlanWeek = summary.currentPlanWeek {
+                        WeeklyPlanComparisonRow(
+                            comparison: MonthlyPlanCalculator.WeeklyPlanComparison(
+                                weekInterval: currentPlanWeek.weekInterval,
+                                recommendedLimit: currentPlanWeek.recommended,
+                                actualSpent: currentPlanWeek.actual,
+                                status: currentPlanWeek.status
+                            ),
+                            isPrivacyModeEnabled: isPrivacyModeEnabled
+                        )
+                        .padding(.horizontal, Theme.Spacing.lg)
+                    } else {
+                        unavailableText.padding(.horizontal, Theme.Spacing.lg)
+                    }
+                }
+            }
+        }
+    }
+
+    private var unavailableText: some View {
+        Text("Not available yet.")
+            .font(Theme.captionFont)
+            .foregroundStyle(Theme.textTertiary)
     }
 }
 
@@ -618,6 +1402,7 @@ private struct NoBudgetCard: View {
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager())
         .environment(PlaidConnectionManager())
+        .environment(AccountRelatedOptionsViewModel())
 }
 
 #Preview("Privacy Mode") {
@@ -625,6 +1410,7 @@ private struct NoBudgetCard: View {
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager(isEnabled: true))
         .environment(PlaidConnectionManager())
+        .environment(AccountRelatedOptionsViewModel())
 }
 
 #Preview("Empty") {
@@ -632,4 +1418,5 @@ private struct NoBudgetCard: View {
         .modelContainer(SampleData.emptyPreviewContainer())
         .environment(PrivacyModeManager())
         .environment(PlaidConnectionManager())
+        .environment(AccountRelatedOptionsViewModel())
 }

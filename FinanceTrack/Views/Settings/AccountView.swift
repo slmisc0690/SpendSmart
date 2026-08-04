@@ -19,7 +19,10 @@ struct AccountView: View {
                     if let errorMessage {
                         inlineMessage(icon: "exclamationmark.circle.fill", text: errorMessage, color: Theme.statusOver)
                     }
-                    dangerZoneSection
+                    signOutSection
+                    // Phase 8D — deliberately the LAST thing on this screen, nothing rendered
+                    // after it, so the most destructive action is always the bottom-most control.
+                    deleteAccountSection
                 }
                 .padding(.vertical, Theme.Spacing.lg)
             }
@@ -63,7 +66,7 @@ struct AccountView: View {
                             .font(Theme.captionFont)
                             .foregroundStyle(Theme.textTertiary)
                         Spacer()
-                        Text(authService.currentUserEmail ?? "—")
+                        Text(authService.lastDisplayedUserEmail ?? "—")
                             .font(Theme.bodyFont)
                             .foregroundStyle(Theme.textPrimary)
                     }
@@ -85,66 +88,67 @@ struct AccountView: View {
 
     private var verificationBadge: some View {
         HStack(spacing: 4) {
-            Image(systemName: authService.isEmailVerified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+            Image(systemName: authService.lastDisplayedIsEmailVerified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 11, weight: .semibold))
-            Text(authService.isEmailVerified ? "Verified" : "Not Verified")
+            Text(authService.lastDisplayedIsEmailVerified ? "Verified" : "Not Verified")
         }
         .font(Theme.captionFont)
-        .foregroundStyle(authService.isEmailVerified ? Theme.statusGood : Theme.statusWarning)
+        .foregroundStyle(authService.lastDisplayedIsEmailVerified ? Theme.statusGood : Theme.statusWarning)
     }
 
-    // MARK: - Danger zone
+    // MARK: - Sign out
 
-    private var dangerZoneSection: some View {
+    /// Phase 8D — full-width red background / white text per the locked styling requirement,
+    /// matching the same destructive-button visual language `DeleteAccountConfirmationView`'s own
+    /// confirm button already used.
+    private var signOutSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Manage")
 
-            CardBackground {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    Button {
-                        isPresentingSignOutConfirmation = true
-                    } label: {
-                        HStack(spacing: Theme.Spacing.sm) {
-                            Image(systemName: "rectangle.portrait.and.arrow.right")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                                .frame(width: 34, height: 34)
-                                .background(Circle().fill(Theme.textTertiary.opacity(0.12)))
-                            Text(isSigningOut ? "Signing Out…" : "Sign Out")
-                                .font(Theme.bodyFont)
-                                .foregroundStyle(Theme.textPrimary)
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isSigningOut)
-
-                    Divider().overlay(Theme.cardStroke)
-
-                    Button {
-                        isPresentingDeleteSheet = true
-                    } label: {
-                        HStack(spacing: Theme.Spacing.sm) {
-                            Image(systemName: "trash.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.statusOver)
-                                .frame(width: 34, height: 34)
-                                .background(Circle().fill(Theme.statusOver.opacity(0.12)))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Delete Account")
-                                    .font(Theme.bodyFont)
-                                    .foregroundStyle(Theme.statusOver)
-                                Text("Permanently deletes your SpendSmart account")
-                                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                                    .foregroundStyle(Theme.textTertiary)
-                            }
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
+            Button {
+                isPresentingSignOutConfirmation = true
+            } label: {
+                Text(isSigningOut ? "Signing Out…" : "Sign Out")
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Theme.Spacing.sm + 2)
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.statusOver))
             }
+            .buttonStyle(.plain)
+            .disabled(isSigningOut)
+            .opacity(isSigningOut ? 0.6 : 1)
             .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    // MARK: - Delete account
+
+    /// Phase 8D — same red-background/white-text styling as Sign Out, and deliberately the
+    /// LAST section rendered on this screen (see `body`'s own comment) per the locked
+    /// "move Delete Account all the way to the bottom" requirement. Only the placement/styling
+    /// changed here — tapping still opens the same `DeleteAccountConfirmationView`
+    /// type-DELETE-to-confirm sheet, unchanged.
+    private var deleteAccountSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Button {
+                isPresentingDeleteSheet = true
+            } label: {
+                Text("Delete Account")
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Theme.Spacing.sm + 2)
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.statusOver))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, Theme.Spacing.lg)
+
+            Text("Permanently deletes your SpendSmart account")
+                .font(Theme.captionFont)
+                .foregroundStyle(Theme.textTertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 
@@ -167,9 +171,17 @@ struct AccountView: View {
         defer { isSigningOut = false }
         do {
             try await authService.signOut()
-            dismiss()
-            // RootView switches to the auth flow automatically once sessionState flips to
-            // .signedOut — nothing further to do here.
+            // Deliberately no `dismiss()` here. `sessionState` flipping to `.signedOut` is what
+            // drives `FinanceTrackApp`'s root swap from the authenticated subtree to `AuthFlowView`
+            // — this view (and everything presenting it, up through `SettingsView`) is torn down
+            // as part of that same swap. An explicit `dismiss()` here is a SEPARATE, independently
+            // animated sheet-dismissal that races that session-driven teardown: `SettingsView` can
+            // render one more frame while its own sheet is closing and touch its still-live
+            // `BudgetSettings`/`@Query` state after the outgoing user's `ModelContext`/container has
+            // already been reset/detached elsewhere — the proven cause of a real device crash
+            // ("This model instance was destroyed by calling ModelContext.reset... BudgetSettings/p1")
+            // immediately after a successful sign-out. `sessionState`/`RootView` must be the ONLY
+            // thing that ever replaces this UI on a successful sign-out.
         } catch {
             errorMessage = error.friendlyAuthMessage
         }
@@ -279,9 +291,11 @@ private struct DeleteAccountConfirmationView: View {
             try await authService.deleteAccount()
             PlaidLocalDataCleanupService.deleteAllLocalData(context: modelContext)
             plaidConnection.clearAllConnections()
-            dismiss()
-            // RootView switches to the auth flow automatically once sessionState flips to
-            // .signedOut — nothing further to do here.
+            // Deliberately no `dismiss()` here — same reasoning as `AccountView.signOut()`'s own
+            // doc comment: `sessionState` flipping to `.signedOut` is what drives `RootView`'s
+            // replacement, and a separate explicit `dismiss()` races that session-driven teardown
+            // (the proven cause of a real "ModelContext.reset... BudgetSettings" crash immediately
+            // after a successful sign-out/account-exit).
         } catch {
             errorMessage = error.friendlyAuthMessage
         }

@@ -4,6 +4,9 @@ import SwiftData
 struct WeeklyBudgetView: View {
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactions: [FinanceTransaction]
     @Query private var settingsList: [BudgetSettings]
+    @Query private var incomeSources: [IncomeSource]
+    @Query private var recurringExpenses: [RecurringExpense]
+    @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
 
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(\.modelContext) private var modelContext
@@ -29,11 +32,29 @@ struct WeeklyBudgetView: View {
         BudgetCalculator.weeklySpent(transactions, in: weekInterval, includePending: includePending)
     }
 
-    private var weeklyLimit: Decimal {
-        settings?.weeklySpendingLimit ?? 0
+    /// WEEKLY SPENDING UNIFICATION (Part 5) — computed live from the SAME authoritative
+    /// `MonthlyPlanCalculator.effectivePlannedWeeklySpending` formula Monthly Plan/Dashboard use
+    /// (custom override when set, otherwise Flexible Spending Available ÷ 4), never
+    /// `BudgetSettings.weeklySpendingLimit` directly — that field is a synced snapshot only
+    /// refreshed when Monthly Plan/Settings screens are visited, so reading it here could show a
+    /// stale number if this screen is opened first. Editing continues to edit the same
+    /// `MonthlyPlanSettings.plannedWeeklySpendingOverride` Monthly Plan's own editor writes — see
+    /// `WeeklyLimitEditView`, which now receives this exact value rather than reading
+    /// `BudgetSettings` itself.
+    private var effectivePlannedWeeklySpending: Decimal {
+        let month = DateRangeHelper.currentMonthRange()
+        let monthlyPlanSettings = monthlyPlanSettingsList.first
+        let income = MonthlyPlanCalculator.estimatedMonthlyIncome(incomeSources, in: month)
+        let fixedExpenses = MonthlyPlanCalculator.estimatedMonthlyFixedExpenses(recurringExpenses, in: month)
+        let goal = monthlyPlanSettings?.monthlySavingsGoal ?? 0
+        let buffer = monthlyPlanSettings?.bufferAmount ?? 0
+        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: goal, bufferAmount: buffer)
+        return MonthlyPlanCalculator.effectivePlannedWeeklySpending(override: monthlyPlanSettings?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: flexible)
     }
 
-    private var hasWeeklyBudget: Bool { weeklyLimit > 0 }
+    private var weeklyLimit: Decimal {
+        effectivePlannedWeeklySpending
+    }
 
     private var status: SpendingStatus {
         BudgetCalculator.status(
@@ -134,7 +155,7 @@ struct WeeklyBudgetView: View {
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationBarHidden(true)
             .sheet(isPresented: $isPresentingEditLimit) {
-                WeeklyLimitEditView(settings: settings)
+                WeeklyLimitEditView(limit: weeklyLimit)
             }
         }
         .preferredColorScheme(.dark)
@@ -159,40 +180,25 @@ struct WeeklyBudgetView: View {
 
     // MARK: - Hero
 
+    /// URGENT REGRESSION FIX — always renders the normal hero card, in both Automatic and Custom
+    /// weekly mode. The removed local unconfigured-gate (limit greater than zero) incorrectly hid
+    /// it behind a setup prompt whenever a deliberate custom zero override was active — a real,
+    /// legitimate weekly limit, not an unconfigured state (see `MonthlyPlanCalculator.
+    /// effectivePlannedWeeklySpending`'s own zero-semantics rule). Automatic mode's own value
+    /// (Flexible Spending Available ÷ 4) is likewise a real number the moment income/bills exist,
+    /// never something requiring setup first.
     @ViewBuilder
     private var heroSection: some View {
-        if hasWeeklyBudget {
-            WeeklyBudgetHeroCard(
-                weekInterval: weekInterval,
-                spent: spentThisWeek,
-                limit: weeklyLimit,
-                status: status,
-                isPrivacyModeEnabled: privacyMode.isEnabled
-            ) {
-                isPresentingEditLimit = true
-            }
-            .padding(.horizontal, Theme.Spacing.lg)
-        } else {
-            CardBackground {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("This Week")
-                            .font(Theme.headlineFont)
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("No weekly budget set")
-                            .font(Theme.captionFont)
-                            .foregroundStyle(Theme.textTertiary)
-                    }
-                    Text("Set a weekly spending limit to see your progress here.")
-                        .font(Theme.bodyFont)
-                        .foregroundStyle(Theme.textSecondary)
-                    PremiumActionButton(title: "Set Weekly Budget") {
-                        isPresentingEditLimit = true
-                    }
-                }
-            }
-            .padding(.horizontal, Theme.Spacing.lg)
+        WeeklyBudgetHeroCard(
+            weekInterval: weekInterval,
+            spent: spentThisWeek,
+            limit: weeklyLimit,
+            status: status,
+            isPrivacyModeEnabled: privacyMode.isEnabled
+        ) {
+            isPresentingEditLimit = true
         }
+        .padding(.horizontal, Theme.Spacing.lg)
     }
 
     // MARK: - Include pending toggle

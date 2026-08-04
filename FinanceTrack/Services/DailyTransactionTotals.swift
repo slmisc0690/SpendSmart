@@ -50,13 +50,38 @@ enum DailyTransactionTotals {
     /// of `spendingDelta` for that day's own rows, floored at zero, so it can never disagree with
     /// what's displayed underneath it and never shows a negative sign for ordinary spending.
     static func groups(for transactions: [FinanceTransaction], calendar: Calendar = .current) -> [DayGroup] {
-        let days = Set(transactions.map { calendar.startOfDay(for: $0.date) }).sorted(by: >)
+        genericGroups(for: transactions, calendar: calendar, date: { $0.date }, delta: spendingDelta)
+            .map { DayGroup(day: $0.day, transactions: $0.items, total: $0.total) }
+    }
+
+    /// One day's worth of items grouped by `genericGroups`, generic over any read-only
+    /// presentation type — never `FinanceTransaction`-specific, so this can group Primary-shared
+    /// Activity entries (which must never become `FinanceTransaction`/touch SwiftData) using the
+    /// exact same day-bucketing/flooring rules as owned connected-account activity above.
+    struct GenericDayGroup<T>: Identifiable {
+        let day: Date
+        let items: [T]
+        let total: Decimal
+        var id: Date { day }
+    }
+
+    /// Same day-bucketing/summing/flooring logic as `groups(for:calendar:)`, generalized via
+    /// caller-supplied `date`/`delta` accessors instead of hardcoding `FinanceTransaction.date`/
+    /// `spendingDelta(for:)` — `groups(for:calendar:)` itself now just calls this with those two
+    /// accessors, so owned behavior/output is unchanged (same sort, same flooring at zero).
+    static func genericGroups<T>(
+        for items: [T],
+        calendar: Calendar = .current,
+        date: (T) -> Date,
+        delta: (T) -> Decimal
+    ) -> [GenericDayGroup<T>] {
+        let days = Set(items.map { calendar.startOfDay(for: date($0)) }).sorted(by: >)
         return days.map { day in
-            let rows = transactions
-                .filter { calendar.isDate($0.date, inSameDayAs: day) }
-                .sorted { $0.date > $1.date }
-            let rawTotal = rows.reduce(Decimal(0)) { $0 + spendingDelta(for: $1) }
-            return DayGroup(day: day, transactions: rows, total: max(rawTotal, 0))
+            let rows = items
+                .filter { calendar.isDate(date($0), inSameDayAs: day) }
+                .sorted { date($0) > date($1) }
+            let rawTotal = rows.reduce(Decimal(0)) { $0 + delta($1) }
+            return GenericDayGroup(day: day, items: rows, total: max(rawTotal, 0))
         }
     }
 }

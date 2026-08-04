@@ -4,6 +4,9 @@ import SwiftData
 struct AccountListView: View {
     @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @Environment(PrivacyModeManager.self) private var privacyMode
+    /// PHASE 10 — same already-refreshed instance as everywhere else; read-only here, purely to
+    /// surface `response?.primarySharedManualAccounts` for an active Secondary.
+    @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
     @State private var isPresentingAdd = false
     @State private var accountPendingEdit: Account?
@@ -12,6 +15,12 @@ struct AccountListView: View {
     @State private var selectedManualAccount: Account?
     @State private var accountPendingArchive: Account?
     @State private var isPresentingConnectedAccounts = false
+    /// PHASE 10 — drives the read-only shared Manual Account detail sheet.
+    @State private var selectedSharedManualAccount: SharedManualAccountDTO?
+    /// POST-PHASE-10 CORRECTION — loads each shared account's balance/institution/last-four (the
+    /// detail DTO, not the minimal list DTO) so the normal-card row below can show real figures
+    /// instead of a name-only placeholder. See that view model's own header.
+    @State private var sharedManualAccountsSummary = SharedManualAccountsSummaryViewModel()
 
     private var activeAccounts: [Account] {
         allAccounts.filter { !$0.isArchived }
@@ -48,6 +57,7 @@ struct AccountListView: View {
                         summarySection
                         accountsSection
                     }
+                    sharedManualAccountsSection
                 }
                 .padding(.vertical, Theme.Spacing.lg)
             }
@@ -80,6 +90,10 @@ struct AccountListView: View {
             .sheet(isPresented: $isPresentingConnectedAccounts) {
                 ConnectedAccountsView()
             }
+            .sheet(item: $selectedSharedManualAccount) { account in
+                // PHASE 10 — reuses the exact Phase 9 read-only detail screen.
+                SharedManualAccountDetailView(account: account)
+            }
             .confirmationDialog(
                 "Archive \(accountPendingArchive?.name ?? "Account")?",
                 isPresented: Binding(
@@ -101,6 +115,9 @@ struct AccountListView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .task(id: sharedManualAccounts.map(\.id)) {
+            await sharedManualAccountsSummary.load(accounts: sharedManualAccounts)
+        }
     }
 
     // MARK: - Header
@@ -232,16 +249,126 @@ struct AccountListView: View {
             selectedManualAccount = account
         }
     }
+
+    // MARK: - Phase 10: Primary-shared Manual Accounts (normal-area integration)
+
+    /// Every Primary-owned Manual Account currently, effectively shared with this Secondary —
+    /// only ever what migration 0016's `get_secondary_shared_data` already scoped server-side;
+    /// this view performs no filtering of its own, and never hardcodes an account name/id.
+    private var sharedManualAccounts: [SharedManualAccountDTO] {
+        accountRelatedOptionsViewModel.response?.primarySharedManualAccounts ?? []
+    }
+
+    /// Deliberately separate from `allAccounts`/`activeAccounts` (both SwiftData `@Query`-backed)
+    /// — a shared account is never appended to that array, never given an `Account` identity,
+    /// never eligible for edit/archive/add-transaction. Shown even when `activeAccounts` is empty,
+    /// so a Secondary with no Manual Accounts of their own still sees what the Primary shares.
+    ///
+    /// POST-PHASE-10 CORRECTION — renders with the same icon/name/subtitle/balance composition as
+    /// `AccountCard` (no visible "Shared" badge), sourced from `sharedManualAccountsSummary`'s
+    /// detail fetch. Never constructs an `Account` — `SharedManualAccountCardRow` below is a
+    /// lightweight look-alike built entirely from primitives/DTOs, with no edit/archive menu
+    /// (those require ownership) and tapping opens the existing read-only detail sheet.
+    @ViewBuilder
+    private var sharedManualAccountsSection: some View {
+        if !sharedManualAccounts.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                DashboardSectionHeader(title: "Manual Accounts")
+                VStack(spacing: Theme.Spacing.md) {
+                    ForEach(sharedManualAccounts) { account in
+                        SharedManualAccountCardRow(
+                            account: account,
+                            detail: sharedManualAccountsSummary.detailsByAccountId[account.id],
+                            isPrivacyModeEnabled: privacyMode.isEnabled,
+                            onSelect: { selectedSharedManualAccount = account }
+                        )
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
+        }
+    }
+}
+
+/// POST-PHASE-10 CORRECTION — a shared Manual Account rendered with the same visual composition
+/// as the owned `AccountCard` (icon circle, name, type/institution/last-four subtitle, prominent
+/// balance) but built entirely from `SharedManualAccountDTO`/`SharedManualAccountDetailDTO` —
+/// never an `Account` instance. No Edit/Adjust Balance/Archive menu (those require ownership); the
+/// whole card is a single tap target that opens the read-only shared detail screen, same as every
+/// other Phase 9/10 shared-data entry point. `detail` is `nil` until
+/// `SharedManualAccountsSummaryViewModel.load` resolves (or if the account has since been
+/// unshared/deleted) — the card still renders with just the name in that case, matching
+/// `AccountCard`'s own "never fabricate a balance" principle.
+private struct SharedManualAccountCardRow: View {
+    let account: SharedManualAccountDTO
+    let detail: SharedManualAccountDetailDTO?
+    var isPrivacyModeEnabled: Bool = false
+    var onSelect: () -> Void
+
+    private var resolvedType: AccountType {
+        AccountType(rawValue: detail?.accountType ?? account.accountType) ?? .other
+    }
+
+    private var subtitleParts: [String] {
+        var parts = [resolvedType.label]
+        if let lastFour = detail?.lastFourDigits, !lastFour.isEmpty {
+            parts.append("\u{2022}\u{2022}\u{2022}\u{2022} \(lastFour)")
+        }
+        if let institution = detail?.institutionName, !institution.isEmpty {
+            parts.append(institution)
+        }
+        return parts
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            CardBackground {
+                HStack(alignment: .top) {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        Image(systemName: resolvedType.systemIconName)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 40, height: 40)
+                            .background(Circle().fill(Theme.accent.opacity(0.18)))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(account.name)
+                                .font(Theme.headlineFont)
+                                .foregroundStyle(Theme.textPrimary)
+                            Text(subtitleParts.joined(separator: " \u{00B7} "))
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer()
+
+                    if let balance = detail?.currentBalance {
+                        PrivacyAmountView(
+                            amount: balance,
+                            isPrivacyModeEnabled: isPrivacyModeEnabled,
+                            font: Theme.amountFont(20),
+                            color: Theme.textPrimary
+                        )
+                    }
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 #Preview("Populated") {
     AccountListView()
         .modelContainer(SampleData.previewContainer)
         .environment(PrivacyModeManager())
+        .environment(AccountRelatedOptionsViewModel())
 }
 
 #Preview("Empty") {
     AccountListView()
         .modelContainer(SampleData.emptyPreviewContainer())
         .environment(PrivacyModeManager())
+        .environment(AccountRelatedOptionsViewModel())
 }

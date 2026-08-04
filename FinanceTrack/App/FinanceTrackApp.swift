@@ -6,6 +6,12 @@ struct FinanceTrackApp: App {
     @State private var privacyMode = PrivacyModeManager()
     @State private var biometricAuth = BiometricAuthManager()
     @State private var autoBackupManager = AutoBackupManager()
+    /// iCloud daily backups — see `CloudBackupManager`'s own header. A separate manager from
+    /// `autoBackupManager` (writes to the iCloud ubiquity container, day-collapsed filenames,
+    /// 7-day retention) rather than folding into it, matching this codebase's own established
+    /// pattern of one manager per distinct sync/backup destination
+    /// (`manualDataCloudSyncManager`/`monthlyPlanCloudSyncManager` are similarly separate).
+    @State private var cloudBackupManager = CloudBackupManager()
     /// Phase 5 — Manual Account/Transaction cloud sync foundation. See its own doc comment for why
     /// it mirrors `AutoBackupManager`'s observe-`ModelContext.didSave` shape rather than
     /// instrumenting every add/edit/delete call site.
@@ -20,6 +26,9 @@ struct FinanceTrackApp: App {
     /// Phase 8 — captures a `spendsmart://household-invitation` deep link, surviving a
     /// sign-out/sign-in round trip if the user wasn't already authenticated when they opened it.
     @State private var pendingInvitationRouter = PendingInvitationRouter()
+    /// Phase 8D — automatic pending-invitation discovery, independent of the manual-link flow
+    /// above. See its own doc comment for why one check per session transition is enough.
+    @State private var pendingInvitationPopupViewModel = PendingInvitationPopupViewModel()
     /// Owns the per-authenticated-user isolated SwiftData store and namespaced
     /// `PlaidConnectionManager` — replaces the old single app-wide `sharedModelContainer`/
     /// `plaidConnection` instances (see Phase 3 local user-data isolation). Never exposes a
@@ -46,6 +55,10 @@ struct FinanceTrackApp: App {
         print("[SpendSmartBuild] currency-toolbar-polish-v1")
         print("[SpendSmartBuild] currency-accessory-removed-v1")
         print("[SpendSmartBuild] per-user-local-isolation-v1")
+        // Never logs the publishable key, a token, or any account/financial data — see
+        // SupabaseConfig's own header for why the key itself is safe to commit but is still kept
+        // out of logs on principle. Confirms only WHICH backend this build resolved to.
+        print("[BackendEnvironment] \(SupabaseConfig.environmentLabel)")
         #endif
     }
 
@@ -104,14 +117,38 @@ struct FinanceTrackApp: App {
                               let container = userDataStore.modelContainer,
                               let plaidConnection = userDataStore.plaidConnectionManager {
                         RootView()
+                            // PROVEN real-device crash fix — "This model instance was destroyed
+                            // by calling ModelContext.reset... BudgetSettings", reading
+                            // `includePendingTransactions` via `SettingsView.budgetSection`'s own
+                            // `Binding(get: { settings.includePendingTransactions })`.
+                            // `SettingsView` (a TabView child) stays mounted UNDERNEATH the
+                            // `AccountView` sheet the whole time a user is signing out from it —
+                            // neither removing `AccountView`'s own `dismiss()` nor removing this
+                            // file's `sessionState` cross-fade animation stopped the crash,
+                            // because neither actually controls WHEN SwiftUI discards
+                            // `SettingsView`'s own `@Query`/Binding storage relative to
+                            // `userDataStore.detach()` releasing the container (that discard is
+                            // driven by SwiftUI's internal render/AttributeGraph timing, which
+                            // isn't reliably synchronized with either an app-level `.animation()`
+                            // or a deferred `Task { @MainActor in }`). Tagging this branch's
+                            // content with `.id(userId)` gives SwiftUI itself — not our own
+                            // timing — the signal that a NEW identity replaces the old one:
+                            // SwiftUI discards ALL of RootView's descendant state (every `@Query`
+                            // subscription, every live `Binding` closure, including
+                            // `SettingsView`'s) as part of the SAME diffing pass that processes
+                            // this id change, before evaluating anything for the new identity —
+                            // not a race to win, a guarantee SwiftUI's own reconciliation makes.
+                            .id(userId)
                             .modelContainer(container)
                             .environment(privacyMode)
                             .environment(biometricAuth)
                             .environment(plaidConnection)
                             .environment(autoBackupManager)
+                            .environment(cloudBackupManager)
                             .environment(manualDataCloudSyncManager)
                             .environment(monthlyPlanCloudSyncManager)
                             .environment(accountRelatedOptionsViewModel)
+                            .environment(pendingInvitationPopupViewModel)
                     } else if let userId = authService.currentUserId, let error = userDataStore.lastResolutionError {
                         // resolve(for:) failed for the currently-authenticated user — surfaced
                         // here so this can never regress into a permanent blank/loading screen
@@ -155,6 +192,8 @@ struct FinanceTrackApp: App {
                         // else ever stops it, so leaving this out lets a debounced backup fire
                         // against a context whose owning container is being released below.
                         autoBackupManager.stopObserving()
+                        // Same reasoning, same observer/debounced-Task-against-a-ModelContext risk.
+                        cloudBackupManager.stopObserving()
                         // Same reasoning as AutoBackupManager immediately above — must stop before
                         // userDataStore.detach() below releases the outgoing user's container.
                         manualDataCloudSyncManager.stopObserving()
@@ -162,7 +201,30 @@ struct FinanceTrackApp: App {
                         // Detach only — never deletes this user's on-disk store or UserDefaults
                         // namespace, so signing back in (as this user or anyone else) finds
                         // everything exactly as it was left.
-                        userDataStore.detach()
+                        //
+                        // DEFERRED, NOT SYNCHRONOUS (proven real-device crash fix — "This model
+                        // instance was destroyed by calling ModelContext.reset... BudgetSettings"
+                        // immediately after a successful sign-out): `sessionState`/`currentUserId`
+                        // becoming nil ALREADY makes RootView's own `if let userId = authService
+                        // .currentUserId` gate fail on its own merits — nothing about RootView's
+                        // removal actually depends on `userDataStore.modelContainer` going nil.
+                        // But SwiftUI doesn't unmount the still-live RootView subtree (TabView →
+                        // SettingsView → any open Account/Settings sheet) synchronously inside
+                        // this `onChange` handler — that happens on a LATER render pass. Releasing
+                        // the outgoing user's `ModelContainer` (via `detach()`) in this SAME
+                        // synchronous scope risks that still-mounted, not-yet-unmounted subtree
+                        // re-rendering (or being re-diffed) against an environment whose
+                        // `ModelContext` has already been invalidated, dereferencing a destroyed
+                        // `BudgetSettings`/other `@Model` instance. Wrapping `detach()` in an
+                        // unstructured `Task { @MainActor in }` defers it to the NEXT main-actor
+                        // turn — after this handler returns control to the run loop, letting
+                        // SwiftUI's already-triggered render/removal pass complete first — with NO
+                        // arbitrary time value chosen (not a sleep/asyncAfter): it runs as soon as
+                        // the main actor is free, which is exactly "once no live authenticated UI
+                        // can dereference it."
+                        Task { @MainActor in
+                            userDataStore.detach()
+                        }
                         // Reset the in-memory Face ID gate too — without this, a brief window
                         // exists (between this sign-out and the next user's RootView re-setting
                         // both from THEIR OWN settings.requireFaceID) where the outgoing user's
@@ -176,6 +238,8 @@ struct FinanceTrackApp: App {
                         // Phase 8 — clears any pending invitation so it can never resurface for a
                         // different user who signs in next.
                         pendingInvitationRouter.clear()
+                        // Phase 8D — same reasoning, for the automatic-discovery popup's own state.
+                        pendingInvitationPopupViewModel.reset()
                     }
                 }
                 .onOpenURL { url in
@@ -228,13 +292,45 @@ struct FinanceTrackApp: App {
                 }
             }
             .animation(.easeInOut(duration: 0.25), value: biometricAuth.isUnlocked)
-            .animation(.easeInOut(duration: 0.25), value: authService.sessionState)
+            // Deliberately NOT animated on `authService.sessionState` (proven real-device crash
+            // fix — "This model instance was destroyed by calling ModelContext.reset...
+            // BudgetSettings", read via `includePendingTransactions` from the always-mounted
+            // Dashboard/Weekly tabs). Animating this transition cross-fades the outgoing
+            // RootView/TabView subtree (DashboardView, WeeklyBudgetView, ... — all still
+            // `@Query`-bound to the outgoing user's ModelContext) over the animation's full
+            // duration, keeping it alive and re-render-eligible long after `sessionState` flips —
+            // far longer than any single-tick deferred `userDataStore.detach()` can protect
+            // against. An IMMEDIATE (non-animated) swap removes that coexistence window entirely:
+            // the old subtree (and its @Query subscriptions) is torn down as part of the same
+            // structural diff that processes the sessionState change, not over a following
+            // quarter-second of continued rendering. The other three values below are unrelated
+            // (Face ID unlock fade, recovery-flow routing, email-verification routing) and keep
+            // their existing animated transitions.
             .animation(.easeInOut(duration: 0.25), value: authService.isPasswordRecoveryActive)
             .animation(.easeInOut(duration: 0.25), value: authService.isEmailVerified)
         }
-        .onChange(of: scenePhase) { _, newPhase in
+        .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .background, biometricAuth.isFaceIDRequired {
                 biometricAuth.lock()
+            }
+            // Phase 8D FOLLOW-UP — foreground-return pending-invitation discovery (Phase 5's own
+            // locked lifecycle requirement). `oldPhase != .active` excludes the launch transition
+            // itself (already covered by RootView's own `.task`) — this only fires on a genuine
+            // return from background/inactive, and only for an already-authenticated,
+            // email-verified session (checking while signed out would just fail with
+            // Unauthorized, uselessly).
+            if newPhase == .active, oldPhase != .active,
+               authService.sessionState == .signedIn, authService.isEmailVerified {
+                Task { await pendingInvitationPopupViewModel.recheckOnForegroundIfNeeded() }
+                // PHASE B — same foreground-return rationale as the pending-invitation recheck
+                // above: a Primary may revoke sharing (or a Secondary's household membership may
+                // change) while this device was backgrounded. `refresh()` is the same
+                // background-only, never-blanks-the-screen call `AccountRelatedOptionsView` already
+                // makes on its own appearance (see that view model's own doc comment) — reusing it
+                // here keeps Dashboard/AccountListView/ExpenseListView's shared-account discovery
+                // list from remaining stale for an entire session after a revocation, with no new
+                // polling or timer introduced.
+                Task { await accountRelatedOptionsViewModel.refresh() }
             }
         }
     }
@@ -302,10 +398,20 @@ private struct RootView: View {
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(AutoBackupManager.self) private var autoBackupManager
+    @Environment(CloudBackupManager.self) private var cloudBackupManager
     @Environment(ManualDataCloudSyncManager.self) private var manualDataCloudSyncManager
     @Environment(MonthlyPlanCloudSyncManager.self) private var monthlyPlanCloudSyncManager
     @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
+    @Environment(PendingInvitationPopupViewModel.self) private var pendingInvitationPopupViewModel
     @Environment(AuthenticationService.self) private var authService
+
+    /// PHASE 8D — `isPresented` binding for the automatic-discovery popup. The setter is
+    /// intentionally a no-op: dismissal is entirely state-driven (a successful accept or "Not Now"
+    /// changes `pendingInvitationPopupViewModel`'s own state, which this getter re-evaluates), not
+    /// something this binding itself ever needs to push back into the view model.
+    private var pendingInvitationPopupBinding: Binding<Bool> {
+        Binding(get: { pendingInvitationPopupViewModel.shouldPresentPopup }, set: { _ in })
+    }
 
     var body: some View {
         TabView {
@@ -325,11 +431,15 @@ private struct RootView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
         }
         .tint(Theme.accent)
+        .fullScreenCover(isPresented: pendingInvitationPopupBinding) {
+            PendingInvitationPopupView()
+        }
         .task {
             let freshlyCreatedSettings = bootstrapDefaultSettingsIfNeeded()
             bootstrapDefaultCategoriesIfNeeded()
             bootstrapDefaultMonthlyPlanSettingsIfNeeded()
             autoBackupManager.startObserving(context: modelContext)
+            cloudBackupManager.startObserving(context: modelContext)
             // RootView only ever renders once userDataStore.resolvedUserId == authService
             // .currentUserId (see this file's own gating above) — currentUserId is guaranteed
             // non-nil here in practice; the `if let` is a graceful skip, not a workaround for an
@@ -341,6 +451,10 @@ private struct RootView: View {
             // Fire-and-forget — resolves the Settings row's Primary-only visibility gate without
             // blocking the rest of this task's own bootstrap work above.
             Task { await accountRelatedOptionsViewModel.refresh() }
+            // Phase 8D — one check per session transition (this `.task` re-runs exactly when a
+            // new session resolves — see PendingInvitationPopupViewModel's own header). Also
+            // fire-and-forget, and harmless to run alongside the refresh above.
+            Task { await pendingInvitationPopupViewModel.checkForPendingInvitation() }
             await enablePendingFaceIDOptInIfNeeded(for: freshlyCreatedSettings)
         }
     }

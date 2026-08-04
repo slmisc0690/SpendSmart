@@ -8,10 +8,19 @@
 // user_profiles.normalized_email (never a client-supplied email) -> migration 0014's
 // accept_household_invitation, via this function's own privileged (service_role) client.
 //
-// Request body: { token: string } — ONLY the raw acceptance token. No household_id, no
-// user_id/email field of any kind — every other fact this function needs is derived either from
-// the verified session (caller identity/email) or from the token-matched invitation row itself
-// (household_id). A client cannot supply, and therefore cannot spoof, any of those.
+// Request body — exactly ONE of:
+//   { token: string }          — the original manual-link flow (Phase 8), unchanged.
+//   { invitation_id: string }  — PHASE 8D: accepts a SELF-DISCOVERED invitation (from
+//                                 get-my-pending-household-invitation) by id instead of token. See
+//                                 migration 0015's own header for why this is an equally-secure,
+//                                 differently-shaped acceptance path, not a weakening of the
+//                                 original one — the invitation id here was already scoped to the
+//                                 caller's own verified email by that discovery call, and this
+//                                 function independently re-verifies that match again regardless.
+// No household_id, no user_id/email field of any kind in either shape — every other fact this
+// function needs is derived either from the verified session (caller identity/email) or from the
+// matched invitation row itself (household_id). A client cannot supply, and therefore cannot
+// spoof, any of those.
 //
 // ANTI-ENUMERATION: every rejection reason (unknown token, wrong email, expired, revoked,
 // accepted, household invalid, household already has a Secondary, caller already has another
@@ -26,6 +35,7 @@
 
 import {
   createPrivilegedClient,
+  isValidUuid,
   jsonResponse,
   logPlaidOperation,
   logSafeError,
@@ -54,8 +64,14 @@ Deno.serve(async (req) => {
   }
 
   const body = await req.json().catch(() => ({}));
-  const { token } = body;
-  if (!isValidAcceptanceToken(token)) {
+  const { token, invitation_id } = body;
+  const usingInvitationId = invitation_id !== undefined && invitation_id !== null;
+
+  if (usingInvitationId) {
+    if (!isValidUuid(invitation_id)) {
+      return jsonResponse({ error: GENERIC_INVITATION_ERROR }, 400);
+    }
+  } else if (!isValidAcceptanceToken(token)) {
     return jsonResponse({ error: GENERIC_INVITATION_ERROR }, 400);
   }
 
@@ -73,13 +89,21 @@ Deno.serve(async (req) => {
       throw new Error("caller has no resolvable verified email");
     }
 
-    const tokenHash = await hashAcceptanceToken(token);
-
-    const { data, error } = await supabase.rpc("accept_household_invitation", {
-      p_acceptance_token_hash: tokenHash,
-      p_requesting_user_id: userId,
-      p_requesting_user_email_normalized: normalizedEmail,
-    });
+    // PHASE 8D — self-discovered invitations are accepted by id (migration 0015's
+    // accept_household_invitation_by_id); the original manual-link flow still accepts by token
+    // hash (migration 0014's accept_household_invitation, completely unmodified). See this file's
+    // own header for why both are equally secure, differently-shaped paths.
+    const { data, error } = usingInvitationId
+      ? await supabase.rpc("accept_household_invitation_by_id", {
+          p_invitation_id: invitation_id,
+          p_requesting_user_id: userId,
+          p_requesting_user_email_normalized: normalizedEmail,
+        })
+      : await supabase.rpc("accept_household_invitation", {
+          p_acceptance_token_hash: await hashAcceptanceToken(token),
+          p_requesting_user_id: userId,
+          p_requesting_user_email_normalized: normalizedEmail,
+        });
     if (error) throw error;
 
     logPlaidOperation({ operation: "accept-household-invitation", outcome: "accepted" });

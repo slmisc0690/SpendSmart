@@ -246,6 +246,12 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
         )
         field.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged), for: .editingChanged)
         context.coordinator.textField = field
+        // The coordinator's `state` is already seeded with the initial `amount` (see
+        // `makeCoordinator`), so `updateUIView`'s own sync guard (`coordinator.state.amount !=
+        // amount`) never fires on the very first pass — without this call the freshly created
+        // field's `.text` would stay empty (showing the placeholder) until the user's first
+        // keystroke, even though a real saved value already exists.
+        context.coordinator.syncDisplay(animated: false)
         return field
     }
 

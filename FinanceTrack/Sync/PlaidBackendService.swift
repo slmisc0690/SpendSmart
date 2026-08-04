@@ -231,7 +231,12 @@ enum PlaidBackendConfig {
     /// in the app. This constant is the same Supabase project URL regardless of whether the
     /// backend is currently pointed at Plaid Sandbox, Development, or (once enabled) Production —
     /// switching Plaid environments is a one-secret server-side change, not an iOS change.
-    static let baseURL: URL? = URL(string: "https://dlqjgpgnaguhubftfpel.supabase.co/functions/v1")
+    ///
+    /// DERIVED from `SupabaseConfig.projectURL`, never a second literal — this is the ONLY way
+    /// this project guarantees the Edge Functions host and the Supabase Auth/Postgres host can
+    /// never drift apart, in Production, in a Preview Debug build, or in Release (see
+    /// `SupabaseConfig`'s own `#if DEBUG && SPENDSMART_PREVIEW_BACKEND` selection).
+    static let baseURL: URL? = SupabaseConfig.projectURL.appendingPathComponent("functions/v1")
 }
 
 /// Real implementation of `PlaidBackendService` — calls the SpendSmart backend over HTTPS.

@@ -1,8 +1,11 @@
 import SwiftUI
 import SwiftData
 
-/// Sheet for editing the Monthly Plan's savings goal, optional buffer, and the two automation
-/// toggles. Mirrors `MonthlyGoalEditView`'s pattern — blank buffer is valid (means "no buffer").
+/// Sheet for editing the Monthly Plan's savings goal and optional buffer. Mirrors
+/// `MonthlyGoalEditView`'s pattern — blank buffer is valid (means "no buffer"). No longer shows
+/// either automation toggle in its UI — `useRecommendedWeeklyBudget`/`autoUpdateWeeklyBudgetFromPlan`
+/// remain on the model and are still round-tripped here for compatibility (cloud sync/sharing/
+/// backup/legacy migration), but neither has any remaining user-facing control or effect.
 struct MonthlyPlanSettingsEditView: View {
     let settings: MonthlyPlanSettings?
     @Environment(\.modelContext) private var modelContext
@@ -60,6 +63,7 @@ struct MonthlyPlanSettingsEditView: View {
                             CurrencyAmountField(
                                 amount: $savingsGoal,
                                 style: .hero,
+                                placeholder: "Enter Amount",
                                 isInvalid: hasAttemptedSave && (savingsGoal ?? -1) < 0,
                                 accessibilityLabel: "Monthly savings goal"
                             )
@@ -84,23 +88,6 @@ struct MonthlyPlanSettingsEditView: View {
                                 .foregroundStyle(Theme.textTertiary)
                         }
                         .frame(maxWidth: .infinity)
-                    }
-                    .padding(.horizontal, Theme.Spacing.lg)
-
-                    CardBackground {
-                        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                            TransactionToggleRow(
-                                title: "Use Recommended Weekly Budget",
-                                subtitle: "Show the recommended limit as the primary number in Monthly Plan",
-                                isOn: $useRecommendedWeeklyBudget
-                            )
-                            Divider().overlay(Theme.cardStroke)
-                            TransactionToggleRow(
-                                title: "Auto-Update Weekly Budget",
-                                subtitle: "Automatically set your weekly limit from this plan whenever it changes",
-                                isOn: $autoUpdateWeeklyBudgetFromPlan
-                            )
-                        }
                     }
                     .padding(.horizontal, Theme.Spacing.lg)
 

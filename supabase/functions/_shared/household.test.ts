@@ -16,6 +16,7 @@ import {
   isValidInvitationAction,
   isValidSharingCategory,
   isValidSharingPermissionRequest,
+  isValidSpendingStatus,
   normalizeEmail,
 } from "./household.ts";
 
@@ -51,15 +52,36 @@ Deno.test("isValidEmail rejects overlong address", () => {
   assertEquals(isValidEmail(`${local}@example.com`), false);
 });
 
-Deno.test("isValidSharingCategory accepts all three categories", () => {
+Deno.test("isValidSharingCategory accepts all four categories", () => {
   assertEquals(isValidSharingCategory("connectedAccounts"), true);
   assertEquals(isValidSharingCategory("manualAccounts"), true);
   assertEquals(isValidSharingCategory("monthlyPlan"), true);
+  assertEquals(isValidSharingCategory("monthlySavings"), true);
 });
 
 Deno.test("isValidSharingCategory rejects unknown category", () => {
   assertEquals(isValidSharingCategory("somethingElse"), false);
   assertEquals(isValidSharingCategory(123), false);
+});
+
+// PHASE A — monthlySavings independent sharing category
+
+Deno.test("isValidSharingPermissionRequest accepts null item_id for monthlySavings", () => {
+  const result = isValidSharingPermissionRequest("monthlySavings", null);
+  assertEquals(result, { valid: true, category: "monthlySavings", itemId: null });
+});
+
+Deno.test("isValidSharingPermissionRequest rejects non-null item_id for monthlySavings", () => {
+  const result = isValidSharingPermissionRequest("monthlySavings", "11111111-1111-1111-1111-111111111111");
+  assertEquals(result.valid, false);
+});
+
+Deno.test("isValidSharingPermissionRequest treats monthlySavings and monthlyPlan as independent categories", () => {
+  const savings = isValidSharingPermissionRequest("monthlySavings", null);
+  const plan = isValidSharingPermissionRequest("monthlyPlan", null);
+  assertEquals(savings, { valid: true, category: "monthlySavings", itemId: null });
+  assertEquals(plan, { valid: true, category: "monthlyPlan", itemId: null });
+  assertNotEquals(savings, plan);
 });
 
 Deno.test("isValidSharingPermissionRequest accepts global connectedAccounts row", () => {
@@ -171,4 +193,25 @@ Deno.test("buildInvitationUrl embeds the token under the locked scheme/host", as
 Deno.test("buildInvitationUrl percent-encodes special characters in the token", () => {
   const url = buildInvitationUrl("a+b/c=d");
   assertEquals(url, `spendsmart://household-invitation?token=${encodeURIComponent("a+b/c=d")}`);
+});
+
+// USER B DASHBOARD PARITY (canonical Monthly Outlook/Week-by-Week) — isValidSpendingStatus, used
+// by upsert-dashboard-summary to validate monthly_outlook_status/current_plan_week_status.
+
+Deno.test("isValidSpendingStatus accepts each of the three canonical values", () => {
+  assertEquals(isValidSpendingStatus("good"), true);
+  assertEquals(isValidSpendingStatus("warning"), true);
+  assertEquals(isValidSpendingStatus("over"), true);
+});
+
+Deno.test("isValidSpendingStatus rejects an unrecognized string rather than guessing", () => {
+  assertEquals(isValidSpendingStatus("great"), false);
+  assertEquals(isValidSpendingStatus(""), false);
+  assertEquals(isValidSpendingStatus("GOOD"), false);
+});
+
+Deno.test("isValidSpendingStatus rejects non-string values", () => {
+  assertEquals(isValidSpendingStatus(null), false);
+  assertEquals(isValidSpendingStatus(undefined), false);
+  assertEquals(isValidSpendingStatus(1), false);
 });

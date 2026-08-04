@@ -24,23 +24,36 @@ export function isValidEmail(value: unknown): value is string {
   return EMAIL_PATTERN.test(trimmed);
 }
 
-export type SharingCategory = "connectedAccounts" | "manualAccounts" | "monthlyPlan";
+export type SharingCategory = "connectedAccounts" | "manualAccounts" | "monthlyPlan" | "monthlySavings";
 
-const VALID_CATEGORIES: readonly SharingCategory[] = ["connectedAccounts", "manualAccounts", "monthlyPlan"];
+const VALID_CATEGORIES: readonly SharingCategory[] = [
+  "connectedAccounts",
+  "manualAccounts",
+  "monthlyPlan",
+  "monthlySavings",
+];
+
+/** PHASE A — global-only categories (no per-item override concept); a Primary shares the whole
+ * category via a single toggle. Kept as its own list (rather than an inline `===` check) so a
+ * future global-only category needs only one addition here. */
+const GLOBAL_ONLY_CATEGORIES: readonly SharingCategory[] = ["monthlyPlan", "monthlySavings"];
 
 export function isValidSharingCategory(value: unknown): value is SharingCategory {
   return typeof value === "string" && (VALID_CATEGORIES as readonly string[]).includes(value);
 }
 
-/** monthlyPlan is global-only — enforced independently here (before ever reaching the database
- * CHECK constraint / set_sharing_permission's own re-validation) so a malformed request gets a
- * clean 400 instead of a raw Postgres error surfaced to the client. */
+/** monthlyPlan/monthlySavings are global-only — enforced independently here (before ever reaching
+ * the database CHECK constraint / set_sharing_permission's own re-validation) so a malformed
+ * request gets a clean 400 instead of a raw Postgres error surfaced to the client. */
 export function isValidSharingPermissionRequest(
   category: unknown,
   itemId: unknown,
 ): { valid: true; category: SharingCategory; itemId: string | null } | { valid: false; reason: string } {
   if (!isValidSharingCategory(category)) {
-    return { valid: false, reason: "category must be one of connectedAccounts, manualAccounts, monthlyPlan" };
+    return {
+      valid: false,
+      reason: "category must be one of connectedAccounts, manualAccounts, monthlyPlan, monthlySavings",
+    };
   }
   if (itemId === null || itemId === undefined) {
     return { valid: true, category, itemId: null };
@@ -48,8 +61,8 @@ export function isValidSharingPermissionRequest(
   if (typeof itemId !== "string") {
     return { valid: false, reason: "item_id must be a string UUID or null" };
   }
-  if (category === "monthlyPlan") {
-    return { valid: false, reason: "monthlyPlan is a global-only category; item_id must be null" };
+  if (GLOBAL_ONLY_CATEGORIES.includes(category)) {
+    return { valid: false, reason: `${category} is a global-only category; item_id must be null` };
   }
   return { valid: true, category, itemId };
 }
@@ -124,4 +137,17 @@ export const HOUSEHOLD_INVITATION_URL_HOST = "household-invitation";
 
 export function buildInvitationUrl(token: string): string {
   return `${HOUSEHOLD_INVITATION_URL_SCHEME}://${HOUSEHOLD_INVITATION_URL_HOST}?token=${encodeURIComponent(token)}`;
+}
+
+/** USER B DASHBOARD PARITY (canonical Monthly Outlook/Week-by-Week) — wire values for the iOS
+ * `SpendingStatus` enum (`.good`/`.warning`/`.over`), mirroring `SpendingStatusWireCoding` in
+ * HouseholdSharingPayload.swift exactly. Used to validate `monthly_outlook_status`/
+ * `current_plan_week_status` in upsert-dashboard-summary — never a default guess for an
+ * unrecognized value. */
+export type SpendingStatusWireValue = "good" | "warning" | "over";
+
+const VALID_SPENDING_STATUSES: readonly SpendingStatusWireValue[] = ["good", "warning", "over"];
+
+export function isValidSpendingStatus(value: unknown): value is SpendingStatusWireValue {
+  return typeof value === "string" && (VALID_SPENDING_STATUSES as readonly string[]).includes(value);
 }

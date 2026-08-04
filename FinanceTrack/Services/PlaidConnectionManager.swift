@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftData
 
 /// Recognizes SpendSmart's one Plaid OAuth Universal Link — `https://plaid.sldevapps.com/spendsmart/plaid/`
 /// (see `PLAID_OAUTH_REDIRECT_URI` in `supabase/functions/_shared/plaid.ts`, which this must match
@@ -451,4 +452,106 @@ final class PlaidConnectionManager {
         updateCachedBalances(connectionId: connectionId, balances: [result.balance])
         return result
     }
+
+    /// DASHBOARD / CONNECTED ACCOUNTS REFRESH PARITY — the SINGLE shared transaction-sync/import
+    /// step every manual refresh entry point in the app uses: `ConnectedAccountsView.performSync`
+    /// (Settings → Connected Accounts → Refresh, the known-good implementation), and both Dashboard
+    /// refresh paths below. Previously each of those three call sites inlined its own copy of
+    /// `backend.syncTransactions` → `PlaidTransactionImportService.applySync` → `markSynced`; three
+    /// independently-maintained copies of the same three-line sequence are exactly the drift risk
+    /// a real-device report already caught once (balance updated, Activity did not) even though a
+    /// line-by-line comparison of the two Swift call sites showed no behavioral difference — the
+    /// architecture itself (parallel duplicated implementations) was the defect, not a single
+    /// missing statement in either copy. Consolidating to one method removes any possibility of
+    /// future divergence, per this task's own explicit direction to prefer reuse over maintaining
+    /// subtly different parallel implementations.
+    ///
+    /// `@MainActor` here is not cosmetic — see the CONNECTED REFRESH ACTIVITY FOLLOW-UP history:
+    /// `PlaidConnectionManager` is a plain `@Observable` class with no isolation of its own, so a
+    /// `nonisolated async` method can legitimately resume off the MainActor after its first
+    /// `await`, and `applySync`'s `context.save()` must run on the same actor that owns this app's
+    /// single shared `ModelContext` (see `.modelContainer(container)` in `FinanceTrackApp.swift`,
+    /// applied once above the TabView both Dashboard and Activity live in) for SwiftData's `@Query`
+    /// change notification to reach Activity reliably. Every caller of this method inherits that
+    /// guarantee automatically instead of having to re-derive it per call site.
+    @MainActor
+    @discardableResult
+    func syncAndImportTransactions(
+        connectionId: String,
+        context: ModelContext,
+        backend: PlaidBackendService = SupabasePlaidBackendService()
+    ) async throws -> PlaidTransactionImportService.SyncOutcome {
+        let syncResult = try await backend.syncTransactions(connectionId: connectionId)
+        let outcome = try PlaidTransactionImportService.applySync(syncResult, context: context)
+        markSynced(connectionId: connectionId)
+        return outcome
+    }
+
+    /// CONNECTED ACCOUNT REFRESH CONSISTENCY — the Dashboard's single manual "Refresh" tap must
+    /// update both this account's balance AND its transactions, not balance alone. Reuses the
+    /// exact two existing, already-approved operations rather than inventing a third: first
+    /// `refreshAccountBalance` (above — the same 2/day/account claimed, rate-limited Plaid
+    /// balance call the button already made before this task), then the shared
+    /// `syncAndImportTransactions` above — the SAME transaction-sync/import step
+    /// `ConnectedAccountsView.performSync` uses for its own manual sync button. `sync-transactions`
+    /// has no rate limit of its own (see that Edge Function's own header) — this adds no second
+    /// quota event, and Plaid's `/transactions/sync` is Item-scoped (not per-account, confirmed by
+    /// that Edge Function's own design), so this refreshes transactions for every account under the
+    /// same connection, same as Settings' own sync button already does.
+    ///
+    /// ORDERING/FAILURE SEMANTICS: the balance call happens FIRST and its cache update
+    /// (`updateCachedBalances`) has already taken effect by the time the transaction sync even
+    /// starts — so a transaction-sync failure (network error, decode failure, `context.save()`
+    /// failure) still throws (never silently swallowed as full success), but the balance update
+    /// already applied is never rolled back. A caller's existing generic `catch` (Dashboard's own
+    /// "just return the button to idle, no raw error surfaced" behavior) already handles this
+    /// correctly with no change needed there — this method only adds a step, it doesn't change
+    /// what "failure" means to the caller.
+    @MainActor
+    @discardableResult
+    func refreshAccountBalanceAndTransactions(
+        connectionId: String,
+        accountId: String,
+        context: ModelContext,
+        backend: PlaidBackendService = SupabasePlaidBackendService()
+    ) async throws -> ConnectedAccountRefreshResult {
+        let result = try await refreshAccountBalance(connectionId: connectionId, accountId: accountId, backend: backend)
+        _ = try await syncAndImportTransactions(connectionId: connectionId, context: context, backend: backend)
+        return result
+    }
+
+    #if DEBUG
+    /// DEBUG-BUILD-ONLY developer testing path — does NOT compile into Release/TestFlight/App
+    /// Store (the whole method is behind `#if DEBUG`, matching `DeveloperOptions`'s own
+    /// convention). Lets a developer repeatedly exercise the SAME balance+transaction refresh
+    /// workflow as `refreshAccountBalanceAndTransactions` above, without the 2/day/account
+    /// production quota — but WITHOUT the server ever being asked to trust a client-side flag,
+    /// and WITHOUT touching the quota table at all.
+    ///
+    /// SAFE-BYPASS DESIGN: uses `syncBalances(connectionId:)` — an existing, already-deployed,
+    /// already-unlimited Edge Function (`sync-balances`, confirmed by direct inspection to have no
+    /// claim/rate-limit logic of any kind, unlike `refresh-connected-account`) — instead of the
+    /// quota-claiming `refreshConnectedAccount`. This is a genuinely different, pre-existing
+    /// server operation, not a parameter asking the same endpoint to skip its own enforcement.
+    /// Transaction sync/import delegates to the exact same shared `syncAndImportTransactions`
+    /// method the production combined refresh (and `ConnectedAccountsView.performSync`) use —
+    /// not a separate copy — so this path is guaranteed byte-identical there, never just similar.
+    ///
+    /// SCOPE: only ever called for a Connected Account the authenticated caller already owns —
+    /// this method has no awareness of sharing/Secondary at all, and Dashboard never calls it for
+    /// a shared display (see `DashboardView.refreshConnectedAccount`'s own gating, unchanged).
+    @MainActor
+    @discardableResult
+    func refreshAccountBalanceAndTransactionsIgnoringDevelopmentQuota(
+        connectionId: String,
+        accountId: String,
+        context: ModelContext,
+        backend: PlaidBackendService = SupabasePlaidBackendService()
+    ) async throws -> PlaidAccountBalance? {
+        let balances = try await backend.syncBalances(connectionId: connectionId)
+        updateCachedBalances(connectionId: connectionId, balances: balances)
+        _ = try await syncAndImportTransactions(connectionId: connectionId, context: context, backend: backend)
+        return balances.first { $0.accountId == accountId }
+    }
+    #endif
 }

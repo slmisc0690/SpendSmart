@@ -10,11 +10,18 @@ enum AutosaveCommitter {
 
     // MARK: - Income Source
 
+    /// INCOME SCHEDULING PHASE: validates the Deposit Schedule fields relevant to `frequency` —
+    /// see `AddEditIncomeSourceView`'s own header for exactly which fields apply to which
+    /// frequency. Plain-language messages only (no jargon), matching this screen's existing
+    /// convention; `Save` stays disabled whenever this returns a non-empty array.
     static func incomeSourceValidationMessages(
         name: String,
         amount: Decimal?,
         frequency: PlanFrequency,
-        hasNextPayDate: Bool
+        hasNextPayDate: Bool,
+        monthlyDepositDay: MonthlyDepositDay? = nil,
+        twiceMonthlyFirstDeposit: MonthlyDepositDay? = nil,
+        twiceMonthlySecondDeposit: MonthlyDepositDay? = nil
     ) -> [String] {
         var messages: [String] = []
         if name.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -23,8 +30,33 @@ enum AutosaveCommitter {
         if amount == nil || (amount ?? 0) <= 0 {
             messages.append("Amount must be greater than 0.")
         }
-        if frequency == .oneTime, !hasNextPayDate {
-            messages.append("One-time income needs a date to know which month it counts toward.")
+        switch frequency {
+        case .oneTime:
+            if !hasNextPayDate {
+                messages.append("One-time income needs a date to know which month it counts toward.")
+            }
+        case .weekly, .biweekly:
+            if !hasNextPayDate {
+                messages.append("Choose the next deposit date so future deposits can be calculated.")
+            }
+        case .yearly:
+            if !hasNextPayDate {
+                messages.append("Choose the annual deposit date.")
+            }
+        case .monthly:
+            if monthlyDepositDay == nil {
+                messages.append("Choose the day this income deposits each month.")
+            }
+        case .twiceMonthly:
+            if twiceMonthlyFirstDeposit == nil || twiceMonthlySecondDeposit == nil {
+                messages.append("Choose both monthly deposit days.")
+            } else if twiceMonthlyFirstDeposit == twiceMonthlySecondDeposit {
+                messages.append("The two deposit days must be different.")
+            }
+        case .quarterly:
+            if !hasNextPayDate {
+                messages.append("Choose the next deposit date so future deposits can be calculated.")
+            }
         }
         return messages
     }
@@ -41,6 +73,11 @@ enum AutosaveCommitter {
         timing: PlanTiming,
         dayOfMonth: Int?,
         nextPayDate: Date?,
+        monthlyDepositDayIsLastDay: Bool = false,
+        twiceMonthlyFirstDayNumber: Int? = nil,
+        twiceMonthlyFirstDayIsLastDay: Bool = false,
+        twiceMonthlySecondDayNumber: Int? = nil,
+        twiceMonthlySecondDayIsLastDay: Bool = false,
         note: String,
         modelContext: ModelContext
     ) -> IncomeSource {
@@ -51,6 +88,11 @@ enum AutosaveCommitter {
             existing.timing = timing
             existing.dayOfMonth = dayOfMonth
             existing.nextPayDate = nextPayDate
+            existing.monthlyDepositDayIsLastDay = monthlyDepositDayIsLastDay
+            existing.twiceMonthlyFirstDayNumber = twiceMonthlyFirstDayNumber
+            existing.twiceMonthlyFirstDayIsLastDay = twiceMonthlyFirstDayIsLastDay
+            existing.twiceMonthlySecondDayNumber = twiceMonthlySecondDayNumber
+            existing.twiceMonthlySecondDayIsLastDay = twiceMonthlySecondDayIsLastDay
             existing.note = note
             existing.updatedAt = .now
             return existing
@@ -62,6 +104,11 @@ enum AutosaveCommitter {
             timing: timing,
             dayOfMonth: dayOfMonth,
             nextPayDate: nextPayDate,
+            monthlyDepositDayIsLastDay: monthlyDepositDayIsLastDay,
+            twiceMonthlyFirstDayNumber: twiceMonthlyFirstDayNumber,
+            twiceMonthlyFirstDayIsLastDay: twiceMonthlyFirstDayIsLastDay,
+            twiceMonthlySecondDayNumber: twiceMonthlySecondDayNumber,
+            twiceMonthlySecondDayIsLastDay: twiceMonthlySecondDayIsLastDay,
             note: note
         )
         modelContext.insert(created)

@@ -99,8 +99,83 @@ enum MonthlyPlanCalculator {
 
     /// income − fixed expenses − what's actually been spent so far this month. This is what the
     /// user will actually end up saving at the current pace, not just the target.
+    ///
+    /// URGENT MONTHLY PLAN CALCULATION CORRECTION (Part 4) — this is the LEGACY actual-spending
+    /// projection. It remains completely UNCHANGED and still drives `Summary.projectedMonthlySavings`
+    /// (Dashboard, `PrimaryDashboardSummarySyncService`, `SpendSmartQueryEngine`,
+    /// `SharedPrimaryDataViews` — none of those consumers are touched by this phase). It is
+    /// DELIBERATELY NOT used for the Monthly Plan top card anymore — see
+    /// `projectedSavingsFromActualSpending` (an explicitly-named alias for this exact function,
+    /// added so a future caller can never confuse this with `projectedMonthlySavingsFromPlan`
+    /// below by an ambiguous shared name) and `MonthlyPlanHeroCard`, which now takes the
+    /// planned-spending values as explicit parameters instead.
     static func projectedMonthlySavings(income: Decimal, fixedExpenses: Decimal, actualSpentThisMonth: Decimal) -> Decimal {
         income - fixedExpenses - actualSpentThisMonth
+    }
+
+    /// Explicitly-named alias for `projectedMonthlySavings(income:fixedExpenses:
+    /// actualSpentThisMonth:)` — same formula, same value, just a name that can never be confused
+    /// with `projectedMonthlySavingsFromPlan` (Part 4's explicit requirement: distinct names so
+    /// these two concepts cannot be accidentally wired together again).
+    static func projectedSavingsFromActualSpending(income: Decimal, fixedExpenses: Decimal, actualSpentThisMonth: Decimal) -> Decimal {
+        projectedMonthlySavings(income: income, fixedExpenses: fixedExpenses, actualSpentThisMonth: actualSpentThisMonth)
+    }
+
+    // MARK: - MONTHLY PLAN + SCENARIO CORRECTIONS PHASE — Planned Weekly Spending planning path
+    //
+    // The ONE authoritative formula path for "Planned Weekly Spending" planning (Part 13) — never
+    // duplicated in a view or a view model. Deliberately separate from
+    // `projectedMonthlySavings(income:fixedExpenses:actualSpentThisMonth:)` above, which remains
+    // completely UNCHANGED (it still drives `Summary.projectedMonthlySavings`, consumed by
+    // `MonthlyPlanHeroCard`, `DashboardView`, `PrimaryDashboardSummarySyncService`,
+    // `SpendSmartQueryEngine`, and `SharedPrimaryDataViews` — none of those call sites are touched
+    // by this phase). This is a DIFFERENT metric: a forward-looking planning projection based on
+    // how much the user INTENDS to spend each week, not a backward-looking one based on actual
+    // spending so far. The two numbers are expected to differ and are shown in different places.
+
+    /// The automatic Planned Weekly Spending — used whenever no manual override is set. Exactly
+    /// `flexibleSpendingAvailable ÷ 4`, matching the required example ($3,169 ÷ 4 = $792.25).
+    static func automaticPlannedWeeklySpending(flexibleSpendingAvailable: Decimal) -> Decimal {
+        flexibleSpendingAvailable / 4
+    }
+
+    /// The Planned Weekly Spending actually in effect — the user's manual override when one is
+    /// set, otherwise the automatic value. `override` is `nil` for "automatic mode," never a
+    /// truthy/nonzero check (a deliberate custom `$0.00` override is a real override, not
+    /// "no override" — see `MonthlyPlanSettings.plannedWeeklySpendingOverride`'s own header).
+    static func effectivePlannedWeeklySpending(override: Decimal?, flexibleSpendingAvailable: Decimal) -> Decimal {
+        override ?? automaticPlannedWeeklySpending(flexibleSpendingAvailable: flexibleSpendingAvailable)
+    }
+
+    /// Planned Weekly Spending × 4 — never 4.33 or any other week-count approximation (locked
+    /// product behavior, matching `BudgetSettings.applyMonthlyPlanAutoCalculate`'s own established
+    /// "always exactly 4" rule).
+    static func plannedMonthlySpending(plannedWeeklySpending: Decimal) -> Decimal {
+        plannedWeeklySpending * 4
+    }
+
+    /// The part of Average Monthly Flexible Spending NOT set aside for planned weekly spending.
+    /// May be negative when planned spending exceeds flexible spending available — deliberately
+    /// never clamped to zero (Part 7's explicit requirement: an over-limit plan must show its real
+    /// negative effect, not be silently hidden).
+    static func additionalPlannedSavings(flexibleSpendingAvailable: Decimal, plannedMonthlySpending: Decimal) -> Decimal {
+        flexibleSpendingAvailable - plannedMonthlySpending
+    }
+
+    /// Monthly Savings Goal + Additional Planned Savings — the planning-workflow Projected Monthly
+    /// Savings (Part 6). Distinct from `projectedMonthlySavings(income:fixedExpenses:
+    /// actualSpentThisMonth:)` above; may be negative (Part 7) when Additional Planned Savings is
+    /// negative enough to exceed the goal.
+    static func projectedMonthlySavingsFromPlan(monthlySavingsGoal: Decimal, additionalPlannedSavings: Decimal) -> Decimal {
+        monthlySavingsGoal + additionalPlannedSavings
+    }
+
+    /// Explicitly-named alias for `projectedMonthlySavingsFromPlan(monthlySavingsGoal:
+    /// additionalPlannedSavings:)` — matches Part 4's exact suggested naming
+    /// (`projectedSavingsFromPlannedSpending`) alongside `projectedSavingsFromActualSpending`
+    /// above, so the two concepts read as unmistakably distinct at every call site.
+    static func projectedSavingsFromPlannedSpending(monthlySavingsGoal: Decimal, additionalPlannedSavings: Decimal) -> Decimal {
+        projectedMonthlySavingsFromPlan(monthlySavingsGoal: monthlySavingsGoal, additionalPlannedSavings: additionalPlannedSavings)
     }
 
     /// On track to save (projected ≥ goal), savings goal at risk (0 ≤ projected < goal), or
@@ -120,32 +195,29 @@ enum MonthlyPlanCalculator {
         settings.updatedAt = .now
     }
 
-    // MARK: - Projected savings from a manual weekly limit
+    // MARK: - Monthly Spend Remaining (authoritative Weekly Spending Limit source)
 
-    /// income − fixed expenses − buffer. Deliberately does *not* subtract a savings goal (unlike
-    /// `flexibleSpendingAvailable`) — this answers "what's left after bills alone," which is what
-    /// Settings' weekly-limit projection is estimating against.
-    static func availableAfterBills(income: Decimal, fixedExpenses: Decimal, bufferAmount: Decimal) -> Decimal {
-        income - fixedExpenses - bufferAmount
+    /// income − fixed expenses. A month-start planning figure — deliberately does not account
+    /// for the savings goal, buffer, or actual spending; each of those is applied by a later,
+    /// separate step below so no input is ever subtracted twice.
+    static func moneyAfterBills(income: Decimal, fixedExpenses: Decimal) -> Decimal {
+        income - fixedExpenses
     }
 
-    /// A flat weekly limit applied across every spending week in the month.
-    static func monthlySpendingBudget(weeklyLimit: Decimal, spendingWeeksInMonth: Int) -> Decimal {
-        weeklyLimit * Decimal(spendingWeeksInMonth)
+    /// The fixed monthly amount available to spend once bills, the Monthly Savings Goal, and the
+    /// optional Buffer are all protected. Clamped at 0 — a goal/buffer combination that exceeds
+    /// money after bills must never produce a negative budget.
+    static func monthlySpendingBudget(moneyAfterBills: Decimal, savingsGoal: Decimal, bufferAmount: Decimal) -> Decimal {
+        max(0, moneyAfterBills - savingsGoal - bufferAmount)
     }
 
-    /// What sticking to `weeklyLimit` every week would leave you with at month's end: available
-    /// after bills minus the monthly spending budget that limit implies. Positive means projected
-    /// savings; negative means that limit would overspend what's available after bills.
-    static func projectedSavingsFromWeeklyLimit(availableAfterBills: Decimal, monthlySpendingBudget: Decimal) -> Decimal {
-        availableAfterBills - monthlySpendingBudget
-    }
-
-    /// Whether there's enough Monthly Plan data (at least one active income source) to make the
-    /// weekly-limit savings projection meaningful. With no income entered, "available after
-    /// bills" is just a negative guess, not a real estimate.
-    static func hasIncomeDataForProjection(_ sources: [IncomeSource]) -> Bool {
-        sources.contains { $0.isActive }
+    /// `monthlySpendingBudget` minus actual qualifying spending so far this month (see
+    /// `BudgetCalculator.monthlySpent` — the single canonical actual-spending source, never
+    /// duplicated here). Clamped at 0 — spending beyond the budget must never show as available
+    /// to spend. This is the sole authoritative input to the derived Weekly Spending Limit
+    /// (`BudgetSettings.applyMonthlyPlanAutoCalculate`), which divides it by exactly 4.
+    static func monthlySpendRemaining(monthlySpendingBudget: Decimal, actualMonthlySpending: Decimal) -> Decimal {
+        max(0, monthlySpendingBudget - actualMonthlySpending)
     }
 
     /// Computes everything the Monthly Plan screen shows, for `month`. `weekInterval` should be
@@ -170,7 +242,16 @@ enum MonthlyPlanCalculator {
         let flexible = flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: savingsGoal, bufferAmount: buffer)
 
         let weeks = DateRangeHelper.weeksOverlapping(month, weekStartsOnSunday: weekStartsOnSunday)
-        let recommendedWeekly = recommendedWeeklySpendingLimit(flexibleSpendingAvailable: flexible, spendingWeeksInMonth: weeks.count)
+        // WEEKLY SPENDING UNIFICATION — the per-week Recommended amount is the ONE authoritative
+        // Effective Planned Weekly Spending (custom override when set, otherwise Flexible Spending
+        // Available ÷ 4 — see `effectivePlannedWeeklySpending`'s own header), repeated identically
+        // for every week `weeks` contains. Never `recommendedWeeklySpendingLimit`'s calendar-week
+        // divisor (`weeks.count`, which produces 5 or 6 depending on the month and silently ignores
+        // any custom override) — that legacy formula is the root cause of Monthly Plan/Dashboard
+        // Week-by-Week showing a different number than the real Planned Weekly Spending setting.
+        // `recommendedWeeklySpendingLimit(flexibleSpendingAvailable:spendingWeeksInMonth:)` itself
+        // is left defined and untouched for any existing direct caller, just no longer used here.
+        let recommendedWeekly = effectivePlannedWeeklySpending(override: planSettings?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: flexible)
 
         let spentThisMonth = BudgetCalculator.monthlySpent(transactions, in: month, includePending: includePending)
         let spentThisWeek = BudgetCalculator.weeklySpent(transactions, in: weekInterval, includePending: includePending)
@@ -181,7 +262,13 @@ enum MonthlyPlanCalculator {
         let weeklyComparisons: [WeeklyPlanComparison] = weeks.map { week in
             let spent: Decimal
             if let clipped = DateRangeHelper.clampedInterval(week, to: month) {
-                spent = BudgetCalculator.monthlySpent(transactions, in: clipped, includePending: includePending)
+                // Each week's Actual now routes through `BudgetCalculator.weeklySpent`
+                // (`countsTowardWeeklyBudget`) — the SAME per-transaction eligibility flag the
+                // dedicated Weekly Budget screen already used, never `monthlySpent`
+                // (`countsTowardMonthlySpending`, a different, independent flag) — so Monthly
+                // Plan, Dashboard, and Weekly Budget can never disagree about what counts as this
+                // week's spending.
+                spent = BudgetCalculator.weeklySpent(transactions, in: clipped, includePending: includePending)
             } else {
                 spent = 0
             }

@@ -42,6 +42,14 @@ final class ManualDataCloudSyncManager {
     private var debounceTask: Task<Void, Never>?
     private let debounceDelay: Duration
     private let backend: ManualDataSyncService
+    /// Bumped by every `startObserving`/`stopObserving` call — same proven fix as
+    /// `AutoBackupManager.generation` (see its own doc comment for the full sign-out/sign-in race
+    /// this closes): `ModelContext.didSave` was registered with `queue: nil`, letting a callback
+    /// or already-spawned debounce `Task` reach the outgoing user's `ModelContext` after
+    /// `userDataStore.detach()` released its owning `ModelContainer`. `queue: .main` closes the
+    /// cross-thread half; this generation check closes an already-main-thread-queued stale
+    /// callback/Task.
+    private var generation = 0
 
     init(debounceDelay: Duration = .seconds(3), backend: ManualDataSyncService = SupabaseManualDataSyncService()) {
         self.debounceDelay = debounceDelay
@@ -62,14 +70,16 @@ final class ManualDataCloudSyncManager {
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
+        generation += 1
+        let observationGeneration = generation
         observer = NotificationCenter.default.addObserver(
             forName: ModelContext.didSave,
             object: context,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
-            self?.scheduleSync(context: context, userId: userId, immediate: false)
+            self?.scheduleSync(context: context, userId: userId, immediate: false, generation: observationGeneration)
         }
-        scheduleSync(context: context, userId: userId, immediate: true)
+        scheduleSync(context: context, userId: userId, immediate: true, generation: observationGeneration)
     }
 
     /// Stops observing entirely and cancels any pending debounced sync — called on sign-out, same
@@ -83,21 +93,24 @@ final class ManualDataCloudSyncManager {
         }
         debounceTask?.cancel()
         debounceTask = nil
+        generation += 1
     }
 
-    private func scheduleSync(context: ModelContext, userId: UUID, immediate: Bool) {
+    private func scheduleSync(context: ModelContext, userId: UUID, immediate: Bool, generation callGeneration: Int) {
+        guard callGeneration == generation else { return }
         debounceTask?.cancel()
         debounceTask = Task { [weak self, debounceDelay] in
             if !immediate {
                 try? await Task.sleep(for: debounceDelay)
                 guard !Task.isCancelled else { return }
             }
-            await self?.performSync(context: context, userId: userId)
+            await self?.performSync(context: context, userId: userId, generation: callGeneration)
         }
     }
 
     @MainActor
-    private func performSync(context: ModelContext, userId: UUID) async {
+    private func performSync(context: ModelContext, userId: UUID, generation callGeneration: Int) async {
+        guard callGeneration == generation else { return }
         do {
             // Fetch-then-filter in plain Swift, not an enum/UUID-equality-on-optional inside
             // #Predicate — matching PlaidLocalDataCleanupService's own established pattern for the
