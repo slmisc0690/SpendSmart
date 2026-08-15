@@ -24,8 +24,8 @@ struct TransactionRow: View {
 
     private var typeBadgeColor: Color {
         switch transaction.type {
-        case .expense: return Theme.statusOver
-        case .refund, .income: return Theme.statusGood
+        case .expense, .transferWithdrawal: return Theme.statusOver
+        case .refund, .income, .transferDeposit: return Theme.statusGood
         case .creditCardPayment: return Theme.accent
         case .transfer: return Theme.accentSecondary
         case .balanceAdjustment: return Theme.textTertiary
@@ -34,16 +34,16 @@ struct TransactionRow: View {
 
     private var signPrefix: String {
         switch transaction.type {
-        case .expense: return "-"
-        case .refund, .income: return "+"
+        case .expense, .transferWithdrawal: return "-"
+        case .refund, .income, .transferDeposit: return "+"
         case .transfer, .creditCardPayment, .balanceAdjustment: return ""
         }
     }
 
     private var amountColor: Color {
         switch transaction.type {
-        case .expense: return Theme.textSecondary
-        case .refund, .income: return Theme.statusGood
+        case .expense, .transferWithdrawal: return Theme.textSecondary
+        case .refund, .income, .transferDeposit: return Theme.statusGood
         case .transfer, .creditCardPayment, .balanceAdjustment: return Theme.textTertiary
         }
     }

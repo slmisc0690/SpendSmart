@@ -42,8 +42,8 @@ struct DashboardView: View {
     @State private var isPresentingSetBudget = false
     @State private var isPresentingAddExpense = false
     @State private var isPresentingSettings = false
-    @State private var isPresentingMonthlySummary = false
     @State private var isPresentingActivity = false
+    @State private var isPresentingExcludeTransactionsPicker = false
     /// Non-`nil` while a Favorites Bar destination's sheet is presented — drives the single
     /// `.sheet(item:)` below (`destinationView(for:)`), which routes to each destination's existing
     /// canonical view unmodified. Never a second copy of any of those screens' own logic.
@@ -91,8 +91,15 @@ struct DashboardView: View {
         }
     }
 
+    /// MONTH-ALIGNED FOUR-WEEK CORRECTION — This Week is always one of exactly 4 month-aligned
+    /// blocks (Week 1 starting on the 1st of the month, weeks 1–3 seven days each, week 4 the
+    /// remainder), never a Sunday/Monday calendar week — see
+    /// `DateRangeHelper.fourWeekBlocks(in:)`'s own header for why (no cross-month bleed into
+    /// Week-by-Week's totals). `BudgetSettings.weekStartsOnSunday` is intentionally no longer
+    /// read here — it remains meaningful elsewhere (Insights/SpendSense/Scenario/Monthly
+    /// Summary), just not for This Week/Week-by-Week/Monthly Outlook anymore.
     private var weekInterval: DateInterval {
-        DateRangeHelper.currentWeekRange(weekStartsOnSunday: settings?.weekStartsOnSunday ?? true)
+        DateRangeHelper.currentFourWeekBlock()
     }
 
     private var monthInterval: DateInterval {
@@ -103,12 +110,32 @@ struct DashboardView: View {
         settings?.includePendingTransactions ?? true
     }
 
+    /// AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — the user's current selection under "Auto
+    /// Calculate Weekly/Monthly Based on Transactions for:", read fresh from `settings` on every
+    /// access (a plain `Set` computed property, not a stored `@State` snapshot — unlike this
+    /// view's `weeklyLimit`/etc-style values, this is read-only and never written from this view,
+    /// so it carries none of the sign-out live-`Binding`-getter risk those exist to avoid).
+    private var autoTrackedAccountIds: Set<String> {
+        Set(settings?.autoCalculateConnectedAccountIds ?? [])
+    }
+
+    /// EXCLUDE TRANSACTIONS — the user's current selection under "Budget Exclusions," read fresh
+    /// from `settings` on every access (same read-only, non-`@State` pattern as
+    /// `autoTrackedAccountIds` immediately above). Gated on `excludeTransactionsEnabled`: when the
+    /// master toggle is off, this always returns empty regardless of what
+    /// `excludedTransactionIDs` itself still holds, so turning the feature off is a true "as if it
+    /// never existed" state for every budgeting calculation below.
+    private var excludedTransactionIDs: Set<UUID> {
+        guard settings?.excludeTransactionsEnabled ?? false else { return [] }
+        return Set(settings?.excludedTransactionIDs ?? [])
+    }
+
     private var spentThisWeek: Decimal {
-        BudgetCalculator.weeklySpent(transactions, in: weekInterval, includePending: includePending)
+        BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
     }
 
     private var spentThisMonth: Decimal {
-        BudgetCalculator.monthlySpent(transactions, in: monthInterval, includePending: includePending)
+        BudgetCalculator.monthlyActualSpending(transactions, in: monthInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
     }
 
     /// URGENT REGRESSION FIX — computed live via the same shared `effectivePlannedWeeklySpending`
@@ -138,30 +165,6 @@ struct DashboardView: View {
 
     private var totalSavingsToDate: Decimal {
         SavingsCalculator.totalSavingsToDate(savingsEntries)
-    }
-
-    private var showMonthlySpendingQuickStat: Bool {
-        settings?.showMonthlySpendingQuickStat ?? true
-    }
-
-    /// TARGET ARCHITECTURE — for a Secondary, Monthly Spending must reflect the Primary's
-    /// authorized shared Actual spending, never this device's own local transactions (which for a
-    /// Secondary are normally near-empty and would otherwise silently look like real data). A
-    /// Primary's own visibility/behavior is completely unchanged — `showMonthlySpendingQuickStat`
-    /// alone, exactly as before this correction.
-    private var monthlySpendingQuickStatVisible: Bool {
-        guard isSecondary else { return showMonthlySpendingQuickStat }
-        guard accountRelatedOptionsLoaded, secondaryOutlookAuthorized,
-              case .loaded(.some) = dashboardSummaryViewModel?.state
-        else { return false }
-        return showMonthlySpendingQuickStat
-    }
-
-    private var monthlySpendingQuickStatAmount: Decimal {
-        if isSecondary, let summary = sharedDashboardSummary {
-            return summary.actualSpentThisMonth
-        }
-        return spentThisMonth
     }
 
     private var showSavedThisMonthQuickStat: Bool {
@@ -313,7 +316,9 @@ struct DashboardView: View {
             weekInterval: weekInterval,
             weekStartsOnSunday: settings?.weekStartsOnSunday ?? true,
             includePending: includePending,
-            warningThreshold: settings?.warningThreshold ?? 0.70
+            warningThreshold: settings?.warningThreshold ?? 0.70,
+            autoTrackedAccountIds: autoTrackedAccountIds,
+            excludedTransactionIDs: excludedTransactionIDs
         )
     }
 
@@ -331,10 +336,63 @@ struct DashboardView: View {
     // here. `monthlyPlanSummary.projectedMonthlySavings` (the legacy actual-spending formula)
     // remains untouched and unused by this section.
 
+    /// QUICK STATS REDESIGN — whether a REAL Custom Planned Weekly Spending override is currently
+    /// in effect, matching `MonthlyPlanCalculator.effectivePlannedWeeklySpending`'s own
+    /// `override > 0` condition exactly (never a bare `!= nil` check), same rule
+    /// `MonthlyPlanView.isPlannedWeeklySpendingCustom` uses.
+    private var isPlannedWeeklySpendingCustomForOutlook: Bool {
+        (monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride ?? 0) > 0
+    }
+
+    // MARK: - FIXED BILLS FORMULA UNIFICATION
+    //
+    // `monthlyPlanSummary.flexibleSpendingAvailable`/`estimatedMonthlyFixedExpenses` route through
+    // `MonthlyPlanCalculator.estimatedMonthlyFixedExpenses`'s legacy per-frequency-converting
+    // formula (Weekly ×52÷12, Quarterly ÷3, Yearly ÷12, ...) — the SAME formula
+    // `FixedBillsReconciliation`/Scenario/SpendSense/the cloud sync payload still intentionally
+    // use, so none of those are touched here. `MonthlyPlanView`'s own "corrected" figures
+    // (`correctedFixedBillsTotal`/`correctedFlexibleSpendingAvailable`) instead use
+    // `FixedBillsTimingFilter.displayedTotal` — a plain raw sum of each bill's `amount`, no
+    // frequency conversion — which is what every bill's own row on screen (Fixed Bills list,
+    // Scenario Bill Groups) already displays. For a Monthly-frequency bill the two formulas are
+    // identical; they only diverge for a Weekly/Quarterly/Yearly bill, which is exactly what
+    // produced a real, user-reported gap between Monthly Plan's own Flexible Spending Available
+    // and the Dashboard's Quick Stats/Monthly Outlook for the same figure. Mirrored here (Dashboard
+    // only) rather than changing the shared `estimatedMonthlyFixedExpenses` function itself, so
+    // this stays scoped to the two screens that actually need to agree, without touching
+    // Scenario/SpendSense/backend-sync's own established use of the legacy formula.
+    private var activeRecurringExpensesForOutlook: [RecurringExpense] {
+        recurringExpenses.filter { $0.isActive }
+    }
+
+    private var correctedFixedBillsTotalForOutlook: Decimal {
+        FixedBillsTimingFilter.displayedTotal(for: activeRecurringExpensesForOutlook)
+    }
+
+    /// income − corrected Fixed Bills − savings goal − buffer, BEFORE Bill Payment Variance —
+    /// same shape as `MonthlyPlanView.correctedFlexibleSpendingAvailable`.
+    private var correctedPlannedFlexibleSpendingAvailableForOutlook: Decimal {
+        monthlyPlanSummary.estimatedMonthlyIncome - correctedFixedBillsTotalForOutlook - monthlyPlanSummary.monthlySavingsGoal - monthlyPlanSummary.bufferAmount
+    }
+
+    /// The corrected baseline PLUS Bill Payment Variance (planned vs. actual, per bill actually
+    /// paid this month — see `MonthlyPlanCalculator.billPaymentVariance`'s own header) — the ONE
+    /// figure every Quick Stat/Monthly Outlook value below now reads instead of
+    /// `monthlyPlanSummary.flexibleSpendingAvailable` directly. Nothing paid differently than
+    /// planned this month ⇒ this equals `correctedPlannedFlexibleSpendingAvailableForOutlook`
+    /// exactly, matching Monthly Plan's own displayed figure.
+    private var correctedFlexibleSpendingAvailableForOutlook: Decimal {
+        correctedPlannedFlexibleSpendingAvailableForOutlook + MonthlyPlanCalculator.billPaymentVariance(
+            recurringExpenses: recurringExpenses,
+            transactions: transactions,
+            in: monthInterval
+        )
+    }
+
     private var plannedWeeklySpendingForOutlook: Decimal {
         MonthlyPlanCalculator.effectivePlannedWeeklySpending(
             override: monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride,
-            flexibleSpendingAvailable: monthlyPlanSummary.flexibleSpendingAvailable
+            flexibleSpendingAvailable: correctedFlexibleSpendingAvailableForOutlook
         )
     }
 
@@ -342,14 +400,22 @@ struct DashboardView: View {
         MonthlyPlanCalculator.plannedMonthlySpending(plannedWeeklySpending: plannedWeeklySpendingForOutlook)
     }
 
-    private var projectedMonthlySavingsForOutlook: Decimal {
-        let additional = MonthlyPlanCalculator.additionalPlannedSavings(
-            flexibleSpendingAvailable: monthlyPlanSummary.flexibleSpendingAvailable,
+    /// QUICK STATS REDESIGN — Flexible Spending Available minus Planned Monthly Spending
+    /// (`MonthlyPlanCalculator.additionalPlannedSavings`), extracted into its own named property
+    /// (previously computed inline only within `projectedMonthlySavingsForOutlook` below) so the
+    /// new "Projected Available After Spend" Quick Stat can display the SAME already-computed
+    /// value that feeds `projectedMonthlySavingsForOutlook`, never a second calculation.
+    private var projectedAvailableAfterSpendForOutlook: Decimal {
+        MonthlyPlanCalculator.additionalPlannedSavings(
+            flexibleSpendingAvailable: correctedFlexibleSpendingAvailableForOutlook,
             plannedMonthlySpending: plannedMonthlySpendingForOutlook
         )
-        return MonthlyPlanCalculator.projectedSavingsFromPlannedSpending(
+    }
+
+    private var projectedMonthlySavingsForOutlook: Decimal {
+        MonthlyPlanCalculator.projectedSavingsFromPlannedSpending(
             monthlySavingsGoal: monthlyPlanSummary.monthlySavingsGoal,
-            additionalPlannedSavings: additional
+            additionalPlannedSavings: projectedAvailableAfterSpendForOutlook
         )
     }
 
@@ -358,15 +424,12 @@ struct DashboardView: View {
     }
 
     private var monthlySpendRemaining: Decimal {
-        let moneyAfterBills = MonthlyPlanCalculator.moneyAfterBills(
-            income: monthlyPlanSummary.estimatedMonthlyIncome,
-            fixedExpenses: monthlyPlanSummary.estimatedMonthlyFixedExpenses
-        )
-        let spendingBudget = MonthlyPlanCalculator.monthlySpendingBudget(
-            moneyAfterBills: moneyAfterBills,
-            savingsGoal: monthlyPlanSummary.monthlySavingsGoal,
-            bufferAmount: monthlyPlanSummary.bufferAmount
-        )
+        // FIXED BILLS FORMULA UNIFICATION — `max(0, correctedFlexibleSpendingAvailableForOutlook)`
+        // is exactly `monthlySpendingBudget`'s own shape (income − corrected Fixed Bills − savings
+        // goal − buffer, clamped at 0) PLUS Bill Payment Variance, which the old
+        // `moneyAfterBills`/`monthlySpendingBudget` pipeline never applied at all — see this
+        // section's own header above.
+        let spendingBudget = max(0, correctedFlexibleSpendingAvailableForOutlook)
         return MonthlyPlanCalculator.monthlySpendRemaining(
             monthlySpendingBudget: spendingBudget,
             actualMonthlySpending: monthlyPlanSummary.actualSpentThisMonth
@@ -383,6 +446,7 @@ struct DashboardView: View {
                     weeklyCardSection
                     quickStatsSection
                     connectedAccountsSection
+                    budgetExclusionsSection
                     monthlyOutlookAndWeekByWeekSection
                     recentActivitySection
                 }
@@ -400,9 +464,6 @@ struct DashboardView: View {
             .sheet(isPresented: $isPresentingSettings) {
                 SettingsView(isModal: true)
             }
-            .sheet(isPresented: $isPresentingMonthlySummary) {
-                MonthlySummaryView()
-            }
             .sheet(isPresented: $isPresentingActivity) {
                 // Reuses the existing full Activity screen (ExpenseListView) rather than building
                 // a second one — presented modally, matching every other Dashboard destination in
@@ -411,6 +472,9 @@ struct DashboardView: View {
             }
             .sheet(item: $presentedFavoriteDestination) { destination in
                 favoriteDestinationView(for: destination)
+            }
+            .sheet(isPresented: $isPresentingExcludeTransactionsPicker) {
+                ExcludeTransactionsView()
             }
             .task {
                 await syncSavingsSummaryIfNeeded()
@@ -682,7 +746,7 @@ struct DashboardView: View {
     /// `summary.actualSpentThisWeek` — recomputed here only for display (the card's own week-range
     /// label), never for any spend arithmetic of its own.
     private var sharedCurrentWeekInterval: DateInterval {
-        DateRangeHelper.currentWeekRange(weekStartsOnSunday: true)
+        DateRangeHelper.currentFourWeekBlock()
     }
 
     /// LOCKED PRODUCT RULE — a Secondary's local `showSavedThisMonthQuickStat` preference is never
@@ -697,59 +761,79 @@ struct DashboardView: View {
         accountRelatedOptionsLoaded && isSecondary && (accountRelatedOptionsViewModel.response?.primaryMonthlySavingsShared ?? false)
     }
 
+    /// QUICK STATS REDESIGN — a budgeting summary rather than duplicate information: Planned
+    /// Weekly Spending / Spent This Week / Planned Monthly Spending / Projected Available After
+    /// Spend are all read live from this same view's own already-computed planning properties
+    /// above (`plannedWeeklySpendingForOutlook`/`spentThisWeek`/`plannedMonthlySpendingForOutlook`/
+    /// `projectedAvailableAfterSpendForOutlook`) — the exact same authoritative values the Weekly
+    /// Card and Monthly Outlook section already display elsewhere on this screen, never a second
+    /// calculation. Saved This Month keeps its pre-existing card/visibility logic verbatim
+    /// (`showLocalSavedThisMonthQuickStat`/`sharedSavingsQuickStatVisible`), just repositioned to
+    /// the final row; the prior Monthly Spending card (and its `MonthlySummaryView` sheet) is
+    /// removed entirely, per this redesign's own requirement. `LazyVGrid`'s existing 2-column
+    /// layout naturally produces the required 3-row shape (2 + 2 + 1) from 5 cards in this order —
+    /// no separate row-break logic needed.
     @ViewBuilder
     private var quickStatsSection: some View {
-        if monthlySpendingQuickStatVisible || showLocalSavedThisMonthQuickStat || sharedSavingsQuickStatVisible {
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                DashboardSectionHeader(title: "Quick Stats")
-
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.sm), GridItem(.flexible())], spacing: Theme.Spacing.sm) {
-                    if monthlySpendingQuickStatVisible {
-                        if isSecondary {
-                            // No tap target for the shared figure — same "no navigation into an
-                            // unaudited local-only detail screen" precedent as every other shared
-                            // Quick Stat card in this file.
-                            StatCard(
-                                title: "Monthly Spending",
-                                systemIconName: "chart.pie.fill",
-                                amount: monthlySpendingQuickStatAmount,
-                                subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                                accentColor: Theme.accent,
-                                isPrivacyModeEnabled: privacyMode.isEnabled
-                            )
-                        } else {
-                            Button {
-                                isPresentingMonthlySummary = true
-                            } label: {
-                                StatCard(
-                                    title: "Monthly Spending",
-                                    systemIconName: "chart.pie.fill",
-                                    amount: monthlySpendingQuickStatAmount,
-                                    subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                                    accentColor: Theme.accent,
-                                    isPrivacyModeEnabled: privacyMode.isEnabled
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    if showLocalSavedThisMonthQuickStat {
-                        SavedThisMonthQuickStatCard(
-                            savedThisMonth: savedThisMonth,
-                            totalSavingsToDate: totalSavingsToDate,
-                            isPrivacyModeEnabled: privacyMode.isEnabled
-                        )
-                    }
-                    if sharedSavingsQuickStatVisible, let primaryUserId = accountRelatedOptionsViewModel.response?.primaryUserId {
-                        // Fresh `SharedMonthlySavingsViewModel` per presentation — see that type's
-                        // own header for why revocation needs no explicit clearing: the moment
-                        // `sharedSavingsQuickStatVisible` flips false, SwiftUI removes this whole
-                        // branch (and the view model with it).
-                        SharedSavedThisMonthQuickStatCard(primaryUserId: primaryUserId, isPrivacyModeEnabled: privacyMode.isEnabled)
-                    }
-                }
-                .padding(.horizontal, Theme.Spacing.lg)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack {
+                Text("Quick Stats")
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                InfoButton(title: "About Quick Stats", explanation: Self.quickStatsInfoExplanation)
             }
+            .padding(.horizontal, Theme.Spacing.lg)
+
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.sm), GridItem(.flexible())], spacing: Theme.Spacing.sm) {
+                StatCard(
+                    title: "Planned Weekly Spending",
+                    systemIconName: "calendar",
+                    amount: plannedWeeklySpendingForOutlook,
+                    subtitle: isPlannedWeeklySpendingCustomForOutlook ? "Custom" : "Automatic",
+                    accentColor: Theme.accent,
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                )
+                StatCard(
+                    title: "Spent This Week",
+                    systemIconName: "cart.fill",
+                    amount: spentThisWeek,
+                    subtitle: DateRangeHelper.weekDisplayText(for: weekInterval),
+                    accentColor: Theme.statusOver,
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                )
+                StatCard(
+                    title: "Planned Monthly Spending",
+                    systemIconName: "calendar.badge.clock",
+                    amount: plannedMonthlySpendingForOutlook,
+                    subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                    accentColor: Theme.accentSecondary,
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                )
+                StatCard(
+                    title: "Projected Available After Spend",
+                    systemIconName: "banknote.fill",
+                    amount: projectedAvailableAfterSpendForOutlook,
+                    subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                    accentColor: Theme.statusGood,
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                )
+                if showLocalSavedThisMonthQuickStat {
+                    SavedThisMonthQuickStatCard(
+                        savedThisMonth: savedThisMonth,
+                        totalSavingsToDate: totalSavingsToDate,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
+                if sharedSavingsQuickStatVisible, let primaryUserId = accountRelatedOptionsViewModel.response?.primaryUserId {
+                    // Fresh `SharedMonthlySavingsViewModel` per presentation — see that type's
+                    // own header for why revocation needs no explicit clearing: the moment
+                    // `sharedSavingsQuickStatVisible` flips false, SwiftUI removes this whole
+                    // branch (and the view model with it).
+                    SharedSavedThisMonthQuickStatCard(primaryUserId: primaryUserId, isPrivacyModeEnabled: privacyMode.isEnabled)
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 
@@ -905,6 +989,114 @@ struct DashboardView: View {
         }
     }
 
+    // MARK: - Budget Exclusions
+
+    /// EXCLUDE TRANSACTIONS — placed directly above `monthlyOutlookAndWeekByWeekSection` per this
+    /// feature's own spec. The master toggle writes only `BudgetSettings.excludeTransactionsEnabled`;
+    /// the picker sheet (`ExcludeTransactionsView`) is where individual transactions are actually
+    /// selected — this section only shows entry points and a live count, never the picker UI
+    /// itself.
+    private var budgetExclusionsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack {
+                Text("Budget Exclusions")
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                InfoButton(title: "About Budget Exclusions", explanation: Self.budgetExclusionsInfoExplanation)
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    TransactionToggleRow(
+                        title: "Exclude Transactions",
+                        subtitle: "Choose transactions to leave out of Weekly/Monthly totals",
+                        isOn: Binding(
+                            get: { settings?.excludeTransactionsEnabled ?? false },
+                            set: { newValue in setExcludeTransactionsEnabled(newValue) }
+                        )
+                    )
+
+                    if settings?.excludeTransactionsEnabled ?? false {
+                        Divider().overlay(Theme.cardStroke)
+
+                        Button {
+                            isPresentingExcludeTransactionsPicker = true
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Choose Transactions")
+                                        .font(Theme.bodyFont)
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Text(excludedTransactionsSummaryText)
+                                        .font(Theme.captionFont)
+                                        .foregroundStyle(Theme.textTertiary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    /// "No excluded transactions selected." / "N transactions excluded" — driven directly by
+    /// `excludedTransactionIDs` (which is already gated on the master toggle), so this always
+    /// matches what's actually affecting budget totals right now, never a stale count.
+    private var excludedTransactionsSummaryText: String {
+        let count = excludedTransactionIDs.count
+        return count == 0 ? "No excluded transactions selected." : "\(count) transaction\(count == 1 ? "" : "s") excluded"
+    }
+
+    static let quickStatsInfoExplanation = """
+        These are quick snapshots of your spending plan for the month.
+
+        • Planned Weekly Spending — the amount you've decided (or the app has worked out automatically) that you can spend each week, on top of your bills and savings.
+
+        • Spent This Week — what you've actually spent so far this week.
+
+        • Planned Monthly Spending — your weekly plan carried out across the whole month (Planned Weekly Spending × 4).
+
+        • Projected Available After Spend — if you stick exactly to your Planned Monthly Spending for the rest of the month, this is how much would be left over on top of that.
+
+        • Saved This Month — money you've actually set aside as savings this month, separate from your regular spending.
+
+        Example: your Planned Weekly Spending is $500 ($2,000 for the month), but you actually have $2,300 available after bills and savings. Projected Available After Spend would show $300 — money you're planning to keep rather than spend.
+        """
+
+    static let weekByWeekInfoExplanation = """
+        This splits the month into 4 weeks — Week 1 always starts on the 1st, no matter what day of the week that falls on — so you can see how your spending compares to your plan, week by week.
+
+        Each week shows how much you spent against your Planned Weekly Spending amount. A week that goes over its limit is highlighted so you can spot it quickly and decide whether to ease up in the weeks that follow to stay on track for the month overall.
+
+        Example: your plan is $500 a week, and Week 2 shows you spent $610 — that week ran $110 over. You might plan to spend a bit less in Week 3 to even things back out.
+        """
+
+    static let budgetExclusionsInfoExplanation = """
+        Sometimes a purchase shouldn't count against your budget — for example, a big one-time expense you already planned for separately, or something you know you'll be reimbursed for. Budget Exclusions is where you set those aside.
+
+        Any transaction you mark as excluded is left out of your Spent totals everywhere in the app (both weekly and monthly), but it still stays visible in your account register so you have a complete record of everything that happened.
+
+        Example: you buy a $600 laptop for work that your employer will pay you back for next month. Excluding it here keeps it from making your weekly or monthly spending look unusually high while you wait to be reimbursed.
+        """
+
+    private func setExcludeTransactionsEnabled(_ isEnabled: Bool) {
+        if let settings {
+            settings.excludeTransactionsEnabled = isEnabled
+            settings.updatedAt = .now
+        } else {
+            let created = BudgetSettings(excludeTransactionsEnabled: isEnabled)
+            modelContext.insert(created)
+        }
+    }
+
     // MARK: - Monthly outlook
 
     /// CLIENT CORRECTION — real-device fix: the Dashboard's Monthly Outlook/Week-by-Week
@@ -989,6 +1181,7 @@ struct DashboardView: View {
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
                 Spacer()
+                InfoButton(title: "About Week-by-Week", explanation: Self.weekByWeekInfoExplanation)
                 if weeklyComparisons.count > 1 {
                     Menu {
                         ForEach(weeklyComparisons.indices, id: \.self) { index in
@@ -1010,7 +1203,7 @@ struct DashboardView: View {
             .padding(.horizontal, Theme.Spacing.lg)
 
             if weeklyComparisons.indices.contains(effectiveWeekIndex) {
-                WeeklyPlanComparisonRow(comparison: weeklyComparisons[effectiveWeekIndex], isPrivacyModeEnabled: privacyMode.isEnabled)
+                WeeklyPlanComparisonRow(comparison: weeklyComparisons[effectiveWeekIndex], weekNumber: effectiveWeekIndex + 1, isPrivacyModeEnabled: privacyMode.isEnabled)
                     .padding(.horizontal, Theme.Spacing.lg)
             }
         }
@@ -1087,16 +1280,16 @@ private struct RecentActivityRow: View {
 
     private var amountColor: Color {
         switch transaction.type {
-        case .expense: return Theme.textPrimary
-        case .refund, .income: return Theme.statusGood
+        case .expense, .transferWithdrawal: return Theme.textPrimary
+        case .refund, .income, .transferDeposit: return Theme.statusGood
         case .transfer, .creditCardPayment, .balanceAdjustment: return Theme.textTertiary
         }
     }
 
     private var signPrefix: String {
         switch transaction.type {
-        case .expense: return "-"
-        case .refund, .income: return "+"
+        case .expense, .transferWithdrawal: return "-"
+        case .refund, .income, .transferDeposit: return "+"
         case .transfer, .creditCardPayment, .balanceAdjustment: return ""
         }
     }

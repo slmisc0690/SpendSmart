@@ -67,6 +67,22 @@ struct CalculatorEngine: Equatable {
         isEnteringFreshValue = true
     }
 
+    /// Removes the last-typed digit of the value currently being entered — lets a mistyped digit
+    /// be corrected without clearing the whole entry (unlike `clear()`, which resets everything).
+    /// A no-op immediately after an operation/equals/clear (`isEnteringFreshValue == true`),
+    /// matching a standard calculator's own backspace behavior: there's nothing yet typed for
+    /// this entry to delete from.
+    mutating func backspace() {
+        guard !isEnteringFreshValue else { return }
+        errorMessage = nil
+        if entryText.count > 1 {
+            entryText.removeLast()
+        } else {
+            entryText = "0"
+            isEnteringFreshValue = true
+        }
+    }
+
     mutating func clear() {
         entryText = "0"
         accumulatedValue = 0

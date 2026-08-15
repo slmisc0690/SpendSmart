@@ -89,8 +89,11 @@ enum DateRangeHelper {
     }
 
     /// Every Sunday/Monday-start calendar week that touches `interval` (typically a month),
-    /// walked from its start to its end. Shared by the Monthly Summary and Monthly Plan screens
-    /// so both agree on what "the weeks in this month" means.
+    /// walked from its start to its end. Shared by the Monthly Summary screen only — This Week /
+    /// Week-by-Week / Monthly Outlook / Monthly Plan's own weekly comparisons all moved to
+    /// `fourWeekBlocks(in:)` below; `weekStartsOnSunday`-based weeks are kept here purely because
+    /// Monthly Summary (and Insights/SpendSense/Scenario, which never touch this function at all)
+    /// still use the plain Sunday/Monday scheme and were explicitly left unchanged.
     static func weeksOverlapping(
         _ interval: DateInterval,
         weekStartsOnSunday: Bool = true,
@@ -104,5 +107,53 @@ enum DateRangeHelper {
             cursor = week.end
         }
         return weeks
+    }
+
+    /// MONTH-ALIGNED FOUR-WEEK SCHEME — `month` split into exactly 4 weeks, always: Week 1 starts
+    /// on the 1st of the month regardless of what weekday that is (never the Sunday/Monday
+    /// calendar week containing it, which is what `weeksOverlapping` does and why that scheme can
+    /// bleed a few days from the adjacent month into the first/last row). Weeks 1–3 are always 7
+    /// days; Week 4 is the remainder of the month (7–10 days, depending on month length) — never
+    /// a 5th/6th short week. Every block is a strict subset of `month`, so the 4 blocks' spending
+    /// totals always sum to exactly the month's own total, with no cross-month bleed either way.
+    /// This is the ONE authoritative source for This Week / Week-by-Week / Monthly Outlook /
+    /// Monthly Plan's weekly comparisons — see `DashboardView`/`WeeklyBudgetView`/`MonthlyPlanView`
+    /// `weekInterval` and `MonthlyPlanCalculator.summary()`'s own `weeks` computation.
+    static func fourWeekBlocks(in month: DateInterval, calendar: Calendar = .current) -> [DateInterval] {
+        var blocks: [DateInterval] = []
+        var cursor = month.start
+        for index in 0..<4 {
+            let end: Date
+            if index == 3 {
+                end = month.end
+            } else {
+                end = calendar.date(byAdding: .day, value: 7, to: cursor) ?? month.end
+            }
+            blocks.append(DateInterval(start: cursor, end: end))
+            cursor = end
+        }
+        return blocks
+    }
+
+    /// Whichever of `fourWeekBlocks(in:)` (for the month containing `referenceDate`) actually
+    /// contains `referenceDate` — the month-aligned replacement for `currentWeekRange`. Falls
+    /// back to the last block if `referenceDate` somehow lands exactly on the month boundary
+    /// (should not happen in practice, since block 4's `end` is exclusive and equals the next
+    /// month's `start`, matching every other `DateInterval` in this file).
+    static func currentFourWeekBlock(referenceDate: Date = .now, calendar: Calendar = .current) -> DateInterval {
+        let month = monthRangeContaining(referenceDate, calendar: calendar)
+        let blocks = fourWeekBlocks(in: month, calendar: calendar)
+        return blocks.first { $0.contains(referenceDate) } ?? blocks.last ?? month
+    }
+
+    /// The weekday name a `fourWeekBlocks(in:)` block starts on — always the same as the 1st of
+    /// the month's weekday, since every block after the first is exactly 7 days later (and 7 days
+    /// later always lands on the same weekday). e.g. "Saturday" for a month whose 1st is a
+    /// Saturday. Used by the "(Starts on: ...)" label under each Week-by-Week row.
+    static func fourWeekBlockStartWeekdayName(for block: DateInterval, calendar: Calendar = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.dateFormat = "EEEE"
+        return formatter.string(from: block.start)
     }
 }

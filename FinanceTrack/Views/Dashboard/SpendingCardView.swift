@@ -30,6 +30,7 @@ struct SpendingCardView: View {
                             .foregroundStyle(Theme.textTertiary)
                     }
                     Spacer()
+                    InfoButton(title: "About This Week", explanation: Self.infoExplanation)
                     StatusBadge(status: status)
                 }
 
@@ -51,6 +52,20 @@ struct SpendingCardView: View {
             }
         }
     }
+
+    static let infoExplanation = """
+        This shows how much you've spent so far this week compared to your weekly spending limit.
+
+        • Spent — everyday purchases that count toward your budget this week, like groceries, gas, or eating out. Bill payments like rent or car insurance don't count here since they're already planned for separately.
+
+        • Limit — the amount you've decided (or the app has worked out for you) is a healthy amount to spend each week.
+
+        • Remaining — your Limit minus your Spent so far.
+
+        • Monthly Remaining — the bigger picture: how much money you have left for the WHOLE month, after bills, savings, and everything you've spent so far — not just this one week.
+
+        Example: your weekly limit is $500, and you've spent $320 so far on groceries and gas. Remaining shows $180 for the week. Monthly Remaining might show $1,200 — the total cushion left across the whole month.
+        """
 
     @ViewBuilder
     private func amountRow(title: String, amount: Decimal, emphasized: Bool) -> some View {

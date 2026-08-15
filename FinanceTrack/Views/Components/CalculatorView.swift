@@ -62,6 +62,9 @@ struct CalculatorView: View {
 
     private var keypad: some View {
         VStack(spacing: Theme.Spacing.sm) {
+            // Deletes the last-typed digit of the current entry, so a mistyped number can be
+            // corrected without hitting "C" and losing the whole calculation.
+            calculatorButton("⌫")
             ForEach(keyRows, id: \.self) { row in
                 HStack(spacing: Theme.Spacing.sm) {
                     ForEach(row, id: \.self) { key in
@@ -92,6 +95,7 @@ struct CalculatorView: View {
     private func accessibilityLabel(for key: String) -> String {
         switch key {
         case "C": return "Clear"
+        case "⌫": return "Backspace"
         case "=": return "Equals"
         case "÷": return "Divide"
         case "×": return "Multiply"
@@ -105,6 +109,7 @@ struct CalculatorView: View {
     private func handleKey(_ key: String) {
         switch key {
         case "C": engine.clear()
+        case "⌫": engine.backspace()
         case "=": engine.equals()
         case ".": engine.inputDecimalPoint()
         case "+": engine.setOperation(.add)

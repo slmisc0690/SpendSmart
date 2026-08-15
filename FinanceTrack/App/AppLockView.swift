@@ -5,6 +5,7 @@ import SwiftUI
 /// Purely local via `BiometricAuthManager` — no network, no credentials.
 struct AppLockView: View {
     @Environment(BiometricAuthManager.self) private var biometricAuth
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isBiometricsAvailable = true
 
     var body: some View {
@@ -76,20 +77,54 @@ struct AppLockView: View {
             .padding()
         }
         .task {
-            // Automatic prompt on lock-screen appearance, matching normal Face ID app-lock
-            // behavior — but its failure is never shown (`surfaceErrors: false`): on a real
-            // device this only fails silently for edge cases (interrupted scan, etc.) that the
-            // OS's own Face ID animation already communicated; in the Simulator, it fails
-            // instantly unless you've manually triggered Features > Face ID > Matching/Non-matching
-            // Face, which would otherwise show a scary error the user never actually caused.
-            switch biometricAuth.availability() {
-            case .available:
-                isBiometricsAvailable = true
-                await biometricAuth.authenticate(surfaceErrors: false)
-            case .unavailable(let reason):
-                isBiometricsAvailable = false
-                biometricAuth.lastErrorMessage = reason
+            await attemptAutomaticUnlockIfSceneIsActive()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // PHYSICAL-DEVICE FIX — this view mounts the INSTANT `lock()` re-arms the gate on
+            // `scenePhase == .background` (`FinanceTrackApp`'s own `onChange(of: scenePhase)`
+            // calls `lock()` there), which means the `.task` above can fire while the app is
+            // still backgrounded/backgrounding, not when the user actually returns to look at
+            // this screen. `LAContext.evaluatePolicy` cannot present real authentication UI for a
+            // backgrounded scene — calling it then silently wastes the one-shot automatic
+            // attempt, so by the time the user is actually looking at the lock screen, only the
+            // manual "Unlock with Face ID" button remains. `attemptAutomaticUnlockIfSceneIsActive`
+            // early-returns whenever `scenePhase != .active`, so THIS `onChange` is what actually
+            // fires the automatic attempt for the foreground-return/reopen case, once the scene
+            // genuinely becomes active while this same (never-unmounted-while-locked) view is
+            // still on screen.
+            if newPhase == .active {
+                Task { await attemptAutomaticUnlockIfSceneIsActive() }
             }
+        }
+    }
+
+    /// Automatic prompt on lock-screen appearance, matching normal Face ID app-lock behavior —
+    /// but its failure is never shown (`surfaceErrors: false`): on a real device this only fails
+    /// silently for edge cases (interrupted scan, etc.) that the OS's own Face ID animation
+    /// already communicated; in the Simulator, it fails instantly unless you've manually
+    /// triggered Features > Face ID > Matching/Non-matching Face, which would otherwise show a
+    /// scary error the user never actually caused.
+    ///
+    /// Routed through `authenticateAutomaticallyIfNeeded()` rather than calling `authenticate`
+    /// directly: the "exactly once per lock presentation" guarantee lives in
+    /// `BiometricAuthManager`'s own state (`hasAttemptedAutomaticUnlock`), not in this method's
+    /// own call-count — so being called from both `.task` and `.onChange(of: scenePhase)` above
+    /// can never turn one lock presentation into two automatic prompts.
+    ///
+    /// `scenePhase != .active` is an early return, not merely "skip the attempt": on cold launch
+    /// and force-quit relaunch the scene is already `.active` by the time this ever mounts (the
+    /// OS doesn't render foreground content otherwise), so this guard is a no-op there; it only
+    /// changes behavior for the foreground-return path, where `.task` can fire while still
+    /// backgrounded.
+    private func attemptAutomaticUnlockIfSceneIsActive() async {
+        guard scenePhase == .active else { return }
+        switch biometricAuth.availability() {
+        case .available:
+            isBiometricsAvailable = true
+            await biometricAuth.authenticateAutomaticallyIfNeeded()
+        case .unavailable(let reason):
+            isBiometricsAvailable = false
+            biometricAuth.lastErrorMessage = reason
         }
     }
 }

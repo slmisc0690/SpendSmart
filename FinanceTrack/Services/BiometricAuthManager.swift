@@ -9,6 +9,55 @@ enum BiometricAvailability: Equatable {
     case unavailable(reason: String)
 }
 
+/// The seam between `BiometricAuthManager` and the real `LocalAuthentication` framework — exists
+/// solely so unit tests can supply a fake that resolves instantly instead of touching a real
+/// `LAContext`, whose `evaluatePolicy` can block indefinitely in a headless test host waiting for
+/// system authentication UI that never appears. `LAContextBiometricAuthenticator` below is the
+/// ONLY production implementation and is `BiometricAuthManager`'s default — every existing call
+/// site (`BiometricAuthManager()` with no arguments) is unaffected by this seam's existence.
+protocol BiometricAuthenticating {
+    /// Mirrors `LAContext.canEvaluatePolicy(.deviceOwnerAuthentication, error:)`.
+    func canEvaluateDeviceOwnerAuthentication() -> BiometricAvailability
+    /// Mirrors `LAContext.evaluatePolicy(.deviceOwnerAuthentication, localizedReason:)` — returns
+    /// the completed result, or throws (an `LAError` in the real implementation) exactly like the
+    /// underlying API does for failure/cancellation/lockout.
+    func evaluateDeviceOwnerAuthentication(reason: String) async throws -> Bool
+}
+
+/// The real, production-only `LocalAuthentication` implementation — behaviorally identical to
+/// what `BiometricAuthManager` did inline before this seam existed (a fresh `LAContext` per call,
+/// same `.deviceOwnerAuthentication` policy, same error-to-message mapping).
+struct LAContextBiometricAuthenticator: BiometricAuthenticating {
+    func canEvaluateDeviceOwnerAuthentication() -> BiometricAvailability {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            return .unavailable(reason: Self.friendlyUnavailableMessage(for: error))
+        }
+        return .available
+    }
+
+    func evaluateDeviceOwnerAuthentication(reason: String) async throws -> Bool {
+        try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+    }
+
+    fileprivate static func friendlyUnavailableMessage(for error: NSError?) -> String {
+        guard let laError = error as? LAError else {
+            return "Face ID and passcode aren't set up on this device."
+        }
+        switch laError.code {
+        case .biometryNotEnrolled:
+            return "Face ID isn't set up on this device yet."
+        case .biometryNotAvailable:
+            return "Face ID isn't available on this device."
+        case .passcodeNotSet:
+            return "Set a device passcode to use Face ID Lock."
+        default:
+            return "Face ID and passcode aren't set up on this device."
+        }
+    }
+}
+
 /// A brand-new user's "Use Face ID for future sign-in" choice, made on `CreateAccountView`
 /// before any session/container exists yet — persisted (not held only in memory) because
 /// sign-up may require email verification, which can involve backgrounding or even relaunching
@@ -49,14 +98,30 @@ final class BiometricAuthManager {
     /// stack, and the OS cancelling one mid-flight can spuriously clear/set the other's result.
     private var isAuthenticating = false
 
+    /// Whether the automatic (silent, `surfaceErrors: false`) Face ID attempt has already run for
+    /// the CURRENT lock presentation — this is the explicit state `AppLockView` defers to via
+    /// `authenticateAutomaticallyIfNeeded()` instead of relying purely on SwiftUI's own `.task`
+    /// running-once-per-mount behavior, so "automatic attempt fires exactly once per lock
+    /// screen appearance" is guaranteed by this manager's own state, not by view-lifecycle timing.
+    /// Reset to `false` only by `lock()` (a fresh lock presentation) — never by a failed/cancelled
+    /// automatic attempt itself, so a redraw, an unrelated `scenePhase` change, or the OS handing
+    /// control back after the Face ID system UI can never cause a second automatic prompt for the
+    /// same lock screen. The manual "Unlock with Face ID"/"Continue" button never checks this flag
+    /// — it always calls `authenticate` directly — so the user can always retry as many times as
+    /// they want; this flag only gates the one automatic attempt-on-appear.
+    private(set) var hasAttemptedAutomaticUnlock = false
+
+    /// Real `LocalAuthentication` in production (the default); a test double in unit tests — see
+    /// `BiometricAuthenticating`'s own header for why this seam exists.
+    private let authenticator: BiometricAuthenticating
+
+    init(authenticator: BiometricAuthenticating = LAContextBiometricAuthenticator()) {
+        self.authenticator = authenticator
+    }
+
     /// Whether this device can evaluate Face ID/Touch ID/passcode at all right now, and if not, why.
     func availability() -> BiometricAvailability {
-        let context = LAContext()
-        var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
-            return .unavailable(reason: Self.friendlyUnavailableMessage(for: error))
-        }
-        return .available
+        authenticator.canEvaluateDeviceOwnerAuthentication()
     }
 
     /// Attempts Face ID/Touch ID/passcode authentication.
@@ -80,11 +145,12 @@ final class BiometricAuthManager {
         defer { isAuthenticating = false }
 
         lastErrorMessage = nil
-        let context = LAContext()
-        var error: NSError?
 
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
-            lastErrorMessage = Self.friendlyUnavailableMessage(for: error)
+        let availability = authenticator.canEvaluateDeviceOwnerAuthentication()
+        guard case .available = availability else {
+            if case .unavailable(let unavailableReason) = availability {
+                lastErrorMessage = unavailableReason
+            }
             // No biometrics/passcode configured on this device — there's no way to secure the
             // lock screen, so don't strand the user behind it.
             isUnlocked = true
@@ -92,7 +158,7 @@ final class BiometricAuthManager {
         }
 
         do {
-            let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+            let success = try await authenticator.evaluateDeviceOwnerAuthentication(reason: reason)
             isUnlocked = success
         } catch let authError as LAError {
             isUnlocked = false
@@ -103,10 +169,26 @@ final class BiometricAuthManager {
         }
     }
 
-    /// Manually re-locks the app (e.g. a "Lock Now" button in Settings).
+    /// The single entry point for the lock screen's automatic (silent) Face ID attempt —
+    /// `AppLockView.task` calls this instead of `authenticate` directly, so "exactly one
+    /// automatic attempt per lock presentation" is enforced here rather than depending on
+    /// SwiftUI's own `.task`-runs-once-per-mount timing. A no-op if the automatic attempt has
+    /// already run for the current lock presentation (see `hasAttemptedAutomaticUnlock`); does
+    /// not affect the user's own manual retries, which always call `authenticate` directly.
+    @MainActor
+    func authenticateAutomaticallyIfNeeded() async {
+        guard !hasAttemptedAutomaticUnlock else { return }
+        hasAttemptedAutomaticUnlock = true
+        await authenticate(surfaceErrors: false)
+    }
+
+    /// Manually re-locks the app (e.g. a "Lock Now" button in Settings) — this is also the one
+    /// place `hasAttemptedAutomaticUnlock` resets, since re-locking is exactly what starts a new
+    /// lock presentation that deserves its own fresh automatic attempt.
     func lock() {
         isUnlocked = false
         lastErrorMessage = nil
+        hasAttemptedAutomaticUnlock = false
     }
 
     /// Maps an `LAError` from a failed `evaluatePolicy` attempt to plain-English text. Returns
@@ -126,22 +208,6 @@ final class BiometricAuthManager {
             return "That didn't match. Try again."
         default:
             return "We couldn't verify your identity. Please try again."
-        }
-    }
-
-    private static func friendlyUnavailableMessage(for error: NSError?) -> String {
-        guard let laError = error as? LAError else {
-            return "Face ID and passcode aren't set up on this device."
-        }
-        switch laError.code {
-        case .biometryNotEnrolled:
-            return "Face ID isn't set up on this device yet."
-        case .biometryNotAvailable:
-            return "Face ID isn't available on this device."
-        case .passcodeNotSet:
-            return "Set a device passcode to use Face ID Lock."
-        default:
-            return "Face ID and passcode aren't set up on this device."
         }
     }
 }

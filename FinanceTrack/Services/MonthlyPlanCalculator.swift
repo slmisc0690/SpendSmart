@@ -88,6 +88,66 @@ enum MonthlyPlanCalculator {
         income - fixedExpenses - savingsGoal - bufferAmount
     }
 
+    /// BILL PAYMENT VARIANCE — a Fixed Bill's PLANNED amount is already subtracted once inside
+    /// `flexibleSpendingAvailable` (via `fixedExpenses`), for every active bill regardless of
+    /// whether it's been paid yet this month. Once a bill IS actually paid (one or more Manual
+    /// Account transactions with `linkedRecurringExpense` pointing at it, dated within `month`),
+    /// the real amount paid may differ from what was planned — this is the ONE place that
+    /// difference is computed, once per bill, so it can be applied ONCE to the monthly baseline
+    /// (see `summary(...)` below) rather than the linked transaction(s) counting again toward
+    /// Weekly/Monthly Spending (`BudgetCalculator.spendingDelta` excludes them for exactly this
+    /// reason). A bill with no payment yet this month contributes nothing — its planned amount
+    /// remains the working assumption until it's actually paid. `.expense` payments add to the
+    /// actual-paid total; `.refund` payments (a refunded bill payment) subtract, symmetric with
+    /// how `BudgetCalculator` treats a refund everywhere else.
+    static func billPaymentVariance(
+        recurringExpenses: [RecurringExpense],
+        transactions: [FinanceTransaction],
+        in month: DateInterval
+    ) -> Decimal {
+        billPaymentVarianceBreakdown(recurringExpenses: recurringExpenses, transactions: transactions, in: month)
+            .reduce(Decimal(0)) { $0 + $1.variance }
+    }
+
+    /// One row per bill actually paid this month — the same planned-vs-actual comparison
+    /// `billPaymentVariance` sums into a single number, but broken out per bill so the UI can show
+    /// "which bill moved my Flexible Spending Available, and by how much" instead of only the
+    /// final total. `variance` follows the exact same sign convention `billPaymentVariance` sums:
+    /// positive when you paid LESS than planned (adds back to Flexible Spending), negative when
+    /// you paid MORE (comes off it). A bill with no payment yet this month never appears here —
+    /// only bills with at least one linked transaction dated in `month`.
+    struct BillPaymentVarianceEntry: Identifiable {
+        let bill: RecurringExpense
+        let planned: Decimal
+        let actual: Decimal
+        var variance: Decimal { planned - actual }
+        var id: UUID { bill.id }
+    }
+
+    static func billPaymentVarianceBreakdown(
+        recurringExpenses: [RecurringExpense],
+        transactions: [FinanceTransaction],
+        in month: DateInterval
+    ) -> [BillPaymentVarianceEntry] {
+        var actualPaidByBillID: [UUID: Decimal] = [:]
+        for transaction in transactions {
+            guard let bill = transaction.linkedRecurringExpense, month.contains(transaction.date) else { continue }
+            switch transaction.type {
+            case .expense: actualPaidByBillID[bill.id, default: 0] += transaction.amount
+            case .refund: actualPaidByBillID[bill.id, default: 0] -= transaction.amount
+            case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit:
+                continue
+            }
+        }
+        guard !actualPaidByBillID.isEmpty else { return [] }
+
+        let billsByID = Dictionary(uniqueKeysWithValues: recurringExpenses.map { ($0.id, $0) })
+        return actualPaidByBillID.compactMap { billID, actual in
+            guard let bill = billsByID[billID] else { return nil }
+            return BillPaymentVarianceEntry(bill: bill, planned: FixedBillsTimingFilter.displayAmount(for: bill), actual: actual)
+        }.sorted { $0.bill.name < $1.bill.name }
+    }
+
     /// Flexible spending divided evenly across the weeks touching the month, floored at 0 — when
     /// bills plus the savings goal (plus buffer) exceed income, there is no amount left to
     /// recommend spending, not a negative one. 0 when there are no spending weeks (shouldn't
@@ -140,11 +200,17 @@ enum MonthlyPlanCalculator {
     }
 
     /// The Planned Weekly Spending actually in effect — the user's manual override when one is
-    /// set, otherwise the automatic value. `override` is `nil` for "automatic mode," never a
-    /// truthy/nonzero check (a deliberate custom `$0.00` override is a real override, not
-    /// "no override" — see `MonthlyPlanSettings.plannedWeeklySpendingOverride`'s own header).
+    /// set, otherwise the automatic value. PLANNED WEEKLY AUTOMATIC/ZERO CORRECTION — `override` is
+    /// treated as "no override" whenever it is `nil` OR not greater than zero: a stored/entered
+    /// `$0.00` means "remove the manual override, return to Automatic," never "a deliberate $0/week
+    /// plan" (that older semantic is intentionally superseded). This is the ONE authoritative place
+    /// this condition is evaluated — every consumer (Monthly Plan, Dashboard, Weekly Budget,
+    /// Primary sync, Settings) calls this function rather than re-deriving Automatic/Custom itself.
     static func effectivePlannedWeeklySpending(override: Decimal?, flexibleSpendingAvailable: Decimal) -> Decimal {
-        override ?? automaticPlannedWeeklySpending(flexibleSpendingAvailable: flexibleSpendingAvailable)
+        guard let override, override > 0 else {
+            return automaticPlannedWeeklySpending(flexibleSpendingAvailable: flexibleSpendingAvailable)
+        }
+        return override
     }
 
     /// Planned Weekly Spending × 4 — never 4.33 or any other week-count approximation (locked
@@ -223,6 +289,12 @@ enum MonthlyPlanCalculator {
     /// Computes everything the Monthly Plan screen shows, for `month`. `weekInterval` should be
     /// the *current* week (for `actualSpentThisWeek`), which may or may not be the same month as
     /// `month` near a month boundary.
+    /// AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — `autoTrackedAccountIds` defaults to `[]`
+    /// (nothing selected), so every existing caller that hasn't been updated to pass the user's
+    /// real `BudgetSettings.autoCalculateConnectedAccountIds` selection keeps its EXACT prior
+    /// behavior with zero edits to that caller's own file — this type stays unaware of, and is
+    /// never required to know, which other features exist upstream; only the two screens this
+    /// change actually targets pass a real selection.
     static func summary(
         month: DateInterval,
         incomeSources: [IncomeSource],
@@ -233,15 +305,30 @@ enum MonthlyPlanCalculator {
         weekInterval: DateInterval,
         weekStartsOnSunday: Bool,
         includePending: Bool,
-        warningThreshold: Double
+        warningThreshold: Double,
+        autoTrackedAccountIds: Set<String> = [],
+        excludedTransactionIDs: Set<UUID> = []
     ) -> Summary {
         let income = estimatedMonthlyIncome(incomeSources, in: month)
         let fixedExpenses = estimatedMonthlyFixedExpenses(recurringExpenses, in: month)
         let savingsGoal = planSettings?.monthlySavingsGoal ?? 0
         let buffer = planSettings?.bufferAmount ?? 0
-        let flexible = flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: savingsGoal, bufferAmount: buffer)
+        let plannedFlexible = flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: savingsGoal, bufferAmount: buffer)
+        // BILL PAYMENT VARIANCE — see that function's own header. Applied ONCE here, so every
+        // consumer of this one canonical `Summary` (Dashboard This Week/Monthly Remaining/Quick
+        // Stats, Monthly Plan's own hero card, Weekly Budget, Week-by-Week) automatically reflects
+        // it, never a per-screen recomputation.
+        let variance = billPaymentVariance(recurringExpenses: recurringExpenses, transactions: transactions, in: month)
+        let flexible = plannedFlexible + variance
 
-        let weeks = DateRangeHelper.weeksOverlapping(month, weekStartsOnSunday: weekStartsOnSunday)
+        // MONTH-ALIGNED FOUR-WEEK CORRECTION — always exactly 4 weeks, Week 1 starting on the
+        // 1st of the month regardless of weekday, never `weeksOverlapping`'s Sunday/Monday
+        // calendar weeks (which could bleed a few days of the adjacent month into the first/last
+        // row and produce 5 or 6 rows instead of 4) — see `DateRangeHelper.fourWeekBlocks(in:)`'s
+        // own header. `weekStartsOnSunday` is still accepted as a parameter (existing callers
+        // pass it, and it remains meaningful to several other, unrelated features elsewhere in
+        // this app), just no longer read for this specific computation.
+        let weeks = DateRangeHelper.fourWeekBlocks(in: month)
         // WEEKLY SPENDING UNIFICATION — the per-week Recommended amount is the ONE authoritative
         // Effective Planned Weekly Spending (custom override when set, otherwise Flexible Spending
         // Available ÷ 4 — see `effectivePlannedWeeklySpending`'s own header), repeated identically
@@ -253,8 +340,8 @@ enum MonthlyPlanCalculator {
         // is left defined and untouched for any existing direct caller, just no longer used here.
         let recommendedWeekly = effectivePlannedWeeklySpending(override: planSettings?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: flexible)
 
-        let spentThisMonth = BudgetCalculator.monthlySpent(transactions, in: month, includePending: includePending)
-        let spentThisWeek = BudgetCalculator.weeklySpent(transactions, in: weekInterval, includePending: includePending)
+        let spentThisMonth = BudgetCalculator.monthlyActualSpending(transactions, in: month, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+        let spentThisWeek = BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
 
         let projectedSavings = projectedMonthlySavings(income: income, fixedExpenses: fixedExpenses, actualSpentThisMonth: spentThisMonth)
         let status = monthlyPlanStatus(projectedSavings: projectedSavings, savingsGoal: savingsGoal)
@@ -262,13 +349,12 @@ enum MonthlyPlanCalculator {
         let weeklyComparisons: [WeeklyPlanComparison] = weeks.map { week in
             let spent: Decimal
             if let clipped = DateRangeHelper.clampedInterval(week, to: month) {
-                // Each week's Actual now routes through `BudgetCalculator.weeklySpent`
-                // (`countsTowardWeeklyBudget`) — the SAME per-transaction eligibility flag the
-                // dedicated Weekly Budget screen already used, never `monthlySpent`
-                // (`countsTowardMonthlySpending`, a different, independent flag) — so Monthly
-                // Plan, Dashboard, and Weekly Budget can never disagree about what counts as this
-                // week's spending.
-                spent = BudgetCalculator.weeklySpent(transactions, in: clipped, includePending: includePending)
+                // Each week's Actual routes through the SAME canonical `weeklyActualSpending`
+                // Dashboard/Weekly Budget use — Manual Spending (`countsTowardWeeklyBudget`, never
+                // `countsTowardMonthlySpending`, a different flag) plus Auto-Tracked Spending for
+                // this same `autoTrackedAccountIds` selection — so Monthly Plan, Dashboard, and
+                // Weekly Budget can never disagree about what counts as this week's spending.
+                spent = BudgetCalculator.weeklyActualSpending(transactions, in: clipped, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
             } else {
                 spent = 0
             }

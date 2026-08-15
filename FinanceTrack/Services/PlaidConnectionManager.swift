@@ -483,6 +483,12 @@ final class PlaidConnectionManager {
     ) async throws -> PlaidTransactionImportService.SyncOutcome {
         let syncResult = try await backend.syncTransactions(connectionId: connectionId)
         let outcome = try PlaidTransactionImportService.applySync(syncResult, context: context)
+        // AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — deliberately NO post-import step here. Newly
+        // imported transactions are picked up automatically by the canonical, READ-ONLY
+        // `BudgetCalculator.weeklyActualSpending`/`monthlyActualSpending` query the next time a
+        // budget screen recomputes (see that type's own header) — Auto Tracking account selection
+        // is a query-time filter, never a transaction mutation, so there is nothing to reconcile
+        // or rewrite after a sync completes.
         markSynced(connectionId: connectionId)
         return outcome
     }

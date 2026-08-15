@@ -77,6 +77,12 @@ enum ManualTransactionDeletionService {
                 message: "This entry will be removed and any totals it affected will be recalculated.",
                 destructiveActionTitle: "Delete"
             )
+        case .transferWithdrawal, .transferDeposit:
+            return ConfirmationCopy(
+                title: "Delete Transfer?",
+                message: "This transfer will be removed and the balance(s) it affected will be reversed.",
+                destructiveActionTitle: "Delete Transfer"
+            )
         }
     }
 
@@ -121,6 +127,12 @@ enum ManualTransactionDeletionService {
             return true
         case .income:
             return true
+        // TRANSFER TRACKING — only `account` (this side) is ever locally required: the far side
+        // (`transferCounterpartyAccount`) may legitimately be a Connected/Plaid account instead
+        // (tagged via `transferCounterpartyPlaidAccountId`, no local balance to reverse), or
+        // simply unset if the user never picked a counterparty.
+        case .transferWithdrawal, .transferDeposit:
+            return transaction.account != nil
         }
     }
 
@@ -171,6 +183,26 @@ enum ManualTransactionDeletionService {
             // Undo a deposit the same way an expense would: take the money back out.
             if let account = transaction.account {
                 AccountBalanceManager.applyExpense(amount: transaction.amount, to: account)
+            }
+        case .transferWithdrawal:
+            // Undo money leaving `account`: give it back. Only reverse the counterparty's balance
+            // if it's a Manual Account we actually own locally — a Connected/Plaid counterparty
+            // (see `transferCounterpartyPlaidAccountId`) is a reference tag only, never a local
+            // balance to mutate.
+            if let account = transaction.account {
+                AccountBalanceManager.applyRefund(amount: transaction.amount, to: account)
+            }
+            if let counterparty = transaction.transferCounterpartyAccount {
+                AccountBalanceManager.applyExpense(amount: transaction.amount, to: counterparty)
+            }
+        case .transferDeposit:
+            // Undo money arriving into `account`: take it back out. Same Connected-account
+            // exception as `.transferWithdrawal` above.
+            if let account = transaction.account {
+                AccountBalanceManager.applyExpense(amount: transaction.amount, to: account)
+            }
+            if let counterparty = transaction.transferCounterpartyAccount {
+                AccountBalanceManager.applyRefund(amount: transaction.amount, to: counterparty)
             }
         }
     }

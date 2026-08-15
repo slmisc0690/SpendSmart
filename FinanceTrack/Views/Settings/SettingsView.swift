@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import UniformTypeIdentifiers
 
 /// The two verified, hosted legal documents for SpendSmart — a single source of truth so
 /// `SettingsView` (About section) and `ConnectedAccountsView` (pre-Link disclosure) never risk
@@ -24,6 +25,8 @@ struct SettingsView: View {
     @Query private var incomeSources: [IncomeSource]
     @Query private var recurringExpenses: [RecurringExpense]
     @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
+    @Query(sort: \Account.name) private var accountsForCSVExport: [Account]
+    @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactionsForCSVExport: [FinanceTransaction]
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(PrivacyModeManager.self) private var privacyMode
@@ -49,20 +52,34 @@ struct SettingsView: View {
     /// model to read these values, only to WRITE them, and writes only ever happen from a
     /// user-initiated toggle action, never a passive re-render.
     @State private var includePendingTransactions = true
-    @State private var weekStartsOnSunday = true
     @State private var spendSenseEnabled = true
     @State private var showMonthlySpendingQuickStat = true
     @State private var showSavedThisMonthQuickStat = true
     @State private var requireFaceIDSetting = false
     @State private var hideBalancesByDefault = false
+    /// Same `@State` primitive-snapshot safety pattern as every other `BudgetSettings`-backed
+    /// value on this screen (see this file's own header comment above `includePendingTransactions`
+    /// for the exact real-device crash this pattern prevents) — Plaid `account_id`s, never read
+    /// live from `settings` inside `body`.
+    @State private var autoCalculateConnectedAccountIds: [String] = []
     @State private var faceIDToggleErrorMessage: String?
     @State private var isPresentingSecurityNotes = false
+    @State private var isPresentingUsersGuide = false
     @State private var isPresentingResetConfirmation = false
     @State private var isPresentingConnectedAccounts = false
     @State private var isPresentingMonthlyPlan = false
     @State private var isPresentingCategoryManagement = false
     @State private var isPresentingInsights = false
     @State private var isPresentingDataBackup = false
+    /// `nil` until `prepareCSVExport()` completes at least once — see `hasPreparedCSVExport` for
+    /// how this distinguishes "still preparing" from "prepared but genuinely nothing to export."
+    @State private var csvExportURL: URL?
+    @State private var hasPreparedCSVExport = false
+    @State private var isPresentingCSVImporter = false
+    @State private var csvImportPreview: TransactionCSVImportService.PreviewResult?
+    @State private var isPresentingCSVImportPreview = false
+    @State private var csvImportErrorMessage: String?
+    @State private var isPresentingCSVImportError = false
     @State private var isPresentingAccount = false
     @State private var isPresentingAccountRelatedOptions = false
     @State private var isPresentingFavorites = false
@@ -149,6 +166,7 @@ struct SettingsView: View {
                     accountSection
                     favoritesSection
                     budgetSection
+                    autoCalculateConnectedAccountsSection
                     quickStatsSection
                     planningSection
                     spendSenseSection
@@ -194,16 +212,20 @@ struct SettingsView: View {
                 weeklyLimit = settings.weeklySpendingLimit
                 monthlyGoal = settings.monthlyGoal
                 includePendingTransactions = settings.includePendingTransactions
-                weekStartsOnSunday = settings.weekStartsOnSunday
                 spendSenseEnabled = settings.spendSenseEnabled ?? true
                 showMonthlySpendingQuickStat = settings.showMonthlySpendingQuickStat ?? true
                 showSavedThisMonthQuickStat = settings.showSavedThisMonthQuickStat ?? true
                 requireFaceIDSetting = settings.requireFaceID
                 hideBalancesByDefault = settings.hideBalancesByDefault
                 biometricAuth.isFaceIDRequired = settings.requireFaceID
+                autoCalculateConnectedAccountIds = settings.autoCalculateConnectedAccountIds ?? []
+                prepareCSVExport()
             }
             .sheet(isPresented: $isPresentingSecurityNotes) {
                 SecurityNotesView()
+            }
+            .sheet(isPresented: $isPresentingUsersGuide) {
+                UsersGuideView()
             }
             .sheet(isPresented: $isPresentingConnectedAccounts) {
                 ConnectedAccountsView()
@@ -231,6 +253,24 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $isPresentingFavorites) {
                 FavoritesConfigurationView()
+            }
+            .sheet(isPresented: $isPresentingCSVImportPreview) {
+                if let csvImportPreview {
+                    CSVImportPreviewView(
+                        preview: csvImportPreview,
+                        accounts: accountsForCSVExport,
+                        categories: categories,
+                        onFinished: { self.csvImportPreview = nil }
+                    )
+                }
+            }
+            .fileImporter(isPresented: $isPresentingCSVImporter, allowedContentTypes: [.commaSeparatedText, .plainText]) { result in
+                handleCSVImportSelection(result)
+            }
+            .alert("Couldn't Read CSV", isPresented: $isPresentingCSVImportError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(csvImportErrorMessage ?? "This file couldn't be read.")
             }
             #if DEBUG
             .sheet(isPresented: $isPresentingSpendSenseTest) {
@@ -285,7 +325,31 @@ struct SettingsView: View {
 
     private var accountSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Account")
+            DashboardSectionHeader(
+                title: "Account",
+                infoTitle: "About Account",
+                infoExplanation: """
+                    Your sign-in and, if you're sharing your finances with someone, the controls \
+                    for that.
+
+                    THE TOP ROW (your email)
+                    Tap it to see your account details, change your password, or sign out. \
+                    "Verified" means you've confirmed your email address; "Not Verified" means you \
+                    still need to click the confirmation link that was emailed to you.
+
+                    THE SECOND ROW (household sharing) — only appears once your role is known
+                    If you invite someone else to see your finances, you're the "Primary," and this \
+                    row is called "Account Related Options" — from there you can invite someone, \
+                    choose exactly which of your accounts and how much of your Monthly Plan they can \
+                    see, and manage anyone already invited. If someone else invited YOU instead, \
+                    you're the "Secondary," and this row is called "Share Connected Account" — it \
+                    lets you optionally share your own accounts back with them.
+
+                    Example: you invite your spouse to see your accounts. Once they accept, you \
+                    choose exactly which accounts and Monthly Plan details they're allowed to see — \
+                    nothing is shared automatically just because they accepted the invite.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -352,7 +416,19 @@ struct SettingsView: View {
     /// second configuration entry point anywhere on the Dashboard itself.
     private var favoritesSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Favorites")
+            DashboardSectionHeader(
+                title: "Favorites",
+                infoTitle: "About Favorites",
+                infoExplanation: """
+                    Tap "Favorites" to choose up to 6 shortcuts — screens or actions you use most — \
+                    shown in a quick-access bar right at the top of your Dashboard. Reorder them by \
+                    dragging, and remove any you no longer want there.
+
+                    Example: you check your Weekly Budget and add a new expense almost every day. \
+                    Adding both as Favorites puts them one tap away from the Dashboard, instead of \
+                    navigating through the tabs each time.
+                    """
+            )
 
             CardBackground {
                 Button {
@@ -383,7 +459,28 @@ struct SettingsView: View {
 
     private var budgetSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Budget Settings")
+            DashboardSectionHeader(
+                title: "Budget Settings",
+                infoTitle: "About Budget Settings",
+                infoExplanation: """
+                    A read-only summary plus one real control.
+
+                    WEEKLY SPENDING LIMIT / MONTHLY SAVINGS GOAL — these two fields are shown for \
+                    reference only (you can't type into them here); they're always calculated from \
+                    your Monthly Plan (or your Custom Planned Weekly Spending, if you've set one — \
+                    see the Planning section). To actually change them, go to Planning → Monthly Plan.
+
+                    INCLUDE PENDING TRANSACTIONS — a "pending" transaction is one your bank has \
+                    authorized but hasn't fully posted yet (common with debit/credit card purchases \
+                    for a day or two). Turning this on counts pending purchases toward your Spent \
+                    totals right away; turning it off waits until they post, which can make your \
+                    spending look temporarily lower than it really is.
+
+                    Example: you buy gas and it shows as "pending" for a day. With this ON, it \
+                    counts toward Spent This Week immediately. With it OFF, it won't count until \
+                    your bank finalizes it.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -405,21 +502,13 @@ struct SettingsView: View {
                             }
                         )
                     )
-
-                    Divider().overlay(Theme.cardStroke)
-
-                    TransactionToggleRow(
-                        title: "Week Starts on Sunday",
-                        subtitle: "Turn off for a Monday–Sunday week",
-                        isOn: Binding(
-                            get: { weekStartsOnSunday },
-                            set: { newValue in
-                                weekStartsOnSunday = newValue
-                                settings.weekStartsOnSunday = newValue
-                                settings.updatedAt = .now
-                            }
-                        )
-                    )
+                    // MONTH-ALIGNED FOUR-WEEK CORRECTION — the Sunday-vs-Monday week-boundary
+                    // toggle that used to live here is intentionally removed: This Week/
+                    // Week-by-Week/Monthly Outlook/Monthly Plan no longer use a calendar week at
+                    // all (see `DateRangeHelper.fourWeekBlocks(in:)`), so the toggle would control
+                    // nothing visible anymore. `BudgetSettings.weekStartsOnSunday` itself is kept,
+                    // unchanged, on the model — several other, unrelated features still read it
+                    // directly, and it may be surfaced again later.
                 }
             }
             .padding(.horizontal, Theme.Spacing.lg)
@@ -436,11 +525,144 @@ struct SettingsView: View {
             .foregroundStyle(Theme.textTertiary)
     }
 
+    // MARK: - B0. Auto Calculate Weekly/Monthly from Connected-Account Transactions
+
+    /// One row per known account (a connection with nothing cached yet has nothing to select),
+    /// distinguished by institution name PLUS mask (e.g. "Wells Fargo •••5678") — mask alone is
+    /// never stable/unique enough on its own, and two accounts at the same institution are
+    /// otherwise indistinguishable, but the SELECTION itself is always keyed by `id`
+    /// (`accountId`, Plaid's own `account_id` — the SAME stable identifier
+    /// `FinanceTransaction.plaidAccountId` already uses), never by this display label. Built
+    /// directly from `PlaidConnectionManager`'s already-cached balances — never a fresh Plaid
+    /// call, this screen never syncs anything on its own.
+    private struct EligibleAutoCalculateAccount: Identifiable {
+        let id: String
+        let label: String
+    }
+
+    private var eligibleAutoCalculateAccounts: [EligibleAutoCalculateAccount] {
+        plaidConnection.connections.flatMap { connection -> [EligibleAutoCalculateAccount] in
+            guard let cached = connection.cachedBalances, !cached.isEmpty else { return [] }
+            return cached.values
+                .sorted { $0.accountId < $1.accountId }
+                .map { balance in
+                    let maskSuffix = balance.mask.map { " •••\($0)" } ?? ""
+                    return EligibleAutoCalculateAccount(
+                        id: balance.accountId,
+                        label: "\(connection.institutionName)\(maskSuffix)"
+                    )
+                }
+        }
+    }
+
+    /// `true` when `accountId` is currently selected — reads the `@State` snapshot only, never
+    /// `settings` live, matching this screen's own established crash-prevention pattern (see
+    /// `includePendingTransactions`'s own header comment above).
+    private func isAutoCalculateAccountSelected(_ accountId: String) -> Bool {
+        autoCalculateConnectedAccountIds.contains(accountId)
+    }
+
+    /// CORRECTED ARCHITECTURE — toggling only ever changes WHICH account IDs are selected; no
+    /// transaction object is read or written here. `BudgetCalculator.weeklyActualSpending`/
+    /// `monthlyActualSpending` (the canonical read-only query every budget screen consumes) re-run
+    /// automatically the next time those screens render, since `settings` is a live SwiftData
+    /// model and this write triggers the normal `@Query` change notification — no explicit
+    /// recompute call, no Plaid refresh, and no transaction mutation of any kind needed for the
+    /// change to take effect immediately.
+    private func setAutoCalculateAccountSelected(_ accountId: String, isSelected: Bool) {
+        var updated = Set(autoCalculateConnectedAccountIds)
+        if isSelected {
+            updated.insert(accountId)
+        } else {
+            updated.remove(accountId)
+        }
+        let updatedArray = Array(updated)
+        autoCalculateConnectedAccountIds = updatedArray
+        settings.autoCalculateConnectedAccountIds = updatedArray
+        settings.updatedAt = .now
+    }
+
+    private var autoCalculateConnectedAccountsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(
+                title: "Auto Calculate Weekly/Monthly Based on Transactions for:",
+                infoTitle: "About Auto Calculate",
+                infoExplanation: """
+                    This list shows every Connected (Plaid-linked) bank or credit card account on \
+                    your device. Each has its own switch.
+
+                    Turning an account ON means every real purchase or refund that syncs from that \
+                    account counts toward your Spent This Week/Spent This Month automatically — you \
+                    never have to type it in by hand. Turning it OFF means that account's \
+                    transactions are visible in Activity for your records, but never added to your \
+                    spending totals.
+
+                    Only turn an account ON if the names its transactions sync under actually match \
+                    what you'd expect — banks sometimes show a merchant name (like "SQ *COFFEE \
+                    SHOP") that's different from how you'd normally describe the purchase. If a \
+                    connected account's names don't line up with your own Monthly Plan or register, \
+                    it's often clearer to leave it off and track that account manually instead.
+
+                    Example: you turn on your credit card here. From then on, every purchase on it \
+                    counts toward your Spent This Week the moment it syncs, with no manual entry \
+                    required. Your checking account stays off because the payee names it syncs \
+                    don't match your bills, so you keep tracking that one by hand instead.
+                    """
+            )
+
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    if eligibleAutoCalculateAccounts.isEmpty {
+                        Text("No connected accounts yet. Link an account in Connected Accounts to auto-calculate spending from its transactions.")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    } else {
+                        ForEach(Array(eligibleAutoCalculateAccounts.enumerated()), id: \.element.id) { index, account in
+                            if index > 0 {
+                                Divider().overlay(Theme.cardStroke)
+                            }
+                            TransactionToggleRow(
+                                title: account.label,
+                                subtitle: "Imported transactions count toward Weekly/Monthly spending",
+                                isOn: Binding(
+                                    get: { isAutoCalculateAccountSelected(account.id) },
+                                    set: { newValue in setAutoCalculateAccountSelected(account.id, isSelected: newValue) }
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
     // MARK: - B1. Quick Stats visibility
 
     private var quickStatsSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Quick Stats")
+            DashboardSectionHeader(
+                title: "Quick Stats",
+                infoTitle: "About Quick Stats",
+                infoExplanation: """
+                    Two switches controlling which small stat tiles appear on your Dashboard's \
+                    Quick Stats grid.
+
+                    SHOW MONTHLY SPENDING — turns the "Planned Monthly Spending" tile on the \
+                    Dashboard on or off.
+
+                    SHOW SAVED THIS MONTH — turns the "Saved This Month" tile on or off (this \
+                    switch is only shown to a Primary — if you're a Secondary viewing someone else's \
+                    shared finances, whether you see their savings figure is controlled entirely by \
+                    what they've chosen to share with you, not by a setting here).
+
+                    Turning a tile off doesn't delete anything — it just tidies up the Dashboard to \
+                    show only the numbers you actually check.
+
+                    Example: if you never look at "Saved This Month," turning it off here removes \
+                    it from the grid, leaving more room for the stats you actually use.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -489,7 +711,77 @@ struct SettingsView: View {
 
     private var planningSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Planning")
+            DashboardSectionHeader(
+                title: "Planning",
+                infoTitle: "About Planning",
+                infoExplanation: """
+                    This section is your doorway into two tools: Monthly Plan and Insights.
+
+                    WHAT MONTHLY PLAN IS FOR
+
+                    Monthly Plan is where you tell the app your whole financial picture for the \
+                    month: how much money comes in (income), what regular bills go out (rent, car \
+                    payment, insurance, subscriptions, etc.), how much you want to save, and any \
+                    extra cushion (buffer) you want to hold back. From those four numbers, the app \
+                    works out one key figure: Flexible Spending Available — literally, money coming \
+                    in, minus bills, minus your savings goal, minus your buffer. That's what's left \
+                    over for you to actually spend day to day.
+
+                    HOW IT AFFECTS YOUR SPENDING
+
+                    Flexible Spending Available gets divided into a weekly amount — either \
+                    automatically (divided evenly across 4 weeks) or a custom weekly amount you set \
+                    yourself in this same Planning section. That weekly amount becomes your Weekly \
+                    Spending Limit, which is what "Spent This Week" is measured against everywhere \
+                    in the app (the Dashboard's "This Week" card, Weekly Budget, Quick Stats). It \
+                    also drives "Monthly Remaining" and "Projected Savings" on the Dashboard's \
+                    Monthly Outlook.
+
+                    HOW IT AFFECTS YOUR SAVING
+
+                    Because your Savings Goal is subtracted BEFORE working out what's left to spend, \
+                    it's effectively protected — the app never counts your savings money as \
+                    available to spend. "Projected Savings" on the Dashboard shows you, at a glance, \
+                    whether you're on track to actually hit that goal based on your current plan.
+
+                    IF A BILL COSTS MORE OR LESS THAN PLANNED
+
+                    When you actually pay a bill (through Pay Bills or by tagging a register entry), \
+                    the app compares what you paid to what you planned for it in Monthly Plan. If \
+                    you paid less, that difference is added back to what's available to spend. If \
+                    you paid more, it's subtracted. You can see this breakdown on the Monthly Plan \
+                    screen under "Bill Payment Variance."
+
+                    WHAT "INSIGHTS" IS
+
+                    Insights (also called "Ask SpendSmart") is a simple question-and-answer tool \
+                    over your own data — your bills, income, and spending — computed entirely on \
+                    your device. Nothing you ask or any answer you get is ever sent anywhere. You \
+                    can ask things like "how much do I have left this month" or "what bills are due \
+                    this week" and get a plain-English answer built from your real numbers.
+
+                    IF YOU DON'T USE MONTHLY PLAN AT ALL
+
+                    You don't have to fill in Monthly Plan for the app to work. Your Spent This \
+                    Week and Spent This Month totals are always based on your real transactions — \
+                    Manual Account entries and any Connected Accounts you've turned on under Auto \
+                    Calculate — whether or not Monthly Plan has anything in it. What changes is only \
+                    the TARGET those totals are compared against: with nothing entered in Monthly \
+                    Plan, Flexible Spending Available is $0, so Automatic weekly planning would also \
+                    be $0 (making every dollar you spend look "over budget"). To avoid that, you can \
+                    set a Custom Planned Weekly Spending amount right here in Planning — a plain \
+                    dollar figure you choose yourself — and that becomes your Weekly Spending Limit \
+                    without needing to fill in income or bills anywhere. Monthly Outlook figures \
+                    like Projected Savings won't be meaningful without Monthly Plan filled in, but \
+                    Spent This Week/Month and a Custom weekly limit work completely independently \
+                    of it.
+
+                    Example: you don't want to track your bills in detail, but you know you want to \
+                    keep spending to $400/week. Set that as a Custom amount here — the app will \
+                    track your real spending against that $400 every week, with no Monthly Plan \
+                    setup required at all.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -544,7 +836,23 @@ struct SettingsView: View {
 
     private var spendSenseSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Spend Sense")
+            DashboardSectionHeader(
+                title: "Spend Sense",
+                infoTitle: "About Spend Sense",
+                infoExplanation: """
+                    Spend Sense looks at your own transactions, bills, and spending trends right on \
+                    your device (nothing is sent anywhere) and surfaces useful, plain-English \
+                    observations — a possible forgotten subscription, a category running higher than \
+                    usual, or a helpful reminder based on your budget.
+
+                    ENABLE SPEND SENSE — the one switch in this section. Turn it off if you'd rather \
+                    the app never show these observations at all; turn it on to have it quietly \
+                    watch your data and flag anything worth your attention.
+
+                    Example: Spend Sense notices a $12.99 charge from the same merchant every month \
+                    and flags it as a likely subscription, helping you catch one you meant to cancel.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -581,7 +889,36 @@ struct SettingsView: View {
 
     private var securitySection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Security & Privacy")
+            DashboardSectionHeader(
+                title: "Security & Privacy",
+                infoTitle: "About Security & Privacy",
+                infoExplanation: """
+                    Four controls for keeping your financial data private on this device.
+
+                    REQUIRE FACE ID — locks the entire app behind Face ID, Touch ID, or your \
+                    device passcode. Turning it on asks you to authenticate once, right then, to \
+                    confirm it works before it takes effect.
+
+                    HIDE BALANCES BY DEFAULT — when on, every time you open the app it starts with \
+                    Privacy Mode already active, so your numbers are hidden until you choose to \
+                    reveal them, rather than showing by default.
+
+                    PRIVACY MODE — hides every dollar amount on screen behind dots ("••••") right \
+                    now, everywhere in the app, until you tap to reveal them again. This is the \
+                    same switch as the eye icon shown elsewhere in the app.
+
+                    LOCK NOW — appears once Face ID is required; tap it to immediately lock the app, \
+                    without waiting for it to background/foreground.
+
+                    Below the switches, "Read Security Notes" opens a full explanation of exactly \
+                    what stays on your device versus what syncs to a server, and how Connected \
+                    Accounts work securely.
+
+                    Example: you turn on Face ID and Hide Balances by Default. Now the app requires \
+                    Face ID to open, and your balances stay hidden as "••••" until you tap to show \
+                    them — handy if someone's looking over your shoulder.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -685,7 +1022,24 @@ struct SettingsView: View {
 
     private var categoriesSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Categories")
+            DashboardSectionHeader(
+                title: "Categories",
+                infoTitle: "About Categories",
+                infoExplanation: """
+                    Categories are the labels you tag transactions with — Groceries, Gas, Dining, \
+                    and so on — used to group your spending on the breakdown charts in Weekly \
+                    Budget and Activity.
+
+                    Tap "Categories" to see the full list, add your own new one, rename one, or \
+                    archive one you no longer use. Archiving hides a category from future choices \
+                    without touching any transaction that already used it — its past entries keep \
+                    that label and still count in your history exactly as before.
+
+                    Example: you add a "Pet Care" category. From then on, you can tag vet visits and \
+                    pet food with it, and see exactly how much you spend on your pets each month on \
+                    the category breakdown chart.
+                    """
+            )
 
             CardBackground {
                 Button {
@@ -716,7 +1070,33 @@ struct SettingsView: View {
 
     private var dataSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Data")
+            DashboardSectionHeader(
+                title: "Data",
+                infoTitle: "About Data",
+                infoExplanation: """
+                    Backing up, restoring, and connecting your accounts.
+
+                    DATA BACKUP — export your transactions to a file you can save, print, or open \
+                    elsewhere, or restore missing transactions from a backup file if something's \
+                    ever gone missing from your register.
+
+                    CONNECTED ACCOUNTS — where you link a real bank or credit card through Plaid, \
+                    manage which institutions are connected, and refresh their balances. This is \
+                    entirely optional; the app works fully with only Manual Accounts if you prefer \
+                    never to connect a bank.
+
+                    RESTORE FROM CLOUD — pulls your Monthly Plan and Manual Account data back down \
+                    from the cloud, useful after a new phone or a reinstall, as long as you're \
+                    signed in to the same account.
+
+                    RESET ALL DATA — permanently erases everything on this device. Use this only if \
+                    you genuinely want to start completely over; there's no undo.
+
+                    Example: you get a new phone. Signing in and using "Restore from Cloud" brings \
+                    all your Manual Accounts and Monthly Plan back, so you don't have to start over \
+                    from scratch.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -801,15 +1181,57 @@ struct SettingsView: View {
 
                     Divider().overlay(Theme.cardStroke)
 
-                    HStack {
-                        Text("Export CSV")
-                            .font(Theme.bodyFont)
-                            .foregroundStyle(Theme.textSecondary)
-                        Spacer()
-                        Text("Coming Soon")
-                            .font(Theme.captionFont)
-                            .foregroundStyle(Theme.textTertiary)
+                    if let csvExportURL {
+                        ShareLink(item: csvExportURL) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Export CSV")
+                                        .font(Theme.bodyFont)
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Text("Export your full transaction history, grouped by account")
+                                        .font(Theme.captionFont)
+                                        .foregroundStyle(Theme.textTertiary)
+                                }
+                                Spacer()
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        HStack {
+                            Text("Export CSV")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                            Text(hasPreparedCSVExport ? "No Transactions" : "Preparing…")
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
                     }
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    Button {
+                        isPresentingCSVImporter = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Restore Missing Transactions from CSV")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text("Adds only transactions missing from this device — never replaces your current data")
+                                    .font(Theme.captionFont)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            Spacer()
+                            Image(systemName: "square.and.arrow.down")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
 
                     Divider().overlay(Theme.cardStroke)
 
@@ -917,7 +1339,18 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "About")
+            DashboardSectionHeader(
+                title: "About",
+                infoTitle: "About This Section",
+                infoExplanation: """
+                    App info, the legal documents, and the User's Guide — a complete, start-to-\
+                    finish walkthrough covering Connected Accounts, Manual Accounts, whether or not \
+                    to use a Monthly Plan, and everything else, written for someone brand new to \
+                    the app.
+
+                    If you're not sure where to begin, tap "User's Guide" below.
+                    """
+            )
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -936,6 +1369,28 @@ struct SettingsView: View {
                                 .foregroundStyle(Theme.textTertiary)
                         }
                     }
+
+                    Divider().overlay(Theme.cardStroke)
+
+                    Button {
+                        isPresentingUsersGuide = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("User's Guide")
+                                    .font(Theme.bodyFont)
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text("A complete, start-to-finish walkthrough of the app")
+                                    .font(Theme.captionFont)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
 
                     Divider().overlay(Theme.cardStroke)
 
@@ -976,6 +1431,75 @@ struct SettingsView: View {
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.textTertiary)
+            }
+        }
+    }
+
+    // MARK: - CSV export
+
+    /// Builds (or rebuilds) the CSV export file up front, mirroring `DataBackupView.
+    /// prepareManualExport()`'s own "ready before the user taps" pattern so `ShareLink` never has
+    /// to wait on a tap. `hasPreparedCSVExport` is set on every path (success, genuinely-empty, or
+    /// write failure) so the row can distinguish "still preparing" from "prepared but there is
+    /// nothing to export" — `csvExportURL` staying `nil` alone is ambiguous between those two.
+    private func prepareCSVExport() {
+        defer { hasPreparedCSVExport = true }
+        guard let csv = TransactionCSVExportService.csvString(for: accountsForCSVExport, allTransactions: transactionsForCSVExport) else {
+            csvExportURL = nil
+            return
+        }
+        do {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(TransactionCSVExportService.exportFilename())
+            try TransactionCSVExportService.write(csv, to: url)
+            csvExportURL = url
+        } catch {
+            csvExportURL = nil
+        }
+    }
+
+    // MARK: - CSV import (Restore Missing Transactions)
+
+    /// Reads the picked file, strips a leading UTF-8 BOM if present (this app's own exporter
+    /// writes one — see `TransactionCSVExportService.write`), parses it, and compares against
+    /// the CURRENT user's own already-loaded accounts/transactions (`accountsForCSVExport`/
+    /// `transactionsForCSVExport`, the same `@Query` results the export row already reads) —
+    /// never a separate/parallel data-access path, so this can never cross into another user's
+    /// store. Writes nothing: only builds the preview shown next.
+    private func handleCSVImportSelection(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            csvImportErrorMessage = error.localizedDescription
+            isPresentingCSVImportError = true
+        case .success(let url):
+            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            defer { if didStartAccessing { url.stopAccessingSecurityScopedResource() } }
+            do {
+                var data = try Data(contentsOf: url)
+                let bom = Data([0xEF, 0xBB, 0xBF])
+                if data.starts(with: bom) {
+                    data.removeFirst(bom.count)
+                }
+                guard let text = String(data: data, encoding: .utf8) else {
+                    csvImportErrorMessage = "This file isn't valid UTF-8 text."
+                    isPresentingCSVImportError = true
+                    return
+                }
+                let parseResult = TransactionCSVImportService.parse(text)
+                guard parseResult.isRecognizedFormat else {
+                    csvImportErrorMessage = "This doesn't look like a SpendSmart CSV export."
+                    isPresentingCSVImportError = true
+                    return
+                }
+                let existingIDs = Set(transactionsForCSVExport.map(\.id))
+                csvImportPreview = TransactionCSVImportService.preview(
+                    parseResult: parseResult,
+                    existingTransactionIDs: existingIDs,
+                    accounts: accountsForCSVExport
+                )
+                isPresentingCSVImportPreview = true
+            } catch {
+                csvImportErrorMessage = "This file couldn't be read."
+                isPresentingCSVImportError = true
             }
         }
     }
@@ -1049,10 +1573,13 @@ struct SettingsView: View {
         weeklyLimit = freshSettings.weeklySpendingLimit
         monthlyGoal = freshSettings.monthlyGoal
         includePendingTransactions = freshSettings.includePendingTransactions
-        weekStartsOnSunday = freshSettings.weekStartsOnSunday
         spendSenseEnabled = freshSettings.spendSenseEnabled ?? true
         requireFaceIDSetting = freshSettings.requireFaceID
         hideBalancesByDefault = freshSettings.hideBalancesByDefault
+        // No reconcile call needed here: resetAllData already deletes every FinanceTransaction
+        // row outright (above), so there is nothing left for AutoCalculateBudgetTransactionsService
+        // to reconcile — only the UI snapshot needs to go back to empty, matching freshSettings.
+        autoCalculateConnectedAccountIds = freshSettings.autoCalculateConnectedAccountIds ?? []
     }
 }
 

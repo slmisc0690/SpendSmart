@@ -16,7 +16,10 @@ struct ManualAccountDetailView: View {
     @State private var isPresentingAddExpense = false
     @State private var isPresentingEdit = false
     @State private var isPresentingCalculator = false
+    @State private var isPresentingPayBills = false
     @State private var transactionPendingDeletion: FinanceTransaction?
+    @State private var transactionPendingBillTagEdit: FinanceTransaction?
+    @State private var transactionPendingAmountEdit: FinanceTransaction?
     @State private var isPresentingDeletionError = false
     @State private var isPresentingAccountDeletionConfirmation = false
     @State private var accountDeletionBlockedMessage: String?
@@ -59,6 +62,15 @@ struct ManualAccountDetailView: View {
             }
             .sheet(isPresented: $isPresentingEdit) {
                 AddAccountView(account: account)
+            }
+            .sheet(isPresented: $isPresentingPayBills) {
+                PayBillsView(account: account)
+            }
+            .sheet(item: $transactionPendingBillTagEdit) { transaction in
+                TransactionBillTagEditView(transaction: transaction)
+            }
+            .sheet(item: $transactionPendingAmountEdit) { transaction in
+                TransactionAmountEditView(transaction: transaction)
             }
             .confirmationDialog(
                 transactionPendingDeletion.map { ManualTransactionDeletionService.confirmationCopy(for: $0).title } ?? "Delete?",
@@ -185,6 +197,7 @@ struct ManualAccountDetailView: View {
     private var actionsRow: some View {
         HStack(spacing: Theme.Spacing.sm) {
             addTransactionButton
+            payBillsButton
             editButton
             calculatorButton
             Spacer(minLength: 0)
@@ -194,6 +207,16 @@ struct ManualAccountDetailView: View {
     private var addTransactionButton: some View {
         compactPillButton(title: "Add Transaction", systemIconName: "plus") {
             isPresentingAddExpense = true
+        }
+    }
+
+    /// PAY BILLS BATCH ENTRY — an additional action alongside the existing Add Transaction/Edit
+    /// pills, never a replacement for them. Presents `PayBillsView` as a compact modal over this
+    /// register, matching the exact same `.sheet(isPresented:)` pattern every other action here
+    /// already uses.
+    private var payBillsButton: some View {
+        compactPillButton(title: "Pay Bills", systemIconName: "checklist") {
+            isPresentingPayBills = true
         }
     }
 
@@ -255,6 +278,7 @@ struct ManualAccountDetailView: View {
         Menu {
             Button("Edit Account", systemImage: "pencil", action: { isPresentingEdit = true })
             Button("Add Transaction", systemImage: "plus", action: { isPresentingAddExpense = true })
+            Button("Pay Bills", systemImage: "checklist", action: { isPresentingPayBills = true })
             Divider()
             Button("Delete Account", systemImage: "trash", role: .destructive) {
                 isPresentingAccountDeletionConfirmation = true
@@ -318,6 +342,22 @@ struct ManualAccountDetailView: View {
 
     private func transactionOptionsMenu(for transaction: FinanceTransaction) -> some View {
         Menu {
+            // DEPOSIT-TAGGING GAP FIX — a deposit can never be a bill payment (see
+            // `TransactionBillTagEditView.showsBillTagPicker`'s own header); hidden here rather
+            // than shown-but-disabled inside the sheet.
+            if transaction.type == .expense {
+                Button("Edit Bill Tag", systemImage: "checklist") {
+                    transactionPendingBillTagEdit = transaction
+                }
+            }
+            // AMOUNT EDITING — a deposit has no bill tag to correct, but can still be
+            // mis-entered; this is the fix for that (see `TransactionAmountEditView.isEligible`
+            // for exactly which types qualify).
+            if TransactionAmountEditView.isEligible(transaction) {
+                Button("Edit Amount", systemImage: "pencil") {
+                    transactionPendingAmountEdit = transaction
+                }
+            }
             Button("Delete", systemImage: "trash", role: .destructive) {
                 transactionPendingDeletion = transaction
             }

@@ -21,11 +21,13 @@ final class MonthlyPlanSettings {
     /// manually-set Planned Weekly Spending amount, distinct from `BudgetSettings.weeklySpendingLimit`
     /// (a DERIVED, non-user-editable actual-spending figure — see that field's own header;
     /// investigation confirmed it is not the same concept and manual editing of it was
-    /// intentionally removed in a prior phase). `nil` means "automatic" (Average Monthly Flexible
-    /// Spending ÷ 4, see `MonthlyPlanCalculator.automaticPlannedWeeklySpending`) — NEVER a
-    /// truthy/nonzero check to distinguish "no override" from a deliberately configured `$0.00`
-    /// override, matching the same `Decimal?` convention already established for
-    /// `monthlySavingsGoal`'s Scenario override.
+    /// intentionally removed in a prior phase). `nil` OR any value `<= 0` means "automatic"
+    /// (Average Monthly Flexible Spending ÷ 4, see `MonthlyPlanCalculator.automaticPlannedWeeklySpending`)
+    /// — PLANNED WEEKLY AUTOMATIC/ZERO CORRECTION: only a positive value is ever treated as a real
+    /// Custom override (see `MonthlyPlanCalculator.effectivePlannedWeeklySpending`, the one
+    /// authoritative place this condition is evaluated). A deliberate `$0.00` entry is product-level
+    /// shorthand for "clear the override," never a distinct "$0/week" Custom plan — the editor never
+    /// persists a non-positive value here.
     var plannedWeeklySpendingOverride: Decimal?
     var createdAt: Date
     var updatedAt: Date

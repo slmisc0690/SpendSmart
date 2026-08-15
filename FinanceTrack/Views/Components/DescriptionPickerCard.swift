@@ -10,21 +10,29 @@ struct DescriptionPickerCard: View {
     let descriptions: [String]
     @Binding var selectedDescription: String?
     var onRequestAddDescription: () -> Void
+    /// When `true`, renders just the dropdown control — no `CardBackground` wrapper, no internal
+    /// "Description" caption — for embedding inside a parent card (e.g. `AddExpenseView`'s
+    /// "Details" card) that already supplies its own card chrome and label.
+    var embedded: Bool = false
 
     private var selectionLabel: String {
         selectedDescription?.isEmpty == false ? selectedDescription! : "Select"
     }
 
     var body: some View {
-        CardBackground(padding: Theme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text("Description")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.textTertiary)
+        if embedded {
+            descriptionMenu
+        } else {
+            CardBackground(padding: Theme.Spacing.sm) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                    Text("Description")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
 
-                descriptionMenu
+                    descriptionMenu
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

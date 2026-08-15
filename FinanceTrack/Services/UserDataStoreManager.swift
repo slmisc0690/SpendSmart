@@ -46,6 +46,11 @@ final class UserDataStoreManager {
     /// ONE user on a device), every authenticated user who resolves on this device needs their
     /// OWN Plaid transactions swept exactly once, so each user's UUID is recorded independently.
     private static let localPlaidDateRepairCompletedUserIDsKey = "localPlaidDateRepair.completedUserIDs"
+    /// One-time-per-user marker for the retroactive bill-payment backfill — see
+    /// `BillPaymentBackfillService`'s own header. Same per-user `Set<String>` shape as
+    /// `localPlaidDateRepairCompletedUserIDsKey` above, for the same reason: every user needs their
+    /// own store swept exactly once, independent of any other user's completion state.
+    private static let billPaymentBackfillCompletedUserIDsKey = "billPaymentBackfill.completedUserIDs"
 
     init(
         defaults: UserDefaults = .standard,
@@ -79,6 +84,7 @@ final class UserDataStoreManager {
             try claimLegacyDataIfUnclaimed(userId: userId, destinationContext: context)
             try OwnerUserIDBackfill.run(in: context, ownerUserID: userId)
             try repairLocalPlaidDatesIfNeeded(userId: userId, context: context)
+            try backfillBillPaymentsIfNeeded(userId: userId, context: context)
 
             let plaid = PlaidConnectionManager(defaults: defaults, userId: userId)
 
@@ -213,5 +219,23 @@ final class UserDataStoreManager {
 
         completedUserIDs.insert(userId.uuidString)
         defaults.set(Array(completedUserIDs), forKey: Self.localPlaidDateRepairCompletedUserIDsKey)
+    }
+
+    // MARK: - Retroactive bill-payment backfill
+
+    /// Runs `BillPaymentBackfillService.backfillUnlinkedManualTransactions` for `userId` at most
+    /// once — see that service's own header for exactly what it does and does not touch. Same
+    /// idempotent-but-optimized-by-a-marker shape as `repairLocalPlaidDatesIfNeeded` above: the
+    /// underlying backfill is itself safe to re-run (a transaction it already linked is simply
+    /// skipped on a second pass), this marker only avoids re-scanning every transaction on every
+    /// launch once a user's store has already been swept.
+    private func backfillBillPaymentsIfNeeded(userId: UUID, context: ModelContext) throws {
+        var completedUserIDs = Set(defaults.stringArray(forKey: Self.billPaymentBackfillCompletedUserIDsKey) ?? [])
+        guard !completedUserIDs.contains(userId.uuidString) else { return }
+
+        try BillPaymentBackfillService.backfillUnlinkedManualTransactions(in: context)
+
+        completedUserIDs.insert(userId.uuidString)
+        defaults.set(Array(completedUserIDs), forKey: Self.billPaymentBackfillCompletedUserIDsKey)
     }
 }

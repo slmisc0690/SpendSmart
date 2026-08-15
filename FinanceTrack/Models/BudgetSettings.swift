@@ -44,6 +44,49 @@ final class BudgetSettings {
     /// backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates with no
     /// issue. Same pattern as `autoBackupEnabled` immediately above.
     var cloudBackupRetentionDays: Int?
+    /// AUTO-CALCULATE WEEKLY/MONTHLY FROM CONNECTED-ACCOUNT TRANSACTIONS — the set of Plaid
+    /// `account_id`s (the same stable identifier `FinanceTransaction.plaidAccountId`/
+    /// `ConnectedAccountsDashboardPresenter.Display.accountId` already use — never a display
+    /// name/institution name/last-four, none of which are stable) whose imported transactions
+    /// should count toward Weekly/Monthly spending. Empty/`nil` means no connected account
+    /// participates automatically — manual expenses are unaffected either way. Per-user by
+    /// construction: `BudgetSettings` already lives in this user's own isolated per-user SwiftData
+    /// container (see `UserDataStoreManager`), so this field is automatically isolated the same
+    /// way every other setting on this model already is — no new storage mechanism needed.
+    ///
+    /// Optional (rather than a plain `[String]`) so it migrates cleanly for installs that already
+    /// had a `BudgetSettings` record before this field existed — SwiftData's lightweight migration
+    /// can't backfill a mandatory non-optional attribute, but a `nil` optional attribute migrates
+    /// with no issue. Same pattern as `autoBackupEnabled`/`cloudBackupRetentionDays` above. Every
+    /// read site treats `nil` as "no accounts selected" via `?? []`.
+    var autoCalculateConnectedAccountIds: [String]?
+    /// EXCLUDE TRANSACTIONS — master on/off for the whole feature (Dashboard "Budget Exclusions"
+    /// section). Defaults to off/unchecked. When `false`, `excludedTransactionIDs` below is never
+    /// applied by any budgeting calculation, even if it still holds a non-empty set from a prior
+    /// session — every read site gates on this flag first, so turning the feature off is a true
+    /// "as if it never existed" state, not just an empty-list state.
+    ///
+    /// Optional (rather than a plain `Bool`) so it migrates cleanly for installs that already had
+    /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "off"
+    /// via `?? false`.
+    var excludeTransactionsEnabled: Bool?
+    /// EXCLUDE TRANSACTIONS — the set of `FinanceTransaction.id` values (this app's own stable,
+    /// already-persisted per-row identifier — never Plaid's `externalTransactionId`, which is
+    /// `nil` for every manually-entered transaction and so cannot represent both sources) the user
+    /// has chosen to exclude from Weekly/Monthly budget calculations. Applied as the FINAL filter,
+    /// after Manual + Auto-Tracked eligibility — see `BudgetCalculator`'s own "AUTO-TRACKED
+    /// CONNECTED-ACCOUNT BUDGETING"/exclusion section. An excluded transaction is never hidden,
+    /// deleted, edited, recategorized, or otherwise mutated anywhere else in the app — Recent
+    /// Activity, All Transactions, Search, and every report continue showing it exactly as before;
+    /// only budget-total arithmetic skips it. `FinanceTransaction.id` is stable across a Plaid
+    /// pending→posted merge (`PlaidTransactionImportService.applySync` re-keys the SAME persisted
+    /// row in place — see that function's own header — never creates a new one), so an exclusion
+    /// survives that transition automatically with no reconciliation step needed here.
+    ///
+    /// Optional (rather than a plain `[UUID]`) so it migrates cleanly for installs that already
+    /// had a `BudgetSettings` record before this field existed. Every read site treats `nil` as
+    /// "nothing excluded" via `?? []`.
+    var excludedTransactionIDs: [UUID]?
     /// Whether Spend Sense (local, deterministic financial observations) is enabled. Defaults to
     /// on — Spend Sense never networks or reads/writes Supabase; this only ever governs whether
     /// its local, on-device output is shown.
@@ -82,6 +125,9 @@ final class BudgetSettings {
         warningThreshold: Double = 0.70,
         autoBackupEnabled: Bool = true,
         cloudBackupRetentionDays: Int = 7,
+        autoCalculateConnectedAccountIds: [String] = [],
+        excludeTransactionsEnabled: Bool = false,
+        excludedTransactionIDs: [UUID] = [],
         spendSenseEnabled: Bool = true,
         showMonthlySpendingQuickStat: Bool = true,
         showSavedThisMonthQuickStat: Bool = true,
@@ -97,6 +143,9 @@ final class BudgetSettings {
         self.warningThreshold = warningThreshold
         self.autoBackupEnabled = autoBackupEnabled
         self.cloudBackupRetentionDays = cloudBackupRetentionDays
+        self.autoCalculateConnectedAccountIds = autoCalculateConnectedAccountIds
+        self.excludeTransactionsEnabled = excludeTransactionsEnabled
+        self.excludedTransactionIDs = excludedTransactionIDs
         self.spendSenseEnabled = spendSenseEnabled
         self.showMonthlySpendingQuickStat = showMonthlySpendingQuickStat
         self.showSavedThisMonthQuickStat = showSavedThisMonthQuickStat

@@ -2,6 +2,23 @@ import SwiftUI
 import SwiftData
 
 struct AccountListView: View {
+    static let infoExplanation = """
+        These are the accounts you track by hand — a checking or savings account, cash, or \
+        anything else you're not connecting through your bank. Each one keeps its own balance and \
+        its own running register of transactions.
+
+        Tap an account to see its full history, add an entry, or pay a bill from it. Tap the + \
+        button to add a new account.
+
+        If a household member has shared an account with you, it shows up in its own section \
+        below your own accounts, clearly labeled "Shared with You" so it's never confused with \
+        something you own.
+
+        Example: you keep a Manual Account for your checking account, entering deposits and bill \
+        payments by hand since your bank isn't connected. Its balance updates every time you add \
+        or edit an entry, giving you an accurate running total without needing a bank connection.
+        """
+
     @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @Environment(PrivacyModeManager.self) private var privacyMode
     /// PHASE 10 — same already-refreshed instance as everywhere else; read-only here, purely to
@@ -64,6 +81,9 @@ struct AccountListView: View {
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationTitle("Manual Accounts")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    InfoButton(title: "About Manual Accounts", explanation: Self.infoExplanation)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         isPresentingAdd = true
@@ -273,7 +293,13 @@ struct AccountListView: View {
     private var sharedManualAccountsSection: some View {
         if !sharedManualAccounts.isEmpty {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                DashboardSectionHeader(title: "Manual Accounts")
+                // SHARED-SECTION LABELING CORRECTION — this section shows accounts belonging to
+                // another household member, shared TO the current user; reusing "Manual Accounts"
+                // (the exact same title as this screen's own accounts, right above) made it
+                // impossible to tell the two sections apart at a glance. "Shared with You" is
+                // exclusive to this section — the user's own accounts section keeps its unchanged
+                // "Manual Accounts" title elsewhere in this file.
+                DashboardSectionHeader(title: "Shared with You")
                 VStack(spacing: Theme.Spacing.md) {
                     ForEach(sharedManualAccounts) { account in
                         SharedManualAccountCardRow(

@@ -33,6 +33,7 @@ struct MonthlyOutlookCard: View {
                             .foregroundStyle(Theme.statusColor(for: status))
                     }
                     Spacer()
+                    InfoButton(title: "About Monthly Outlook", explanation: Self.infoExplanation)
                     StatusBadge(status: status)
                 }
 
@@ -48,6 +49,18 @@ struct MonthlyOutlookCard: View {
             }
         }
     }
+
+    static let infoExplanation = """
+        This is a health check on your monthly spending plan.
+
+        • Budgeted — the total you've planned to spend this month on everyday things. Bills like rent or insurance aren't part of this — those are already accounted for separately.
+
+        • Actual — what you've really spent so far this month.
+
+        • Projected Savings — if you stick to your Budgeted amount for the rest of the month, this is how much you'd end up saving. It's based on your PLAN, not your day-to-day spending, so it won't move just because you spend a little more or less on a given day.
+
+        Example: you're budgeted for $2,000 this month, and you've actually spent $1,650 so far. That doesn't directly change Projected Savings — Projected Savings only moves if you change your monthly budget itself, or if a bill costs more or less than expected.
+        """
 
     @ViewBuilder
     private func labeledAmount(title: String, amount: Decimal?, color: Color = Theme.textPrimary) -> some View {

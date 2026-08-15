@@ -29,7 +29,11 @@ struct PlannedWeeklySpendingEditView: View {
         self.settings = settings
         self.automaticAmount = automaticAmount
         let override = settings?.plannedWeeklySpendingOverride
-        _isCustom = State(initialValue: override != nil)
+        // PLANNED WEEKLY AUTOMATIC/ZERO CORRECTION — a stored override is only ever shown as
+        // Custom when it's positive; `nil` or a stale non-positive value (never written going
+        // forward, but a legacy row could still hold one) both present as Automatic, matching
+        // `MonthlyPlanCalculator.effectivePlannedWeeklySpending`'s own `override > 0` condition.
+        _isCustom = State(initialValue: (override ?? 0) > 0)
         _customAmount = State(initialValue: override)
     }
 
@@ -159,8 +163,13 @@ struct PlannedWeeklySpendingEditView: View {
     }
 
     /// `isCustom == false` writes `plannedWeeklySpendingOverride = nil` — explicit automatic mode,
-    /// never a stale leftover custom amount silently still in effect. `isCustom == true` writes the
-    /// exact entered amount, including a deliberate `$0.00` (never coerced or defaulted).
+    /// never a stale leftover custom amount silently still in effect. `isCustom == true` with a
+    /// POSITIVE entered amount writes that exact value. PLANNED WEEKLY AUTOMATIC/ZERO CORRECTION —
+    /// `isCustom == true` with an entered `$0.00` (or a momentarily-empty field that resolves to 0)
+    /// is product-level shorthand for "clear the override": this writes `nil`, exactly like
+    /// Automatic mode, AND snaps `isCustom` back to `false` so the picker/displayed amount update
+    /// immediately to Automatic rather than continuing to show a stale "Custom: $0.00" — a deliberate
+    /// `$0.00` Custom plan is no longer a representable state (superseded product rule).
     @discardableResult
     private func commitAutosaveNow() -> Bool {
         autosaveTask?.cancel()
@@ -174,7 +183,12 @@ struct PlannedWeeklySpendingEditView: View {
             return false
         }
 
-        let override = isCustom ? customAmount : nil
+        let isEffectivelyCustom = isCustom && (customAmount ?? 0) > 0
+        let override = isEffectivelyCustom ? customAmount : nil
+        if isCustom && !isEffectivelyCustom {
+            isCustom = false
+            customAmount = nil
+        }
         if let existing = activeRecord {
             existing.plannedWeeklySpendingOverride = override
             existing.updatedAt = .now

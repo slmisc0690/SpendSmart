@@ -20,16 +20,32 @@ struct WeeklyBudgetView: View {
 
     private var settings: BudgetSettings? { settingsList.first }
 
+    /// MONTH-ALIGNED FOUR-WEEK CORRECTION — matches `DashboardView`'s own identically-corrected
+    /// `weekInterval` exactly, so Weekly Budget and Dashboard can never disagree about which days
+    /// make up "this week." See `DateRangeHelper.fourWeekBlocks(in:)`'s own header.
     private var weekInterval: DateInterval {
-        DateRangeHelper.currentWeekRange(weekStartsOnSunday: settings?.weekStartsOnSunday ?? true)
+        DateRangeHelper.currentFourWeekBlock()
     }
 
     private var includePending: Bool {
         settings?.includePendingTransactions ?? true
     }
 
+    /// AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — see `DashboardView.autoTrackedAccountIds`'s own
+    /// header for why this is a plain read-only computed property, not a `@State` snapshot.
+    private var autoTrackedAccountIds: Set<String> {
+        Set(settings?.autoCalculateConnectedAccountIds ?? [])
+    }
+
+    /// EXCLUDE TRANSACTIONS — see `DashboardView.excludedTransactionIDs`'s own header for the
+    /// master-toggle gating this respects.
+    private var excludedTransactionIDs: Set<UUID> {
+        guard settings?.excludeTransactionsEnabled ?? false else { return [] }
+        return Set(settings?.excludedTransactionIDs ?? [])
+    }
+
     private var spentThisWeek: Decimal {
-        BudgetCalculator.weeklySpent(transactions, in: weekInterval, includePending: includePending)
+        BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
     }
 
     /// WEEKLY SPENDING UNIFICATION (Part 5) — computed live from the SAME authoritative
@@ -164,7 +180,7 @@ struct WeeklyBudgetView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack {
+        HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Weekly Budget")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
@@ -174,9 +190,25 @@ struct WeeklyBudgetView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             Spacer()
+            InfoButton(title: "About Weekly Budget", explanation: Self.infoExplanation)
+                .padding(.top, 6)
         }
         .padding(.horizontal, Theme.Spacing.lg)
     }
+
+    static let infoExplanation = """
+        A closer look at just this week's spending — how much you've spent, how it breaks down \
+        by category, and day by day.
+
+        The top card shows your Spent, Limit, and Remaining for the week, the same figures shown \
+        on the Dashboard's "This Week" card. Below that, the category breakdown shows which kinds \
+        of purchases (groceries, gas, dining, etc.) made up your spending, and the daily breakdown \
+        shows exactly what you bought each day.
+
+        Example: your weekly limit is $500 and the category breakdown shows $180 on groceries, \
+        $90 on gas, and $50 on dining — together with anything else you bought, that adds up to \
+        your total Spent for the week.
+        """
 
     // MARK: - Hero
 

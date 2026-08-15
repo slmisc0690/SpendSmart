@@ -194,9 +194,20 @@ struct MonthlyPlanView: View {
         SavingsCalculator.savedThisMonth(allSavingsEntries, in: monthInterval)
     }
     private var weekStartsOnSunday: Bool { budgetSettings?.weekStartsOnSunday ?? true }
-    private var weekInterval: DateInterval { DateRangeHelper.currentWeekRange(weekStartsOnSunday: weekStartsOnSunday) }
+    // MONTH-ALIGNED FOUR-WEEK CORRECTION — matches `DashboardView`/`WeeklyBudgetView`'s own
+    // identically-corrected `weekInterval` exactly. See `DateRangeHelper.fourWeekBlocks(in:)`.
+    private var weekInterval: DateInterval { DateRangeHelper.currentFourWeekBlock() }
     private var includePending: Bool { budgetSettings?.includePendingTransactions ?? true }
     private var warningThreshold: Double { budgetSettings?.warningThreshold ?? 0.70 }
+    /// AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — see `DashboardView.autoTrackedAccountIds`'s own
+    /// header for why this is a plain read-only computed property, not a `@State` snapshot.
+    private var autoTrackedAccountIds: Set<String> { Set(budgetSettings?.autoCalculateConnectedAccountIds ?? []) }
+    /// EXCLUDE TRANSACTIONS — see `DashboardView.excludedTransactionIDs`'s own header for the
+    /// master-toggle gating this respects.
+    private var excludedTransactionIDs: Set<UUID> {
+        guard budgetSettings?.excludeTransactionsEnabled ?? false else { return [] }
+        return Set(budgetSettings?.excludedTransactionIDs ?? [])
+    }
 
     private var summary: MonthlyPlanCalculator.Summary {
         MonthlyPlanCalculator.summary(
@@ -209,7 +220,9 @@ struct MonthlyPlanView: View {
             weekInterval: weekInterval,
             weekStartsOnSunday: weekStartsOnSunday,
             includePending: includePending,
-            warningThreshold: warningThreshold
+            warningThreshold: warningThreshold,
+            autoTrackedAccountIds: autoTrackedAccountIds,
+            excludedTransactionIDs: excludedTransactionIDs
         )
     }
 
@@ -245,6 +258,14 @@ struct MonthlyPlanView: View {
 
     private var plannedWeeklySpendingOverride: Decimal? { planSettings?.plannedWeeklySpendingOverride }
 
+    /// PLANNED WEEKLY AUTOMATIC/ZERO CORRECTION — whether a REAL Custom override is currently in
+    /// effect, matching `MonthlyPlanCalculator.effectivePlannedWeeklySpending`'s own `override > 0`
+    /// condition exactly (never a bare `!= nil` check, which would treat a stale non-positive
+    /// override as Custom).
+    private var isPlannedWeeklySpendingCustom: Bool {
+        (plannedWeeklySpendingOverride ?? 0) > 0
+    }
+
     private var plannedWeeklySpending: Decimal {
         MonthlyPlanCalculator.effectivePlannedWeeklySpending(override: plannedWeeklySpendingOverride, flexibleSpendingAvailable: correctedFlexibleSpendingAvailable)
     }
@@ -272,7 +293,7 @@ struct MonthlyPlanView: View {
                         correctedFixedBillsTotal: correctedFixedBillsTotal,
                         correctedFlexibleSpendingAvailable: correctedFlexibleSpendingAvailable,
                         plannedWeeklySpending: plannedWeeklySpending,
-                        isPlannedWeeklySpendingCustom: plannedWeeklySpendingOverride != nil,
+                        isPlannedWeeklySpendingCustom: isPlannedWeeklySpendingCustom,
                         projectedAvailableAfterSpend: additionalPlannedSavings,
                         projectedMonthlySavingsFromPlan: projectedMonthlySavingsFromPlan,
                         isPrivacyModeEnabled: privacyMode.isEnabled
@@ -281,6 +302,7 @@ struct MonthlyPlanView: View {
 
                     incomeSection
                     fixedBillsSection
+                    billPaymentVarianceSection
                     if !isSecondary {
                         savingsGoalSection
                         planningSection
@@ -518,6 +540,67 @@ struct MonthlyPlanView: View {
         }
     }
 
+    // MARK: - Bill Payment Variance breakdown
+
+    /// One row per bill actually paid this month (planned vs. actual) — see
+    /// `MonthlyPlanCalculator.billPaymentVarianceBreakdown`'s own header. Lets you see directly,
+    /// per bill, exactly which payment(s) are moving Flexible Spending Available away from its
+    /// $0-variance baseline, instead of only the single combined number.
+    private var billPaymentVarianceEntries: [MonthlyPlanCalculator.BillPaymentVarianceEntry] {
+        MonthlyPlanCalculator.billPaymentVarianceBreakdown(
+            recurringExpenses: activeRecurringExpenses,
+            transactions: transactions,
+            in: monthInterval
+        )
+    }
+
+    @ViewBuilder
+    private var billPaymentVarianceSection: some View {
+        if !billPaymentVarianceEntries.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                DashboardSectionHeader(title: "Bill Payment Variance")
+
+                CardBackground {
+                    VStack(spacing: Theme.Spacing.md) {
+                        ForEach(Array(billPaymentVarianceEntries.enumerated()), id: \.element.id) { index, entry in
+                            billPaymentVarianceRow(entry)
+                            if index < billPaymentVarianceEntries.count - 1 {
+                                Divider().overlay(Theme.cardStroke)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
+        }
+    }
+
+    private func billPaymentVarianceRow(_ entry: MonthlyPlanCalculator.BillPaymentVarianceEntry) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.bill.name)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Text("Planned \(entry.planned, format: .currency(code: "USD")) · Paid \(entry.actual, format: .currency(code: "USD"))")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            Spacer()
+            Text(varianceLabel(for: entry.variance))
+                .font(Theme.bodyFont.weight(.semibold))
+                .foregroundStyle(entry.variance == 0 ? Theme.textTertiary : (entry.variance > 0 ? Theme.statusGood : Theme.statusOver))
+        }
+    }
+
+    /// `variance > 0` means you paid LESS than planned (adds back to Flexible Spending — shown
+    /// with a "+"); `variance < 0` means you paid MORE (comes off it — shown with a "-"). Matches
+    /// `MonthlyPlanCalculator.BillPaymentVarianceEntry.variance`'s own documented sign convention.
+    private func varianceLabel(for variance: Decimal) -> String {
+        guard variance != 0 else { return "Matches Plan" }
+        let magnitude = abs(variance).formatted(.currency(code: "USD"))
+        return variance > 0 ? "+\(magnitude)" : "-\(magnitude)"
+    }
+
     /// "All" plus one `FilterChip` per existing `PlanTiming` case — same established
     /// display-only-filter pattern `WeeklyBudgetView`'s Daily Breakdown filters use. Only shown
     /// when there is at least one active bill to filter; the true-empty state above already
@@ -612,7 +695,7 @@ struct MonthlyPlanView: View {
                     }
 
                     PremiumActionButton(
-                        title: plannedWeeklySpendingOverride == nil ? "Set Custom Weekly Amount" : "Edit Planned Weekly Spending",
+                        title: isPlannedWeeklySpendingCustom ? "Edit Planned Weekly Spending" : "Set Custom Weekly Amount",
                         systemIconName: "pencil"
                     ) {
                         isPresentingPlannedWeeklySpendingEdit = true
@@ -705,8 +788,8 @@ struct MonthlyPlanView: View {
             DashboardSectionHeader(title: "Week-by-Week")
 
             VStack(spacing: Theme.Spacing.md) {
-                ForEach(summary.weeklyComparisons) { comparison in
-                    WeeklyPlanComparisonRow(comparison: comparison, isPrivacyModeEnabled: privacyMode.isEnabled)
+                ForEach(Array(summary.weeklyComparisons.enumerated()), id: \.element.id) { index, comparison in
+                    WeeklyPlanComparisonRow(comparison: comparison, weekNumber: index + 1, isPrivacyModeEnabled: privacyMode.isEnabled)
                 }
             }
             .padding(.horizontal, Theme.Spacing.lg)

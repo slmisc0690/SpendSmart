@@ -379,7 +379,7 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
 /// "$1,234.56") is instead interpreted as that literal amount. `amount` is `nil` exactly when the
 /// field is empty. See `CurrencyInputState` for the independently-unit-tested underlying logic.
 struct CurrencyAmountField: View {
-    enum Style { case hero, inline }
+    enum Style { case hero, inline, compact }
 
     @Binding var amount: Decimal?
     var style: Style = .hero
@@ -397,6 +397,37 @@ struct CurrencyAmountField: View {
         switch style {
         case .hero: heroBody
         case .inline: inlineBody
+        case .compact: compactBody
+        }
+    }
+
+    /// A smaller, centered variant of `heroBody` — same layout shape (centered field + underline),
+    /// just a lighter-weight font/height so the amount card doesn't dominate the screen the way
+    /// `.hero` does. Used by `AddExpenseView`, where the amount card is one of several cards on
+    /// screen rather than the sole focus.
+    private var compactBody: some View {
+        VStack(spacing: Theme.Spacing.xs) {
+            CurrencyTextFieldRepresentable(
+                amount: $amount,
+                allowsNegative: allowsNegative,
+                allowsZero: allowsZero,
+                minimum: minimum,
+                maximum: maximum,
+                isDisabled: isDisabled,
+                placeholder: placeholder,
+                accessibilityLabel: accessibilityLabel ?? label,
+                font: Self.compactUIFont,
+                textAlignment: .center,
+                textColor: UIColor(Theme.textPrimary),
+                placeholderColor: UIColor(Theme.textSecondary),
+                autoFocusOnAppear: true
+            )
+            .frame(height: 34)
+
+            Rectangle()
+                .fill(isInvalid ? Theme.statusOver : Theme.cardStroke)
+                .frame(width: 110, height: 2)
+                .animation(.easeInOut(duration: 0.15), value: isInvalid)
         }
     }
 
@@ -458,6 +489,12 @@ struct CurrencyAmountField: View {
         let base = UIFont.systemFont(ofSize: 36, weight: .bold)
         guard let roundedDescriptor = base.fontDescriptor.withDesign(.rounded) else { return base }
         return UIFont(descriptor: roundedDescriptor, size: 36)
+    }
+
+    private static var compactUIFont: UIFont {
+        let base = UIFont.systemFont(ofSize: 26, weight: .bold)
+        guard let roundedDescriptor = base.fontDescriptor.withDesign(.rounded) else { return base }
+        return UIFont(descriptor: roundedDescriptor, size: 26)
     }
 }
 

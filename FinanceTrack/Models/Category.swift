@@ -61,6 +61,7 @@ final class Category {
             Category(name: "Water/Sewage", iconName: "drop.fill", colorName: "blue", isDefault: true),
             Category(name: "Retail", iconName: "storefront.fill", colorName: "purple", isDefault: true),
             Category(name: "Credit Card", iconName: "creditcard.fill", colorName: "red", isDefault: true),
+            Category(name: "Transfer", iconName: "arrow.left.arrow.right", colorName: "blue", isDefault: true),
             Category(name: "Other", iconName: "ellipsis.circle.fill", colorName: "gray", isDefault: true),
         ]
     }

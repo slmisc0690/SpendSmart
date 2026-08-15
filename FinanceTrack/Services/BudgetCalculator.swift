@@ -16,6 +16,20 @@ enum BudgetCalculator {
         case monthly
     }
 
+    /// HALF-OPEN INTERVAL BOUNDARY FIX — every `DateInterval` this file is handed (week/month
+    /// blocks from `DateRangeHelper`) is documented as half-open (`end` is the exclusive instant
+    /// the next period begins), but `Foundation.DateInterval.contains(_:)` does NOT honor that: it
+    /// treats both `start` and `end` as inclusive. Two consecutive blocks built to exactly touch
+    /// (`DateRangeHelper.fourWeekBlocks(in:)` builds Week N's `end` as Week N+1's `start`) therefore
+    /// let a transaction dated exactly at that shared instant match BOTH blocks via `.contains()` —
+    /// a real bug that double-counted any Plaid/Amex transaction dated exactly at a week boundary
+    /// (Plaid transactions are parsed to exact local midnight, so this was not a rare edge case).
+    /// This is the ONE place that check happens for spend-total purposes — both `spendingDelta` and
+    /// `autoTrackedDelta` route through this instead of `interval.contains(_:)` directly.
+    private static func intervalContainsHalfOpen(_ interval: DateInterval, _ date: Date) -> Bool {
+        date >= interval.start && date < interval.end
+    }
+
     /// Net spending for the *weekly* budget: expenses that count toward the weekly budget, minus
     /// refunds that ALSO count toward the weekly budget (a refund is gated the same way its
     /// originating expense would be — never unconditional), within `interval`. Transfers, credit
@@ -31,6 +45,164 @@ enum BudgetCalculator {
     /// flags are independent, so a transaction can count toward one, both, or neither total.
     static func monthlySpent(_ transactions: [FinanceTransaction], in interval: DateInterval, includePending: Bool = true) -> Decimal {
         netSpending(transactions, in: interval, includePending: includePending, context: .monthly)
+    }
+
+    // MARK: - AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING (read-only query layer)
+
+    /// Manual Spending PLUS Auto-Tracked Spending (see `ActualSpendingBreakdown`'s own header for
+    /// the exact definition of each) — the ONE canonical "Actual Weekly Spending" every consumer
+    /// (Dashboard This Week, Weekly Budget, Monthly Plan's per-week comparisons, Week-by-Week)
+    /// must read, rather than each screen computing its own combination. `autoTrackedAccountIds`
+    /// is the user's current `BudgetSettings.autoCalculateConnectedAccountIds` selection, passed
+    /// in by the caller (this file never touches SwiftData/`BudgetSettings` directly) — an empty
+    /// set means no connected account participates, which is exactly `weeklySpent`'s own
+    /// pre-existing behavior, so every caller that doesn't yet pass a real selection keeps its
+    /// exact prior behavior unchanged.
+    static func weeklyActualSpending(
+        _ transactions: [FinanceTransaction],
+        in interval: DateInterval,
+        includePending: Bool = true,
+        autoTrackedAccountIds: Set<String> = [],
+        excludedTransactionIDs: Set<UUID> = []
+    ) -> Decimal {
+        weeklyActualBreakdown(transactions, in: interval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs).total
+    }
+
+    /// Same combination as `weeklyActualSpending`, for the *monthly* total — `monthlySpent`
+    /// (`countsTowardMonthlySpending`) for the manual half, never `weeklySpent`'s flag.
+    static func monthlyActualSpending(
+        _ transactions: [FinanceTransaction],
+        in interval: DateInterval,
+        includePending: Bool = true,
+        autoTrackedAccountIds: Set<String> = [],
+        excludedTransactionIDs: Set<UUID> = []
+    ) -> Decimal {
+        monthlyActualBreakdown(transactions, in: interval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs).total
+    }
+
+    /// Manual Spending vs. Auto-Tracked Spending, broken out separately — lets a caller (e.g. a
+    /// future Dashboard breakdown) show the two components without recomputing anything, while
+    /// `weeklyActualSpending`/`monthlyActualSpending` above stay the single source every existing
+    /// consumer reads for the combined total today.
+    struct ActualSpendingBreakdown: Equatable {
+        /// Qualifying spending entered manually through Add Expense — exactly `weeklySpent`'s/
+        /// `monthlySpent`'s own pre-existing, UNCHANGED formula (`countsTowardWeeklyBudget`/
+        /// `countsTowardMonthlySpending`, `isExcludedFromReports`, pending policy — all untouched).
+        /// Since only manually-entered transactions have ever had those flags set to `true` (a
+        /// freshly-imported Plaid transaction is always created with them `false`/`true` and
+        /// nothing in this app ever flips them — see `PlaidTransactionImportService
+        /// .mapToFinanceTransaction`'s own header), this naturally excludes every imported
+        /// transaction without needing an explicit `source` filter.
+        let manual: Decimal
+        /// Qualifying imported transactions belonging to a connected account currently selected
+        /// under "Auto Calculate Weekly/Monthly Based on Transactions for:" — see
+        /// `autoTrackedDelta`'s own header for the exact eligibility rule. Computed ENTIRELY
+        /// independently of `countsTowardWeeklyBudget`/`countsTowardMonthlySpending`/
+        /// `isExcludedFromReports`, which this function never reads for the imported side — those
+        /// three fields remain exactly what a user's own manual choice (or, for an imported
+        /// transaction, the untouched import default) says they are, never rewritten by account
+        /// selection.
+        let autoTracked: Decimal
+        var total: Decimal { manual + autoTracked }
+    }
+
+    static func weeklyActualBreakdown(
+        _ transactions: [FinanceTransaction],
+        in interval: DateInterval,
+        includePending: Bool = true,
+        autoTrackedAccountIds: Set<String> = [],
+        excludedTransactionIDs: Set<UUID> = []
+    ) -> ActualSpendingBreakdown {
+        let eligible = excludeTransactions(excludedTransactionIDs, from: transactions)
+        return ActualSpendingBreakdown(
+            manual: weeklySpent(eligible, in: interval, includePending: includePending),
+            autoTracked: autoTrackedSpending(eligible, in: interval, includePending: includePending, accountIds: autoTrackedAccountIds)
+        )
+    }
+
+    static func monthlyActualBreakdown(
+        _ transactions: [FinanceTransaction],
+        in interval: DateInterval,
+        includePending: Bool = true,
+        autoTrackedAccountIds: Set<String> = [],
+        excludedTransactionIDs: Set<UUID> = []
+    ) -> ActualSpendingBreakdown {
+        let eligible = excludeTransactions(excludedTransactionIDs, from: transactions)
+        return ActualSpendingBreakdown(
+            manual: monthlySpent(eligible, in: interval, includePending: includePending),
+            autoTracked: autoTrackedSpending(eligible, in: interval, includePending: includePending, accountIds: autoTrackedAccountIds)
+        )
+    }
+
+    /// EXCLUDE TRANSACTIONS — the FINAL budgeting filter, applied AFTER Manual/Auto-Tracked
+    /// eligibility is otherwise determined (removing a transaction from the candidate set before
+    /// summing produces the identical total as removing its already-computed delta afterward,
+    /// since exclusion is a whole-transaction, not a partial-amount, operation — this is simply
+    /// the cheaper place to do it). Keyed by `FinanceTransaction.id` — this app's own stable,
+    /// already-persisted per-row identifier, present for both manually-entered and imported
+    /// transactions alike (unlike Plaid's `externalTransactionId`, which is `nil` for a manual
+    /// row) — never a display name, list index, or row number. An empty `excludedTransactionIDs`
+    /// (the default, and the state whenever `BudgetSettings.excludeTransactionsEnabled` is off)
+    /// is a true no-op: this function returns `transactions` itself, not a filtered copy, so
+    /// every existing caller that hasn't been updated to pass real exclusions keeps its exact
+    /// prior behavior with zero performance cost.
+    private static func excludeTransactions(_ excludedTransactionIDs: Set<UUID>, from transactions: [FinanceTransaction]) -> [FinanceTransaction] {
+        guard !excludedTransactionIDs.isEmpty else { return transactions }
+        return transactions.filter { !excludedTransactionIDs.contains($0.id) }
+    }
+
+    private static func autoTrackedSpending(
+        _ transactions: [FinanceTransaction],
+        in interval: DateInterval,
+        includePending: Bool,
+        accountIds: Set<String>
+    ) -> Decimal {
+        guard !accountIds.isEmpty else { return 0 }
+        return transactions.reduce(Decimal(0)) { total, transaction in
+            total + (autoTrackedDelta(for: transaction, in: interval, includePending: includePending, accountIds: accountIds) ?? 0)
+        }
+    }
+
+    /// This transaction's contribution to Auto-Tracked spending, or `nil` if ineligible. Eligible
+    /// ONLY when ALL of: (1) `source == .plaid` (the canonical imported-transaction marker); (2)
+    /// its own `plaidAccountId` — the stable Plaid `account_id`, never display name/institution/
+    /// last-four — is in `accountIds`; (3) `interval.contains(transaction.date)`; (4) pending
+    /// policy allows it (`includePending || !transaction.isPending`); (5) `transaction.type` is
+    /// `.expense` (positive contribution) or `.refund` (negative, symmetric with how a refund
+    /// reduces manual spending elsewhere in this file) — `.income`/`.transfer`/
+    /// `.creditCardPayment`/`.balanceAdjustment` never contribute, exactly the same type-based
+    /// exclusion `spendingDelta` below already applies to manual transactions, so a paycheck
+    /// deposit or an account transfer can never be miscounted as spending merely because its
+    /// account is selected for Auto Tracking.
+    ///
+    /// Deliberately NEVER reads `countsTowardWeeklyBudget`/`countsTowardMonthlySpending`/
+    /// `isExcludedFromReports` — those are a transaction's own classification/visibility, entirely
+    /// independent of whether its account happens to be selected for Auto Tracking (LOCKED RULE:
+    /// visible transaction does not automatically mean budget-counted transaction, and the
+    /// reverse: an Auto-Tracked transaction's `isExcludedFromReports` stays whatever it already
+    /// was — usually `true`, since imported transactions are never reviewed/approved today — and
+    /// this function counts it anyway, because that flag governs REPORTS visibility, not Auto
+    /// Tracking budget participation).
+    private static func autoTrackedDelta(
+        for transaction: FinanceTransaction,
+        in interval: DateInterval,
+        includePending: Bool,
+        accountIds: Set<String>
+    ) -> Decimal? {
+        guard transaction.source == .plaid else { return nil }
+        guard let plaidAccountId = transaction.plaidAccountId, accountIds.contains(plaidAccountId) else { return nil }
+        guard intervalContainsHalfOpen(interval, transaction.date) else { return nil }
+        guard includePending || !transaction.isPending else { return nil }
+        switch transaction.type {
+        case .expense: return transaction.amount
+        case .refund: return -transaction.amount
+        // A Plaid-imported transaction is never created as a Transfer WD/Dep (those are a Manual
+        // Account entry concept only — see `TransactionType.transferWithdrawal`'s own header), so
+        // these two cases can never actually be hit here; excluded for the same reason `.income`/
+        // `.transfer`/etc. already are.
+        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit:
+            return nil
+        }
     }
 
     /// Driven by the same `spendingDelta` eligibility check `categoryTotals`/`accountTotals` use
@@ -89,8 +261,10 @@ enum BudgetCalculator {
     static func isCounted(_ transaction: FinanceTransaction, includePending: Bool, context: SpendingContext) -> Bool {
         guard !transaction.isExcludedFromReports else { return false }
         guard includePending || !transaction.isPending else { return false }
+        // See spendingDelta's own header — a Fixed Bill payment never counts directly.
+        guard transaction.linkedRecurringExpense == nil else { return false }
         switch transaction.type {
-        case .expense, .refund: return countsToward(transaction, context: context)
+        case .expense, .refund, .transferWithdrawal, .transferDeposit: return countsToward(transaction, context: context)
         case .income, .transfer, .creditCardPayment, .balanceAdjustment: return false
         }
     }
@@ -156,12 +330,30 @@ enum BudgetCalculator {
     /// This transaction's contribution to `context`'s spend total (expense = +amount, refund =
     /// -amount), or `nil` if it's out of range, excluded, pending-when-not-wanted, a non-spending
     /// type, or an expense/refund that doesn't count toward `context`.
+    /// FIXED BILL PAYMENT EXCLUSION — `transaction.linkedRecurringExpense` is set only when a
+    /// Manual Account register entry pays a Fixed Bill (directly, via the "Is this a Bill?" picker,
+    /// or automatically by Pay Bills — see `ManualTransactionCreationService.createExpense`'s own
+    /// header). That bill's PLANNED amount is already subtracted once, every month, inside
+    /// `MonthlyPlanCalculator.flexibleSpendingAvailable` (via Fixed Bills) — counting the payment
+    /// AGAIN here would double-subtract the same money. Only the planned-vs-actual DIFFERENCE for
+    /// that bill matters, which `MonthlyPlanCalculator.billPaymentVariance` applies separately,
+    /// once, to the monthly baseline — never here, and never per-transaction. A normal Manual
+    /// Account register entry (no linked bill) and an `isOneTimeBillEntry`-tagged transaction both
+    /// count in full, exactly like any other manual transaction — neither was ever priced into
+    /// Fixed Bills, so there is nothing to avoid double-counting.
     private static func spendingDelta(for transaction: FinanceTransaction, in interval: DateInterval, includePending: Bool, context: SpendingContext) -> Decimal? {
-        guard interval.contains(transaction.date), !transaction.isExcludedFromReports else { return nil }
+        guard intervalContainsHalfOpen(interval, transaction.date), !transaction.isExcludedFromReports else { return nil }
         guard includePending || !transaction.isPending else { return nil }
+        guard transaction.linkedRecurringExpense == nil else { return nil }
         switch transaction.type {
         case .expense: return countsToward(transaction, context: context) ? transaction.amount : nil
-        case .refund: return countsToward(transaction, context: context) ? -transaction.amount : nil
+        // TRANSFER TRACKING — a Transfer WD entry behaves like an expense (money leaving this
+        // account); a Transfer Dep entry behaves like a refund (money arriving offsets spending).
+        // Both are gated by the SAME per-entry `countsToward` flag `.expense`/`.refund` already
+        // use — unlike `.income`/`.transfer` below, which never count regardless of the toggles —
+        // so the user can decide, per entry, whether a given transfer should affect their totals.
+        case .refund, .transferDeposit: return countsToward(transaction, context: context) ? -transaction.amount : nil
+        case .transferWithdrawal: return countsToward(transaction, context: context) ? transaction.amount : nil
         case .income, .transfer, .creditCardPayment, .balanceAdjustment: return nil
         }
     }

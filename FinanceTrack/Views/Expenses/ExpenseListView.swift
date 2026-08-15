@@ -64,6 +64,24 @@ private enum ActivitySource: Identifiable, Equatable {
 /// `BudgetCalculator`/weekly/monthly spending/budgets/Spend Sense/reports — those all consume
 /// `transactions`/`filteredTransactions`, never `sharedEntries`.
 struct ExpenseListView: View {
+    static let infoExplanation = """
+        This is your full transaction history — every expense, deposit, and refund across your \
+        accounts, in one searchable list.
+
+        Use the tabs at the top to switch between your own Manual entries and any connected bank \
+        or card accounts. Use the filters to narrow the list down to a specific week, month, or \
+        custom date range. Tap the + button to add a new entry by hand.
+
+        This screen is a record-keeping view — it shows everything that happened, whether or not \
+        it counts toward your Weekly or Monthly spending totals elsewhere in the app. A bill \
+        payment or an excluded transaction still shows up here, even though it's left out of \
+        those other totals.
+
+        Example: you paid your electric bill and bought groceries on the same day. Both show up \
+        here as a complete record, even though the bill payment doesn't count toward your Weekly \
+        spending (it's already priced into your Monthly Plan) while the groceries do.
+        """
+
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactions: [FinanceTransaction]
     @Query private var settingsList: [BudgetSettings]
     @Environment(PrivacyModeManager.self) private var privacyMode
@@ -217,6 +235,47 @@ struct ExpenseListView: View {
         ConnectedAccountOptionPresenter.label(forAccountId: transaction.plaidAccountId, in: plaidConnection.connections)
     }
 
+    /// This transaction's contribution to the Activity screen's own filtered Total — deliberately
+    /// the SAME signed convention each row already displays (`TransactionRow`/
+    /// `ConnectedTransactionRow`'s own `signPrefix`: expense negative, refund/income positive,
+    /// transfer/creditCardPayment/balanceAdjustment shown as a plain positive figure), never
+    /// `DailyTransactionTotals.spendingDelta`/`BudgetCalculator`'s "amount spent" conventions —
+    /// this Total answers "what do these displayed rows arithmetically add up to," not "how much
+    /// was spent," so it must never be floored at zero or sign-flipped the way those are.
+    private func signedActivityAmount(for transaction: FinanceTransaction) -> Decimal {
+        switch transaction.type {
+        case .expense, .transferWithdrawal: return -transaction.amount
+        case .refund, .income, .transferDeposit: return transaction.amount
+        case .transfer, .creditCardPayment, .balanceAdjustment: return transaction.amount
+        }
+    }
+
+    /// The arithmetic sum of exactly `filteredTransactions` — the same collection `dailyGroups`
+    /// itself partitions into day buckets, so this can never disagree with what's on screen and
+    /// never double-counts a row (every transaction appears in exactly one day bucket).
+    private var filteredTransactionsTotal: Decimal {
+        filteredTransactions.reduce(Decimal(0)) { $0 + signedActivityAmount(for: $1) }
+    }
+
+    /// The signed sum of exactly the `filteredTransactions` rows where `isPending == false` —
+    /// this reads each transaction's own existing `isPending` flag directly, never infers it, and
+    /// never independently applies the Budget Settings pending-inclusion toggle (a budgeting-rule
+    /// setting, not a display filter): if a pending row is currently visible on screen, it is
+    /// simply excluded from this subtotal and counted in `pendingTransactionsTotal` instead —
+    /// Activity's own visibility is completely unchanged by this split.
+    private var postedTransactionsTotal: Decimal {
+        filteredTransactions.filter { !$0.isPending }.reduce(Decimal(0)) { $0 + signedActivityAmount(for: $1) }
+    }
+
+    /// The signed sum of exactly the `filteredTransactions` rows where `isPending == true`. Every
+    /// `filteredTransactions` row is either posted or pending, never both, so
+    /// `postedTransactionsTotal + pendingTransactionsTotal` always equals `filteredTransactionsTotal`
+    /// exactly — this is a straight partition of the same array, not two separate computations
+    /// that could drift apart.
+    private var pendingTransactionsTotal: Decimal {
+        filteredTransactions.filter { $0.isPending }.reduce(Decimal(0)) { $0 + signedActivityAmount(for: $1) }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -237,6 +296,9 @@ struct ExpenseListView: View {
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationTitle("Activity")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    InfoButton(title: "About Activity", explanation: Self.infoExplanation)
+                }
                 // Only Manual Transactions can be added from here — a connected-account tab
                 // (owned or shared) is a read-only reference list (see `ConnectedTransactionRow`'s
                 // own doc comment), so adding a new entry from it would have nowhere correct to go.
@@ -302,8 +364,45 @@ struct ExpenseListView: View {
                 ForEach(dailyGroups, id: \.day) { group in
                     daySection(group)
                 }
+                activityTotalRow
             }
             .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    /// The filtered-result totals, shown once at the very bottom of the currently displayed rows
+    /// (after the final day group) — hidden entirely whenever `dailyGroups` is empty, since
+    /// `ownedActivityList` already shows a clean `ContentUnavailableView` in that case and a
+    /// $0.00 totals card would just add a redundant, misleading-looking line beneath it.
+    ///
+    /// Posted Transactions + Pending Transactions always reconciles exactly to Total — all three
+    /// are computed from the SAME `filteredTransactions` array (Posted/Pending are a straight
+    /// partition of it by `isPending`, Total is the unfiltered sum), never a second query, and
+    /// never independently re-applies the Budget Settings pending-inclusion toggle — this is a
+    /// display reconciliation of what's already on screen, not a budgeting-rule change.
+    private var activityTotalRow: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            activityAmountRow(label: "Posted Transactions", amount: postedTransactionsTotal, emphasized: false)
+            activityAmountRow(label: "Pending Transactions", amount: pendingTransactionsTotal, emphasized: false)
+            Divider().overlay(Theme.cardStroke)
+            activityAmountRow(label: "Total", amount: filteredTransactionsTotal, emphasized: true)
+        }
+        .padding(.top, Theme.Spacing.xs)
+    }
+
+    @ViewBuilder
+    private func activityAmountRow(label: String, amount: Decimal, emphasized: Bool) -> some View {
+        HStack {
+            Text(label)
+                .font(Theme.headlineFont)
+                .foregroundStyle(emphasized ? Theme.textPrimary : Theme.textSecondary)
+            Spacer()
+            PrivacyAmountView(
+                amount: amount,
+                isPrivacyModeEnabled: privacyMode.isEnabled,
+                font: Theme.headlineFont,
+                color: emphasized ? Theme.textPrimary : Theme.textSecondary
+            )
         }
     }
 

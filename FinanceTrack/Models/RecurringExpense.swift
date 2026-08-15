@@ -33,6 +33,15 @@ final class RecurringExpense {
     /// design (see `UserDataStoreManager`/`LegacyDataMigrator`); not yet enforced or required.
     var ownerUserID: UUID?
 
+    /// BILL PAYMENT TAGGING — Manual Account register transactions that paid this bill, linked
+    /// either automatically by Pay Bills or manually via the "Is this a Bill?" picker on a Manual
+    /// Account entry — see `FinanceTransaction.linkedRecurringExpense`'s own header for why a
+    /// linked payment never counts twice toward Weekly/Monthly Spending. `.nullify` on delete:
+    /// removing this bill must never delete its payment history, only detach it (those payments
+    /// then count as ordinary spending going forward, same as any other Manual Account entry).
+    @Relationship(deleteRule: .nullify, inverse: \FinanceTransaction.linkedRecurringExpense)
+    var billPayments: [FinanceTransaction]? = []
+
     init(
         id: UUID = UUID(),
         name: String,

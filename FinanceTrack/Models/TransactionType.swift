@@ -12,6 +12,18 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
     case creditCardPayment
     case refund
     case balanceAdjustment
+    /// TRANSFER TRACKING — a Manual Account register entry for money moving OUT of this account
+    /// to another account (manual or connected), tracked distinctly from `.transfer` (which
+    /// remains unused by any current UI) so a Manual Account entry can pick "Transfer WD"
+    /// specifically. Unlike `.income`/`.transfer`, this respects the same
+    /// `countsTowardWeeklyBudget`/`countsTowardMonthlySpending` toggles `.expense`/`.refund` do —
+    /// see `BudgetCalculator.spendingDelta`'s own header — since the user explicitly wants to
+    /// decide per-entry whether a given transfer affects their spending totals.
+    case transferWithdrawal
+    /// TRANSFER TRACKING — the deposit-direction counterpart to `.transferWithdrawal`: money
+    /// moving INTO this account from another account (manual or connected). Also respects the
+    /// per-entry Weekly/Monthly toggles, same as `.transferWithdrawal`.
+    case transferDeposit
 
     var id: String { rawValue }
 
@@ -23,6 +35,8 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
         case .creditCardPayment: return "Credit Card Payment"
         case .refund: return "Refund"
         case .balanceAdjustment: return "Balance Adjustment"
+        case .transferWithdrawal: return "Transfer WD"
+        case .transferDeposit: return "Transfer Dep"
         }
     }
 
@@ -30,7 +44,9 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
     var countsAsSpending: Bool {
         switch self {
         case .expense: return true
-        case .income, .transfer, .creditCardPayment, .refund, .balanceAdjustment: return false
+        case .income, .transfer, .creditCardPayment, .refund, .balanceAdjustment,
+             .transferWithdrawal, .transferDeposit:
+            return false
         }
     }
 }

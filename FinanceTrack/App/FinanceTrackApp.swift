@@ -232,7 +232,7 @@ struct FinanceTrackApp: App {
                         // makes "User A's Face ID must never affect User B" true by construction
                         // rather than by incidental timing.
                         biometricAuth.isFaceIDRequired = false
-                        biometricAuth.isUnlocked = false
+                        biometricAuth.lock()
                         // Phase 7 — clears cached role state (see its own reset() doc comment).
                         accountRelatedOptionsViewModel.reset()
                         // Phase 8 — clears any pending invitation so it can never resurface for a
