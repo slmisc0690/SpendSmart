@@ -11,6 +11,11 @@ struct ConnectedAccountOption: Identifiable, Equatable {
     /// `PlaidConnectionManager.cachedBalances` already key by.
     let id: String
     let label: String
+    /// Plaid's own `subtype` string for this account (e.g. `"savings"`, `"checking"`), unmodified —
+    /// `nil` when Plaid hasn't reported one. Lets `AddExpenseView`'s Transfer To Savings "To" picker
+    /// verify a Connected account is actually a savings account before offering it, the same way it
+    /// already verifies a Manual Account's `AccountType`.
+    let subtype: String?
 }
 
 /// Builds the list of connected accounts a manually entered transaction may reference — reads
@@ -21,11 +26,11 @@ struct ConnectedAccountOption: Identifiable, Equatable {
 /// exists.
 enum ConnectedAccountOptionPresenter {
     static func options(for connections: [PlaidConnection]) -> [ConnectedAccountOption] {
-        var perAccount: [(accountId: String, institutionName: String, mask: String?)] = []
+        var perAccount: [(accountId: String, institutionName: String, mask: String?, subtype: String?)] = []
         for connection in connections {
             guard let cached = connection.cachedBalances else { continue }
             for (accountId, balance) in cached {
-                perAccount.append((accountId, connection.institutionName, balance.mask))
+                perAccount.append((accountId, connection.institutionName, balance.mask, balance.subtype))
             }
         }
         guard !perAccount.isEmpty else { return [] }
@@ -42,7 +47,7 @@ enum ConnectedAccountOptionPresenter {
                 } else {
                     label = entry.institutionName
                 }
-                return ConnectedAccountOption(id: entry.accountId, label: label)
+                return ConnectedAccountOption(id: entry.accountId, label: label, subtype: entry.subtype)
             }
     }
 

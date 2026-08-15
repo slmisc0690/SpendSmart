@@ -44,7 +44,7 @@ enum DailyTransactionTotals {
         case .refund, .income: return -transaction.amount
         // Never actually imported (Transfer WD/Dep are a Manual Account entry concept only), kept
         // here purely so this switch stays total over every `TransactionType` case.
-        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit:
+        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings:
             return 0
         }
     }

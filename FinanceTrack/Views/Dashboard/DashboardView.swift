@@ -17,6 +17,11 @@ struct DashboardView: View {
     /// `favoriteDestinations`'s own header) — it only ever needs to agree with Settings on which
     /// existing row to read.
     @Query(sort: \FavoritesSettings.id) private var favoritesSettingsList: [FavoritesSettings]
+    /// Same deterministic-sort reasoning as `favoritesSettingsList` above, for the analogous
+    /// Quick Stats visibility picker (`QuickStatsConfigurationView`). This screen never creates or
+    /// merges rows itself — only that screen's own explicit `.onAppear`/mutation call sites do.
+    @Query(sort: \QuickStatsSettings.id) private var quickStatsSettingsList: [QuickStatsSettings]
+    @State private var isPresentingQuickStatsConfiguration = false
 
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(PlaidConnectionManager.self) private var plaidConnection
@@ -167,8 +172,26 @@ struct DashboardView: View {
         SavingsCalculator.totalSavingsToDate(savingsEntries)
     }
 
+    /// SAVED-TRACKING — the "Saved" Quick Stat's own value: the current month's total of
+    /// `.transferToSavings` Manual Account entries, entirely independent of `savedThisMonth` above
+    /// (which totals manually-logged `SavingsEntry` rows instead).
+    private var savedViaTransferThisMonth: Decimal {
+        SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval)
+    }
+
+    /// QUICK STATS CUSTOMIZATION — the single source of truth for which Quick Stats show, read
+    /// from `QuickStatsConfigurationView`'s own `QuickStatsSettings` record. This supersedes the
+    /// old dedicated `BudgetSettings` per-toggle Settings row (removed in favor of this one general
+    /// picker); the superseded `BudgetSettings` field is left in place, unused, rather than
+    /// removed, matching this schema's own established pattern for a prior superseded toggle.
+    /// Read-only here — this screen never creates or merges `QuickStatsSettings` rows itself, only
+    /// `QuickStatsConfigurationView`'s own explicit call sites do.
+    private func isQuickStatShown(_ stat: QuickStatID) -> Bool {
+        !(quickStatsSettingsList.first?.isHidden(stat) ?? false)
+    }
+
     private var showSavedThisMonthQuickStat: Bool {
-        settings?.showSavedThisMonthQuickStat ?? true
+        isQuickStatShown(.savedThisMonth)
     }
 
     /// LOCKED PRODUCT RULE — a Secondary never uses their own local `SavingsEntry` records to
@@ -206,6 +229,20 @@ struct DashboardView: View {
         guard !Task.isCancelled else { return }
         guard !isSecondary else { return }
         await SavingsSummarySyncService.sync(entries: savingsEntries)
+    }
+
+    /// SAVED VIA TRANSFER SHARING — reconciles the server's Saved-via-Transfer aggregate whenever
+    /// this Primary's Dashboard loads/returns to the foreground, mirroring
+    /// `syncSavingsSummaryIfNeeded`'s own trigger/no-op-for-Secondary/teardown-safety posture
+    /// exactly (see that method's own header for the two crash-fix races this same guard sequence
+    /// protects against). Computed from the FULL local `transactions` collection —
+    /// `SavedViaTransferCalculator` itself filters to `.transferToSavings` entries only.
+    private func syncSavedViaTransferSummaryIfNeeded() async {
+        guard !Task.isCancelled else { return }
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        guard !isSecondary else { return }
+        await SavedViaTransferSummarySyncService.sync(transactions: transactions)
     }
 
     /// USER B DASHBOARD PARITY — pushes this Primary's own authoritative Dashboard aggregate
@@ -482,10 +519,14 @@ struct DashboardView: View {
             .task {
                 await syncDashboardSummaryIfNeeded()
             }
+            .task {
+                await syncSavedViaTransferSummaryIfNeeded()
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     Task { await syncSavingsSummaryIfNeeded() }
                     Task { await syncDashboardSummaryIfNeeded() }
+                    Task { await syncSavedViaTransferSummaryIfNeeded() }
                 }
             }
             // CLIENT CORRECTION — `RootView.task`'s own single, fire-and-forget
@@ -761,6 +802,12 @@ struct DashboardView: View {
         accountRelatedOptionsLoaded && isSecondary && (accountRelatedOptionsViewModel.response?.primaryMonthlySavingsShared ?? false)
     }
 
+    /// SAVED VIA TRANSFER SHARING — same gating shape as `sharedSavingsQuickStatVisible`, for the
+    /// independent `savedViaTransfer` category.
+    private var sharedSavedViaTransferQuickStatVisible: Bool {
+        accountRelatedOptionsLoaded && isSecondary && (accountRelatedOptionsViewModel.response?.primarySavedViaTransferShared ?? false)
+    }
+
     /// QUICK STATS REDESIGN — a budgeting summary rather than duplicate information: Planned
     /// Weekly Spending / Spent This Week / Planned Monthly Spending / Projected Available After
     /// Spend are all read live from this same view's own already-computed planning properties
@@ -780,44 +827,60 @@ struct DashboardView: View {
                 Text("Quick Stats")
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
+                Button {
+                    isPresentingQuickStatsConfiguration = true
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .accessibilityLabel("Choose Quick Stats")
                 Spacer()
                 InfoButton(title: "About Quick Stats", explanation: Self.quickStatsInfoExplanation)
             }
             .padding(.horizontal, Theme.Spacing.lg)
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.sm), GridItem(.flexible())], spacing: Theme.Spacing.sm) {
-                StatCard(
-                    title: "Planned Weekly Spending",
-                    systemIconName: "calendar",
-                    amount: plannedWeeklySpendingForOutlook,
-                    subtitle: isPlannedWeeklySpendingCustomForOutlook ? "Custom" : "Automatic",
-                    accentColor: Theme.accent,
-                    isPrivacyModeEnabled: privacyMode.isEnabled
-                )
-                StatCard(
-                    title: "Spent This Week",
-                    systemIconName: "cart.fill",
-                    amount: spentThisWeek,
-                    subtitle: DateRangeHelper.weekDisplayText(for: weekInterval),
-                    accentColor: Theme.statusOver,
-                    isPrivacyModeEnabled: privacyMode.isEnabled
-                )
-                StatCard(
-                    title: "Planned Monthly Spending",
-                    systemIconName: "calendar.badge.clock",
-                    amount: plannedMonthlySpendingForOutlook,
-                    subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                    accentColor: Theme.accentSecondary,
-                    isPrivacyModeEnabled: privacyMode.isEnabled
-                )
-                StatCard(
-                    title: "Projected Available After Spend",
-                    systemIconName: "banknote.fill",
-                    amount: projectedAvailableAfterSpendForOutlook,
-                    subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                    accentColor: Theme.statusGood,
-                    isPrivacyModeEnabled: privacyMode.isEnabled
-                )
+                if isQuickStatShown(.plannedWeeklySpending) {
+                    StatCard(
+                        title: "Planned Weekly Spending",
+                        systemIconName: "calendar",
+                        amount: plannedWeeklySpendingForOutlook,
+                        subtitle: isPlannedWeeklySpendingCustomForOutlook ? "Custom" : "Automatic",
+                        accentColor: Theme.accent,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
+                if isQuickStatShown(.spentThisWeek) {
+                    StatCard(
+                        title: "Spent This Week",
+                        systemIconName: "cart.fill",
+                        amount: spentThisWeek,
+                        subtitle: DateRangeHelper.weekDisplayText(for: weekInterval),
+                        accentColor: Theme.statusOver,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
+                if isQuickStatShown(.plannedMonthlySpending) {
+                    StatCard(
+                        title: "Planned Monthly Spending",
+                        systemIconName: "calendar.badge.clock",
+                        amount: plannedMonthlySpendingForOutlook,
+                        subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                        accentColor: Theme.accentSecondary,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
+                if isQuickStatShown(.projectedAvailableAfterSpend) {
+                    StatCard(
+                        title: "Projected Available After Spend",
+                        systemIconName: "banknote.fill",
+                        amount: projectedAvailableAfterSpendForOutlook,
+                        subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                        accentColor: Theme.statusGood,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
                 if showLocalSavedThisMonthQuickStat {
                     SavedThisMonthQuickStatCard(
                         savedThisMonth: savedThisMonth,
@@ -832,8 +895,38 @@ struct DashboardView: View {
                     // branch (and the view model with it).
                     SharedSavedThisMonthQuickStatCard(primaryUserId: primaryUserId, isPrivacyModeEnabled: privacyMode.isEnabled)
                 }
+                // SAVED VIA TRANSFER SHARING — mirrors the Saved This Month/shared savings split
+                // above: a Primary (or a Secondary the Primary hasn't shared this aggregate with)
+                // sees their own local Transfer To Savings history; a Secondary the Primary HAS
+                // shared it with sees the Primary's server-pushed aggregate instead — never both,
+                // and never a local reconstruction from possibly-unshared accounts.
+                if isQuickStatShown(.savedViaTransfer) && !sharedSavedViaTransferQuickStatVisible {
+                    StatCard(
+                        title: "Saved",
+                        systemIconName: "arrow.turn.down.right",
+                        amount: savedViaTransferThisMonth,
+                        subtitle: "Transferred to Savings \u{2022} \(DateRangeHelper.monthDisplayText(for: monthInterval))",
+                        accentColor: Theme.statusGood,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
+                if isQuickStatShown(.savedViaTransfer), sharedSavedViaTransferQuickStatVisible,
+                   let primaryUserId = accountRelatedOptionsViewModel.response?.primaryUserId {
+                    // Fresh `SharedSavedViaTransferViewModel` per presentation — see that type's
+                    // own header for why revocation needs no explicit clearing: the moment
+                    // `sharedSavedViaTransferQuickStatVisible` flips false, SwiftUI removes this
+                    // whole branch (and the view model with it).
+                    SharedSavedViaTransferQuickStatCard(
+                        primaryUserId: primaryUserId,
+                        monthInterval: monthInterval,
+                        isPrivacyModeEnabled: privacyMode.isEnabled
+                    )
+                }
             }
             .padding(.horizontal, Theme.Spacing.lg)
+        }
+        .sheet(isPresented: $isPresentingQuickStatsConfiguration) {
+            QuickStatsConfigurationView()
         }
     }
 
@@ -862,10 +955,11 @@ struct DashboardView: View {
     /// `currentBalance`/`availableBalance`/`creditLimit`/`accountType`/`updatedAt`, the same
     /// non-secret fields the owner's own listing already exposes — fed through the exact same
     /// `PlaidBalanceFormatter.rows(for:)` an owned account's row uses, so a credit card's shared
-    /// balance reads "Balance Owed" and a checking account's reads "Current Balance" identically
-    /// to what the Primary sees. For an account the Primary hasn't refreshed yet, every one of
-    /// those fields is still `nil` from the server, so `primaryRow`/`updatedAt` stay `nil` here
-    /// too — `ConnectedAccountBalanceRow` renders that as its existing, honest "Balance not
+    /// balance reads "Balance Owed" + "Available Credit" and a checking account reads "Available
+    /// Balance" + "Current Balance" identically to what the Primary sees. For an account the
+    /// Primary hasn't refreshed yet, every one of those fields is still `nil` from the server, so
+    /// `rows` is empty and `updatedAt` stays `nil` here too — `ConnectedAccountBalanceRow` renders
+    /// that as its existing, honest "Balance not
     /// refreshed yet" state, same as an owned-but-never-synced account; nothing is ever
     /// fabricated. `connectionId`/`accountId` remain synthetic/`nil` and `onRefresh` is never
     /// supplied for a shared display (see `connectedAccountsSection`'s own gating), so a shared
@@ -892,7 +986,7 @@ struct DashboardView: View {
                 connectionId: "shared",
                 accountId: nil,
                 institutionName: account.name ?? "Connected Account",
-                primaryRow: PlaidBalanceFormatter.rows(for: balance).first,
+                rows: PlaidBalanceFormatter.rows(for: balance),
                 updatedAt: account.updatedAt
             )
         }
@@ -1066,9 +1160,13 @@ struct DashboardView: View {
 
         • Projected Available After Spend — if you stick exactly to your Planned Monthly Spending for the rest of the month, this is how much would be left over on top of that.
 
-        • Saved This Month — money you've actually set aside as savings this month, separate from your regular spending.
+        • Saved This Month — money you've logged as savings this month, using Monthly Plan's "Add to Savings."
 
-        Example: your Planned Weekly Spending is $500 ($2,000 for the month), but you actually have $2,300 available after bills and savings. Projected Available After Spend would show $300 — money you're planning to keep rather than spend.
+        • Saved — money you've moved into a Savings account this month using the "Transfer To Savings" entry type in a Manual Account's register (for example, moving $200 from Checking to Savings). This never changes your Monthly Remaining or Projected Available — it's tracked separately, purely so you can see at a glance how much you've actually put into savings, distinct from "Saved This Month," which tracks manually-logged savings entries instead.
+
+        Tap the "+" next to "Quick Stats" to choose which of these tiles show — nothing is deleted when you hide one, it just tidies up the grid.
+
+        Example: your Planned Weekly Spending is $500 ($2,000 for the month), but you actually have $2,300 available after bills and savings. Projected Available After Spend would show $300 — money you're planning to keep rather than spend. If you also moved $200 from Checking to Savings this month, "Saved" would show $200.
         """
 
     static let weekByWeekInfoExplanation = """
@@ -1280,7 +1378,7 @@ private struct RecentActivityRow: View {
 
     private var amountColor: Color {
         switch transaction.type {
-        case .expense, .transferWithdrawal: return Theme.textPrimary
+        case .expense, .transferWithdrawal, .transferToSavings: return Theme.textPrimary
         case .refund, .income, .transferDeposit: return Theme.statusGood
         case .transfer, .creditCardPayment, .balanceAdjustment: return Theme.textTertiary
         }
@@ -1288,7 +1386,7 @@ private struct RecentActivityRow: View {
 
     private var signPrefix: String {
         switch transaction.type {
-        case .expense, .transferWithdrawal: return "-"
+        case .expense, .transferWithdrawal, .transferToSavings: return "-"
         case .refund, .income, .transferDeposit: return "+"
         case .transfer, .creditCardPayment, .balanceAdjustment: return ""
         }
@@ -1359,17 +1457,21 @@ private struct ConnectedAccountBalanceRow: View {
 
             Spacer()
 
-            if let row = display.primaryRow {
+            if !display.rows.isEmpty {
                 VStack(alignment: .trailing, spacing: 4) {
-                    PrivacyAmountView(
-                        amount: row.amount,
-                        isPrivacyModeEnabled: isPrivacyModeEnabled,
-                        font: Theme.bodyFont,
-                        color: Theme.textPrimary
-                    )
-                    Text(row.label)
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(Theme.textTertiary)
+                    ForEach(Array(display.rows.enumerated()), id: \.offset) { _, row in
+                        VStack(alignment: .trailing, spacing: 1) {
+                            PrivacyAmountView(
+                                amount: row.amount,
+                                isPrivacyModeEnabled: isPrivacyModeEnabled,
+                                font: Theme.bodyFont,
+                                color: Theme.textPrimary
+                            )
+                            Text(row.label)
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
                     if let onRefresh, display.accountId != nil {
                         RefreshPillButton(isRefreshing: isRefreshing, isRateLimited: isRateLimited, action: onRefresh)
                     }
@@ -1497,6 +1599,51 @@ private struct SharedSavedThisMonthQuickStatCard: View {
                 // shared"/"still loading" (both of which render nothing above). Minimal,
                 // non-blocking: same `Text(message)` convention `SharedPrimaryDataViews.swift`
                 // already uses for every other shared-data failure state.
+                Text(message)
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.statusOver)
+            }
+        }
+        .task(id: primaryUserId) {
+            await viewModel.load()
+        }
+    }
+}
+
+/// SAVED VIA TRANSFER SHARING — Secondary-only read-only counterpart to the local "Saved" Quick
+/// Stat card above, mirroring `SharedSavedThisMonthQuickStatCard` exactly. Fully transient (see
+/// `SharedSavedViaTransferViewModel`'s own header): loads from `get-saved-via-transfer-summary` on
+/// appear, never touches SwiftData, and renders NOTHING (not even a placeholder) while loading or
+/// once revoked — only `.loaded(let summary)` with a non-nil `summary` ever produces the tile.
+private struct SharedSavedViaTransferQuickStatCard: View {
+    let primaryUserId: UUID
+    let monthInterval: DateInterval
+    let isPrivacyModeEnabled: Bool
+
+    @State private var viewModel: SharedSavedViaTransferViewModel
+
+    init(primaryUserId: UUID, monthInterval: DateInterval, isPrivacyModeEnabled: Bool) {
+        self.primaryUserId = primaryUserId
+        self.monthInterval = monthInterval
+        self.isPrivacyModeEnabled = isPrivacyModeEnabled
+        _viewModel = State(initialValue: SharedSavedViaTransferViewModel(primaryUserId: primaryUserId))
+    }
+
+    var body: some View {
+        Group {
+            switch viewModel.state {
+            case .loading, .loaded(nil):
+                EmptyView()
+            case .loaded(let summary?):
+                StatCard(
+                    title: "Saved",
+                    systemIconName: "arrow.turn.down.right",
+                    amount: summary.savedViaTransferThisMonth,
+                    subtitle: "Transferred to Savings \u{2022} \(DateRangeHelper.monthDisplayText(for: monthInterval))",
+                    accentColor: Theme.statusGood,
+                    isPrivacyModeEnabled: isPrivacyModeEnabled
+                )
+            case .failed(let message):
                 Text(message)
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.statusOver)

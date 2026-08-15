@@ -26,7 +26,7 @@ enum TransactionCSVExportService {
     /// unsigned/positive) so the export never disagrees with what's on screen for the same row.
     private static func signedAmount(for transaction: FinanceTransaction) -> Decimal {
         switch transaction.type {
-        case .expense, .transferWithdrawal: return -transaction.amount
+        case .expense, .transferWithdrawal, .transferToSavings: return -transaction.amount
         case .refund, .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferDeposit: return transaction.amount
         }
     }

@@ -225,23 +225,34 @@ struct AddExpenseView: View {
         isManualAccountEntry && type == .expense
     }
 
-    /// TRANSFER TRACKING — Transfer WD/Transfer Dep are a Manual Account register concept only
-    /// (see `TransactionType.transferWithdrawal`'s own header), so they're only offered as Type
-    /// choices, and only replace the normal Account picker with From/To dropdowns, in the Manual
-    /// Account flow.
+    /// TRANSFER TRACKING — Transfer WD/Transfer Dep/Transfer To Savings are a Manual Account
+    /// register concept only (see `TransactionType.transferWithdrawal`'s own header), so they're
+    /// only offered as Type choices, and only replace the normal Account picker with From/To
+    /// dropdowns, in the Manual Account flow.
     private var isTransferType: Bool {
-        type == .transferWithdrawal || type == .transferDeposit
+        type == .transferWithdrawal || type == .transferDeposit || type == .transferToSavings
     }
 
     private var showsTransferAccountPickers: Bool {
         isManualAccountEntry && isTransferType
     }
 
-    /// The Type choices this screen offers — Transfer WD/Dep only in the Manual Account flow.
+    /// SAVED-TRACKING — Transfer To Savings is only offered when there's at least one verifiable
+    /// savings account to transfer into (a Manual Account typed `.savings`, or a Connected/Plaid
+    /// account whose own reported subtype is `"savings"` — see `transferToOptions`'s own header);
+    /// offering it with nowhere to select as "To" would be a dead end.
+    private var hasSavingsAccount: Bool {
+        activeAccounts.contains { $0.type == .savings }
+            || connectedAccountOptions.contains { $0.subtype?.lowercased() == "savings" }
+    }
+
+    /// The Type choices this screen offers — Transfer WD/Dep/To Savings only in the Manual
+    /// Account flow, and Transfer To Savings only when a Savings account exists to receive it.
     private var availableTypes: [TransactionType] {
-        isManualAccountEntry
-            ? [.expense, .refund, .income, .transferWithdrawal, .transferDeposit]
-            : [.expense, .refund, .income]
+        guard isManualAccountEntry else { return [.expense, .refund, .income] }
+        var types: [TransactionType] = [.expense, .refund, .income, .transferWithdrawal, .transferDeposit]
+        if hasSavingsAccount { types.append(.transferToSavings) }
+        return types
     }
 
     /// Archived categories must never appear as a choice for a *new* expense — they stay visible
@@ -287,6 +298,7 @@ struct AddExpenseView: View {
         case .income: return "Add Deposit"
         case .transferWithdrawal: return "Add Transfer WD"
         case .transferDeposit: return "Add Transfer Dep"
+        case .transferToSavings: return "Add Transfer To Savings"
         case .transfer, .creditCardPayment, .balanceAdjustment: return "Add Expense"
         }
     }
@@ -296,7 +308,7 @@ struct AddExpenseView: View {
         case .expense: return "Expense Amount"
         case .refund: return "Refund Amount"
         case .income: return "Deposit Amount"
-        case .transferWithdrawal, .transferDeposit: return "Transfer Amount"
+        case .transferWithdrawal, .transferDeposit, .transferToSavings: return "Transfer Amount"
         case .transfer, .creditCardPayment, .balanceAdjustment: return "Amount"
         }
     }
@@ -618,23 +630,45 @@ struct AddExpenseView: View {
         activeAccounts.map { .manual($0) } + connectedAccountOptions.map { .connected(id: $0.id, label: $0.label) }
     }
 
+    /// SAVED-TRACKING — for a Transfer To Savings entry, the "To" side must be VERIFIABLY a
+    /// savings account, never a non-savings account (which would make the "Saved" Quick Stat
+    /// meaningless) — restricted here rather than left to the user to pick correctly. Includes
+    /// both a Manual Account typed `.savings` AND a Connected/Plaid account whose own reported
+    /// `subtype` is `"savings"` (Plaid's own classification, read via
+    /// `ConnectedAccountOption.subtype` — see that type's own header for why this is trustworthy:
+    /// it's Plaid's data, not a guess). A Connected account picked here still behaves exactly like
+    /// any other Transfer WD/Dep Connected counterparty — a reference tag only, its balance is
+    /// never locally mutated (Plaid owns that).
+    private var transferToOptions: [TransferAccountSelection] {
+        guard type == .transferToSavings else { return transferAccountOptions }
+        let manualSavings = activeAccounts.filter { $0.type == .savings }.map { TransferAccountSelection.manual($0) }
+        let connectedSavings = connectedAccountOptions
+            .filter { $0.subtype?.lowercased() == "savings" }
+            .map { TransferAccountSelection.connected(id: $0.id, label: $0.label) }
+        return manualSavings + connectedSavings
+    }
+
     private var transferAccountSection: some View {
         CardBackground(padding: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                transferAccountDropdown(title: "From", selection: $transferFromSelection)
+                transferAccountDropdown(title: "From", selection: $transferFromSelection, options: transferAccountOptions)
                 Divider().overlay(Theme.cardStroke)
-                transferAccountDropdown(title: "To", selection: $transferToSelection)
+                transferAccountDropdown(
+                    title: type == .transferToSavings ? "To (Savings Account)" : "To",
+                    selection: $transferToSelection,
+                    options: transferToOptions
+                )
             }
         }
     }
 
-    private func transferAccountDropdown(title: String, selection: Binding<TransferAccountSelection>) -> some View {
+    private func transferAccountDropdown(title: String, selection: Binding<TransferAccountSelection>, options: [TransferAccountSelection]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(Theme.captionFont)
                 .foregroundStyle(Theme.textTertiary)
             Menu {
-                ForEach(Array(transferAccountOptions.enumerated()), id: \.offset) { _, option in
+                ForEach(Array(options.enumerated()), id: \.offset) { _, option in
                     Button(option.label ?? "") { selection.wrappedValue = option }
                 }
             } label: {
@@ -871,8 +905,11 @@ struct AddExpenseView: View {
             // controls rather than refund getting a separate, non-functional branch. A
             // deposit is structurally excluded from every spending total regardless of these
             // flags (see BudgetCalculator's `.income` handling), so showing controls that
-            // would have no effect would be misleading — hidden for that type instead.
-            if type != .income {
+            // would have no effect would be misleading — hidden for that type instead. Same
+            // reasoning for Transfer To Savings — `BudgetCalculator.countsToward` forces both
+            // flags to `false` for that type structurally, so it can never affect Monthly
+            // Remaining or Projected Available regardless of what these toggles would say.
+            if type != .income && type != .transferToSavings {
                 TransactionToggleRow(
                     title: "Counts Toward Weekly Budget",
                     subtitle: type == .expense
@@ -1035,10 +1072,12 @@ struct AddExpenseView: View {
                 AccountBalanceManager.applyRefund(amount: amount, to: effectiveAccount)
             case .income:
                 AccountBalanceManager.applyIncome(amount: amount, to: effectiveAccount)
-            case .transferWithdrawal:
+            case .transferWithdrawal, .transferToSavings:
                 // Money leaves `effectiveAccount`; only reverse the counterparty's balance if it's
                 // a Manual Account we actually own locally — a Connected/Plaid counterparty is a
                 // reference tag only (see `transferCounterpartyPlaidAccountId`'s own header).
+                // `.transferToSavings` applies identically — its counterparty is always a Manual
+                // Account (see `transferToOptions`), so this branch always credits it.
                 AccountBalanceManager.applyExpense(amount: amount, to: effectiveAccount)
                 if let counterpartyAccount { AccountBalanceManager.applyIncome(amount: amount, to: counterpartyAccount) }
             case .transferDeposit:

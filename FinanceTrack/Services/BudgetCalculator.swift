@@ -196,11 +196,11 @@ enum BudgetCalculator {
         switch transaction.type {
         case .expense: return transaction.amount
         case .refund: return -transaction.amount
-        // A Plaid-imported transaction is never created as a Transfer WD/Dep (those are a Manual
-        // Account entry concept only — see `TransactionType.transferWithdrawal`'s own header), so
-        // these two cases can never actually be hit here; excluded for the same reason `.income`/
-        // `.transfer`/etc. already are.
-        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit:
+        // A Plaid-imported transaction is never created as a Transfer WD/Dep/To Savings (those are
+        // a Manual Account entry concept only — see `TransactionType.transferWithdrawal`'s own
+        // header), so these cases can never actually be hit here; excluded for the same reason
+        // `.income`/`.transfer`/etc. already are.
+        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings:
             return nil
         }
     }
@@ -265,7 +265,11 @@ enum BudgetCalculator {
         guard transaction.linkedRecurringExpense == nil else { return false }
         switch transaction.type {
         case .expense, .refund, .transferWithdrawal, .transferDeposit: return countsToward(transaction, context: context)
-        case .income, .transfer, .creditCardPayment, .balanceAdjustment: return false
+        // SAVED-TRACKING — a Transfer To Savings entry never counts toward weekly/monthly
+        // spending, structurally, regardless of the per-entry toggles — see
+        // `TransactionType.transferToSavings`'s own header for why this is enforced here rather
+        // than left to the user's own toggle choice.
+        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings: return false
         }
     }
 
@@ -354,7 +358,11 @@ enum BudgetCalculator {
         // so the user can decide, per entry, whether a given transfer should affect their totals.
         case .refund, .transferDeposit: return countsToward(transaction, context: context) ? -transaction.amount : nil
         case .transferWithdrawal: return countsToward(transaction, context: context) ? transaction.amount : nil
-        case .income, .transfer, .creditCardPayment, .balanceAdjustment: return nil
+        // SAVED-TRACKING — always excluded, unconditionally, never gated by `countsToward` at
+        // all — this is what makes a save structurally incapable of affecting Monthly Remaining/
+        // Projected Available, per Scott's explicit requirement (see
+        // `TransactionType.transferToSavings`'s own header).
+        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings: return nil
         }
     }
 }

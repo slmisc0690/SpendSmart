@@ -83,6 +83,12 @@ enum ManualTransactionDeletionService {
                 message: "This transfer will be removed and the balance(s) it affected will be reversed.",
                 destructiveActionTitle: "Delete Transfer"
             )
+        case .transferToSavings:
+            return ConfirmationCopy(
+                title: "Delete Transfer To Savings?",
+                message: "This transfer will be removed, the balance(s) it affected will be reversed, and it will no longer count toward this month's Saved total.",
+                destructiveActionTitle: "Delete Transfer"
+            )
         }
     }
 
@@ -131,7 +137,7 @@ enum ManualTransactionDeletionService {
         // (`transferCounterpartyAccount`) may legitimately be a Connected/Plaid account instead
         // (tagged via `transferCounterpartyPlaidAccountId`, no local balance to reverse), or
         // simply unset if the user never picked a counterparty.
-        case .transferWithdrawal, .transferDeposit:
+        case .transferWithdrawal, .transferDeposit, .transferToSavings:
             return transaction.account != nil
         }
     }
@@ -184,11 +190,13 @@ enum ManualTransactionDeletionService {
             if let account = transaction.account {
                 AccountBalanceManager.applyExpense(amount: transaction.amount, to: account)
             }
-        case .transferWithdrawal:
+        case .transferWithdrawal, .transferToSavings:
             // Undo money leaving `account`: give it back. Only reverse the counterparty's balance
             // if it's a Manual Account we actually own locally — a Connected/Plaid counterparty
             // (see `transferCounterpartyPlaidAccountId`) is a reference tag only, never a local
-            // balance to mutate.
+            // balance to mutate. `.transferToSavings` reverses identically to `.transferWithdrawal`
+            // — its only difference from a plain Transfer WD is Saved-tracking eligibility, which
+            // stops applying the instant this row is deleted, same as any other deleted entry.
             if let account = transaction.account {
                 AccountBalanceManager.applyRefund(amount: transaction.amount, to: account)
             }

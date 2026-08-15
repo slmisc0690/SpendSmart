@@ -141,6 +141,7 @@ final class UserDataStoreManager {
             PendingCloudDeletion.self,
             SavingsEntry.self,
             FavoritesSettings.self,
+            QuickStatsSettings.self,
         ])
     }
 

@@ -20,37 +20,43 @@ enum ConnectedAccountsDashboardPresenter {
         /// need to know).
         let accountId: String?
         let institutionName: String
-        /// The single most relevant labeled amount for this account (e.g. "Balance Owed" for a
-        /// credit card, "Current Balance" for checking) — `nil` when this connection has no
-        /// cached balance yet for any account. Always the raw cached
-        /// `CachedPlaidAccountBalance.currentBalance`, unmodified — Plaid's own `current` balance
-        /// for a credit account is already the value the institution itself displays; no pending
-        /// or posted transaction arithmetic is ever applied here (a prior attempt to derive a
-        /// "posted-only" balance by subtracting pending charges was confirmed by live device data
-        /// to double-count already-included pending authorizations and was removed).
-        let primaryRow: PlaidBalanceFormatter.DisplayRow?
+        /// Every labeled amount `PlaidBalanceFormatter` produces for this account (e.g. "Balance
+        /// Owed" + "Available Credit" + "Credit Limit" for a credit card, "Available Balance" +
+        /// "Current Balance" for checking) — empty when this connection has no cached balance yet
+        /// for any account. Values are always the raw cached `CachedPlaidAccountBalance` fields,
+        /// unmodified — Plaid's own `current`/`available` for an account are already what the
+        /// institution itself displays; no pending or posted transaction arithmetic is ever
+        /// applied here (a prior attempt to derive a "posted-only" balance by subtracting pending
+        /// charges was confirmed by live device data to double-count already-included pending
+        /// authorizations and was removed). Full parity with what Settings ▸ Connected Accounts
+        /// already shows, per Scott's explicit request that the Dashboard match it.
+        let rows: [PlaidBalanceFormatter.DisplayRow]
         let updatedAt: Date?
+
+        /// Convenience for call sites that only ever cared about the single most relevant row
+        /// (kept so existing "is there a balance at all" checks don't need `rows.first` everywhere).
+        var primaryRow: PlaidBalanceFormatter.DisplayRow? { rows.first }
 
         init(
             id: String,
             connectionId: String,
             accountId: String?,
             institutionName: String,
-            primaryRow: PlaidBalanceFormatter.DisplayRow?,
+            rows: [PlaidBalanceFormatter.DisplayRow],
             updatedAt: Date?
         ) {
             self.id = id
             self.connectionId = connectionId
             self.accountId = accountId
             self.institutionName = institutionName
-            self.primaryRow = primaryRow
+            self.rows = rows
             self.updatedAt = updatedAt
         }
     }
 
     /// Flattens every connection's cached balances into one row per known account — a connection
     /// with nothing cached yet (e.g. connected but never Manually Refreshed) still contributes one
-    /// row, with `primaryRow`/`updatedAt` both `nil`, so it shows an honest
+    /// row, with `rows` empty and `updatedAt` `nil`, so it shows an honest
     /// "Balance not refreshed yet" instead of silently disappearing from the Dashboard. Accounts
     /// within a connection are sorted by `accountId` purely for stable, deterministic ordering.
     static func displays(for connections: [PlaidConnection]) -> [Display] {
@@ -62,7 +68,7 @@ enum ConnectedAccountsDashboardPresenter {
                         connectionId: connection.id,
                         accountId: nil,
                         institutionName: connection.institutionName,
-                        primaryRow: nil,
+                        rows: [],
                         updatedAt: nil
                     )
                 ]
@@ -90,9 +96,9 @@ enum ConnectedAccountsDashboardPresenter {
                         institutionName: connection.institutionName,
                         // Reuses PlaidBalanceFormatter — the single existing authoritative place
                         // that already knows a credit account's positive balance means "Balance
-                        // Owed," never "Current Balance." Only the first (most relevant) row is
-                        // shown here, matching the Dashboard's glance-only presentation.
-                        primaryRow: PlaidBalanceFormatter.rows(for: asPlaidAccountBalance).first,
+                        // Owed," never "Current Balance." Every row it produces is shown, matching
+                        // Settings ▸ Connected Accounts' full presentation.
+                        rows: PlaidBalanceFormatter.rows(for: asPlaidAccountBalance),
                         updatedAt: balance.updatedAt
                     )
                 }

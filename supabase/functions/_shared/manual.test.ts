@@ -52,7 +52,12 @@ Deno.test("isValidAccountType: rejects an unknown or wrongly-cased value", () =>
 });
 
 Deno.test("isValidTransactionType: accepts every TransactionType raw value", () => {
-  for (const value of ["expense", "income", "transfer", "creditCardPayment", "refund", "balanceAdjustment"]) {
+  for (
+    const value of [
+      "expense", "income", "transfer", "creditCardPayment", "refund", "balanceAdjustment",
+      "transferWithdrawal", "transferDeposit", "transferToSavings",
+    ]
+  ) {
     assert(isValidTransactionType(value), `${value} should be valid`);
   }
 });

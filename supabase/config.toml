@@ -550,3 +550,11 @@ verify_jwt = false
 # upsert-dashboard-summary/index.ts's own header for scope).
 [functions.upsert-dashboard-summary]
 verify_jwt = false
+
+# SAVED VIA TRANSFER SHARING — see get-saved-via-transfer-summary/index.ts's own header for scope.
+[functions.get-saved-via-transfer-summary]
+verify_jwt = false
+
+# SAVED VIA TRANSFER SHARING — see upsert-saved-via-transfer-summary/index.ts's own header for scope.
+[functions.upsert-saved-via-transfer-summary]
+verify_jwt = false

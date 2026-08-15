@@ -147,6 +147,11 @@ final class ManualDataCloudSyncManager {
                 deleted_transaction_ids: deletedTransactionIds
             )
             let result = try await backend.syncManualData(request)
+            #if DEBUG
+            if !result.rejectedTransactions.isEmpty {
+                print("[ManualDataSync] server rejected \(result.rejectedTransactions.count) transaction(s): \(result.rejectedTransactions)")
+            }
+            #endif
 
             // Clear ONLY the tombstones the server explicitly confirmed deleted — never
             // speculatively, so a partial-failure response (some ids rejected/not reached) leaves

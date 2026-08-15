@@ -138,6 +138,7 @@ Deno.serve(async (req) => {
         manual_accounts: [],
         monthly_plan_shared: false,
         monthly_savings_shared: false, // PHASE A
+        saved_via_transfer_shared: false, // SAVED VIA TRANSFER SHARING
       };
 
       logPlaidOperation({
@@ -163,6 +164,10 @@ Deno.serve(async (req) => {
         // PHASE A — independent of primary_monthly_plan_shared above; see
         // get_secondary_shared_data's own header for why these are never derived from each other.
         primary_monthly_savings_shared: sharedData.monthly_savings_shared ?? false,
+        // SAVED VIA TRANSFER SHARING — independent of primary_monthly_plan_shared and
+        // primary_monthly_savings_shared above; see get_secondary_shared_data's own header for why
+        // these are never derived from each other.
+        primary_saved_via_transfer_shared: sharedData.saved_via_transfer_shared ?? false,
       });
     }
 

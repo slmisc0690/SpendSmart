@@ -16,7 +16,7 @@ struct ConnectedTransactionRow: View {
         switch transaction.type {
         case .expense: return "-"
         case .refund, .income: return "+"
-        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit: return ""
+        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings: return ""
         }
     }
 
@@ -24,7 +24,7 @@ struct ConnectedTransactionRow: View {
         switch transaction.type {
         case .expense: return Theme.textPrimary
         case .refund, .income: return Theme.statusGood
-        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit: return Theme.textTertiary
+        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings: return Theme.textTertiary
         }
     }
 

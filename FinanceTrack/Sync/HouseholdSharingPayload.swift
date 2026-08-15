@@ -206,6 +206,11 @@ struct AccountRelatedOptionsResponse: Decodable, Equatable {
     /// entirely independently of `primaryMonthlyPlanShared` server-side (see
     /// `get_secondary_shared_data`'s own header) — never derived from it here either.
     let primaryMonthlySavingsShared: Bool
+    /// SAVED VIA TRANSFER SHARING — whether the Primary's Saved-via-Transfer aggregate
+    /// (`savedViaTransfer` category, migration 0023) is currently, effectively shared with this
+    /// Secondary. Evaluated entirely independently of `primaryMonthlyPlanShared` and
+    /// `primaryMonthlySavingsShared` server-side — never derived from either here either.
+    let primarySavedViaTransferShared: Bool
 
     enum CodingKeys: String, CodingKey {
         case householdId = "household_id"
@@ -221,6 +226,7 @@ struct AccountRelatedOptionsResponse: Decodable, Equatable {
         case primarySharedManualAccounts = "primary_shared_manual_accounts"
         case primaryMonthlyPlanShared = "primary_monthly_plan_shared"
         case primaryMonthlySavingsShared = "primary_monthly_savings_shared"
+        case primarySavedViaTransferShared = "primary_saved_via_transfer_shared"
     }
 
     init(from decoder: Decoder) throws {
@@ -238,6 +244,7 @@ struct AccountRelatedOptionsResponse: Decodable, Equatable {
         primarySharedManualAccounts = try container.decodeIfPresent([SharedManualAccountDTO].self, forKey: .primarySharedManualAccounts) ?? []
         primaryMonthlyPlanShared = try container.decodeIfPresent(Bool.self, forKey: .primaryMonthlyPlanShared) ?? false
         primaryMonthlySavingsShared = try container.decodeIfPresent(Bool.self, forKey: .primaryMonthlySavingsShared) ?? false
+        primarySavedViaTransferShared = try container.decodeIfPresent(Bool.self, forKey: .primarySavedViaTransferShared) ?? false
     }
 
     /// Memberwise initializer — the custom `init(from:)` above (required for the safe-default
@@ -256,7 +263,8 @@ struct AccountRelatedOptionsResponse: Decodable, Equatable {
         primarySharedConnectedAccounts: [SharedConnectedAccountDTO] = [],
         primarySharedManualAccounts: [SharedManualAccountDTO] = [],
         primaryMonthlyPlanShared: Bool = false,
-        primaryMonthlySavingsShared: Bool = false
+        primaryMonthlySavingsShared: Bool = false,
+        primarySavedViaTransferShared: Bool = false
     ) {
         self.householdId = householdId
         self.role = role
@@ -271,6 +279,7 @@ struct AccountRelatedOptionsResponse: Decodable, Equatable {
         self.primarySharedManualAccounts = primarySharedManualAccounts
         self.primaryMonthlyPlanShared = primaryMonthlyPlanShared
         self.primaryMonthlySavingsShared = primaryMonthlySavingsShared
+        self.primarySavedViaTransferShared = primarySavedViaTransferShared
     }
 }
 
@@ -1004,6 +1013,67 @@ struct SharedMonthlySavingsSummaryDTO: Decodable, Equatable {
 /// `SharedMonthlyPlanResponse`'s own established anti-enumeration convention.
 struct SharedMonthlySavingsSummaryResponse: Decodable, Equatable {
     let summary: SharedMonthlySavingsSummaryDTO?
+}
+
+// MARK: - SAVED VIA TRANSFER SHARING (migration 0023 / upsert-saved-via-transfer-summary /
+// get-saved-via-transfer-summary)
+//
+// Deliberately mirrors the Monthly Savings sharing types immediately above byte-for-byte in
+// shape/convention — an independent sharing category, never coupled to `monthlySavings` or
+// `monthlyPlan`. Carries ONLY the one authorized aggregate total this feature's own locked design
+// authorizes (`savedViaTransferThisMonth`) — never individual `.transferToSavings` transaction
+// rows, never which account(s) were involved.
+
+/// `upsert-saved-via-transfer-summary` request — the Primary's own aggregate total, computed
+/// locally via `SavedViaTransferCalculator` from this device's own `.transferToSavings`
+/// transactions. Money-as-string, matching this project's universal wire convention.
+struct UpsertSavedViaTransferSummaryRequest: Encodable {
+    let savedViaTransferThisMonth: String
+
+    enum CodingKeys: String, CodingKey {
+        case savedViaTransferThisMonth = "saved_via_transfer_this_month"
+    }
+
+    init(savedViaTransferThisMonth: Decimal) {
+        self.savedViaTransferThisMonth = "\(savedViaTransferThisMonth)"
+    }
+}
+
+struct UpsertSavedViaTransferSummaryResponse: Decodable, Equatable {
+    let ok: Bool
+}
+
+/// `get-saved-via-transfer-summary`'s `summary` object.
+struct SharedSavedViaTransferSummaryDTO: Decodable, Equatable {
+    let savedViaTransferThisMonth: Decimal
+    let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case savedViaTransferThisMonth = "saved_via_transfer_this_month"
+        case updatedAt = "updated_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let savedString = try container.decode(String.self, forKey: .savedViaTransferThisMonth)
+        guard let saved = Decimal(string: savedString) else {
+            throw DecodingError.dataCorruptedError(forKey: .savedViaTransferThisMonth, in: container, debugDescription: "\"\(savedString)\" is not a valid decimal amount")
+        }
+        savedViaTransferThisMonth = saved
+        updatedAt = try SharedTimestampDecoding.decode(container, forKey: .updatedAt)
+    }
+
+    /// Memberwise initializer for tests — see `AccountRelatedOptionsResponse`'s own identical note.
+    init(savedViaTransferThisMonth: Decimal, updatedAt: Date) {
+        self.savedViaTransferThisMonth = savedViaTransferThisMonth
+        self.updatedAt = updatedAt
+    }
+}
+
+/// `summary: null` covers both "not shared" and "no summary exists yet" uniformly, matching
+/// `SharedMonthlySavingsSummaryResponse`'s own established anti-enumeration convention.
+struct SharedSavedViaTransferSummaryResponse: Decodable, Equatable {
+    let summary: SharedSavedViaTransferSummaryDTO?
 }
 
 // MARK: - USER B DASHBOARD PARITY: authoritative shared Dashboard aggregates (migration 0019 /

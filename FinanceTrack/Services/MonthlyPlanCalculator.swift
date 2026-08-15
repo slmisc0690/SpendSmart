@@ -135,7 +135,7 @@ enum MonthlyPlanCalculator {
             switch transaction.type {
             case .expense: actualPaidByBillID[bill.id, default: 0] += transaction.amount
             case .refund: actualPaidByBillID[bill.id, default: 0] -= transaction.amount
-            case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit:
+            case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings:
                 continue
             }
         }

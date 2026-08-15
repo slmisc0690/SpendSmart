@@ -33,8 +33,11 @@ enum PlaidBalanceFormatter {
         let amount: Decimal
     }
 
-    /// - Depository (checking/savings): "Current Balance" + "Available Balance" — both represent
-    ///   funds the account holder has, so the plain, familiar labels are accurate.
+    /// - Depository (checking/savings): "Available Balance" first, then "Current Balance" — both
+    ///   represent funds the account holder has, but `.first` (the "primary" row shown in compact
+    ///   UI like the Dashboard) should be Available, since that's what's actually free to spend
+    ///   (Current can include holds/pending debits Available already excludes). Falls back to
+    ///   Current Balance alone if a bank doesn't report `available`.
     /// - Credit (a card like American Express): "Balance Owed" (never "Current Balance" — the
     ///   whole point of this formatter existing is that showing a credit card's `current` under
     ///   checking-account wording is materially misleading) + "Available Credit" (Plaid's own
@@ -49,8 +52,8 @@ enum PlaidBalanceFormatter {
         switch PlaidAccountKind.classify(type: balance.type) {
         case .depository:
             return [
-                balance.currentBalance.map { DisplayRow(label: "Current Balance", amount: $0) },
                 balance.availableBalance.map { DisplayRow(label: "Available Balance", amount: $0) },
+                balance.currentBalance.map { DisplayRow(label: "Current Balance", amount: $0) },
             ].compactMap { $0 }
 
         case .credit:

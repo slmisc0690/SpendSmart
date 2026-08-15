@@ -27,7 +27,7 @@ struct TransactionAmountEditView: View {
         // Transfer WD/Dep move money between TWO accounts (this one and its counterparty), same
         // reason `.transfer`/`.creditCardPayment` are already out of scope for this single-account
         // editor — see this view's own header.
-        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit:
+        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings:
             return false
         }
     }
@@ -100,7 +100,7 @@ struct TransactionAmountEditView: View {
         case .expense: AccountBalanceManager.applyExpense(amount: amount, to: account)
         case .refund: AccountBalanceManager.applyRefund(amount: amount, to: account)
         case .income: AccountBalanceManager.applyIncome(amount: amount, to: account)
-        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit: break
+        case .transfer, .creditCardPayment, .balanceAdjustment, .transferWithdrawal, .transferDeposit, .transferToSavings: break
         }
     }
 }

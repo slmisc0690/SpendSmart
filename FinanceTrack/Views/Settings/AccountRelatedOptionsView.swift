@@ -104,6 +104,7 @@ struct AccountRelatedOptionsView: View {
                 ManualAccountSharingSectionView(viewModel: viewModel)
                 MonthlyPlanSharingSectionView(viewModel: viewModel)
                 MonthlySavingsSharingSectionView(viewModel: viewModel)
+                SavedViaTransferSharingSectionView(viewModel: viewModel)
             }
             .padding(.vertical, Theme.Spacing.lg)
         }
@@ -493,6 +494,49 @@ private struct MonthlySavingsSharingSectionView: View {
                     Task {
                         await viewModel.setGlobalSharing(category: Self.category, isShared: newValue) {
                             await SavingsSummarySyncService.sync(entries: savingsEntries)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+}
+
+// MARK: - 4c. Saved via Transfer Sharing (global-only, no per-item UI — SAVED VIA TRANSFER SHARING)
+
+/// `savedViaTransfer` is a NEW, INDEPENDENT sharing category (migration 0023) — explicitly NOT
+/// coupled to `monthlyPlan`/`monthlySavings` above; toggling one never affects the others, both
+/// client-side (see `AccountRelatedOptionsViewModel.setGlobalSharing`'s explicit
+/// `"savedViaTransfer"` case) and server-side (`set_sharing_permission`'s own independent
+/// allowlist entry). When ON, an authorized Secondary may see exactly one aggregate total — Saved
+/// via Transfer This Month — never individual Manual Account register transactions (see
+/// `get_shared_saved_via_transfer_summary`'s own header).
+private struct SavedViaTransferSharingSectionView: View {
+    let viewModel: AccountRelatedOptionsViewModel
+
+    /// Mirrors `MonthlySavingsSharingSectionView`'s own "reconcile on enable" fix — turning this
+    /// toggle ON must itself push the Primary's CURRENT aggregate, not wait for the next unrelated
+    /// Dashboard lifecycle trigger.
+    @Query private var transactions: [FinanceTransaction]
+
+    private static let category = "savedViaTransfer"
+
+    var body: some View {
+        let globalShared = viewModel.isShared(category: Self.category, itemId: nil)
+
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Saved via Transfer Sharing")
+
+            CardBackground {
+                SharingGlobalToggleRow(
+                    title: "Share Saved (Transfers)",
+                    isShared: globalShared,
+                    isDisabled: viewModel.activeMutation == .savedViaTransfer
+                ) { newValue in
+                    Task {
+                        await viewModel.setGlobalSharing(category: Self.category, isShared: newValue) {
+                            await SavedViaTransferSummarySyncService.sync(transactions: transactions)
                         }
                     }
                 }

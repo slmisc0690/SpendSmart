@@ -19,6 +19,11 @@ export function isValidAccountType(value: unknown): value is string {
 }
 
 /// Mirrors the local `TransactionType` enum's raw values exactly (TransactionType.swift).
+/// TRANSFER TRACKING — `transferWithdrawal`/`transferDeposit`/`transferToSavings` were added to
+/// the Swift enum without this allowlist (and migration 0011's matching CHECK constraint) being
+/// updated at the same time — every such transaction was silently rejected by
+/// `planManualTransactionSync` and never reached `manual_transactions`. Fixed here alongside
+/// migration 0022, which widens the CHECK constraint to match.
 const VALID_TRANSACTION_TYPES: ReadonlySet<string> = new Set([
   "expense",
   "income",
@@ -26,6 +31,9 @@ const VALID_TRANSACTION_TYPES: ReadonlySet<string> = new Set([
   "creditCardPayment",
   "refund",
   "balanceAdjustment",
+  "transferWithdrawal",
+  "transferDeposit",
+  "transferToSavings",
 ]);
 
 export function isValidTransactionType(value: unknown): value is string {

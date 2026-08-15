@@ -244,7 +244,7 @@ struct ExpenseListView: View {
     /// was spent," so it must never be floored at zero or sign-flipped the way those are.
     private func signedActivityAmount(for transaction: FinanceTransaction) -> Decimal {
         switch transaction.type {
-        case .expense, .transferWithdrawal: return -transaction.amount
+        case .expense, .transferWithdrawal, .transferToSavings: return -transaction.amount
         case .refund, .income, .transferDeposit: return transaction.amount
         case .transfer, .creditCardPayment, .balanceAdjustment: return transaction.amount
         }

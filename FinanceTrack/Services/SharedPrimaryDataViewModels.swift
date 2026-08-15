@@ -355,6 +355,58 @@ final class SharedMonthlySavingsViewModel {
     }
 }
 
+/// SAVED VIA TRANSFER SHARING — the shared Saved-via-Transfer aggregate reader, mirroring
+/// `SharedMonthlySavingsViewModel` exactly (same anti-enumeration contract, same error surface).
+@Observable
+final class SharedSavedViaTransferViewModel {
+    enum LoadState {
+        case loading
+        /// `nil` — no longer shared (or the Primary has no summary yet); indistinguishable by
+        /// design, matching `get-saved-via-transfer-summary`'s own anti-enumeration contract.
+        case loaded(SharedSavedViaTransferSummaryDTO?)
+        case failed(String)
+    }
+
+    let primaryUserId: UUID
+    private(set) var state: LoadState = .loading
+
+    private let backend: HouseholdSharingService
+
+    init(primaryUserId: UUID, backend: HouseholdSharingService = SupabaseHouseholdSharingService()) {
+        self.primaryUserId = primaryUserId
+        self.backend = backend
+    }
+
+    @MainActor
+    func load() async {
+        state = .loading
+        do {
+            let response = try await backend.getSavedViaTransferSummary(ownerUserId: primaryUserId)
+            state = .loaded(response.summary)
+            #if DEBUG
+            print("[SharedSavedViaTransferViewModel] load succeeded — summary: \(response.summary != nil ? "present" : "null")")
+            #endif
+        } catch {
+            state = .failed(Self.describe(error))
+            #if DEBUG
+            print("[SharedSavedViaTransferViewModel] load failed — \(Self.describe(error))")
+            #endif
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        if let error = error as? HouseholdSharingError {
+            switch error {
+            case .notConfigured: return "Shared data is not available right now."
+            case .unauthorized: return "You need to sign in again to view shared data."
+            case .invalidResponse: return "Unexpected response from the server."
+            case .server(_, let message): return message
+            }
+        }
+        return error.localizedDescription
+    }
+}
+
 /// USER B DASHBOARD PARITY — the authoritative shared Dashboard aggregate reader. Reads the exact
 /// numbers the Primary's own device already computed and pushed via
 /// `PrimaryDashboardSummarySyncService` (already privacy-filtered to only explicitly-shared

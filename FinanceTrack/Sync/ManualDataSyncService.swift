@@ -8,12 +8,51 @@ struct ManualDataSyncResult: Decodable, Equatable {
     let syncedTransactionIds: [String]
     let deletedAccountIds: [String]
     let deletedTransactionIds: [String]
+    /// SYNC VISIBILITY FIX — the server has always included this field (`sync-manual-data/index.ts`
+    /// returns `rejected_transactions: transactionPlan.rejected` on every call), but nothing on the
+    /// client ever decoded it — a rejected row (e.g. an unrecognized `transaction_type`, which is
+    /// exactly the real-world bug migration 0022 fixes) failed completely silently, with the
+    /// server's own logs the only place it was visible. Decoded leniently: a response missing this
+    /// field entirely, or containing an entry this client can't parse, degrades to an empty array
+    /// rather than failing the whole decode — this field exists purely for surfacing/debugging,
+    /// never for correctness-critical logic (tombstone-clearing above only ever reads the
+    /// synced/deleted arrays).
+    let rejectedTransactions: [RejectedManualSyncItem]
+
+    struct RejectedManualSyncItem: Decodable, Equatable {
+        let id: String?
+        let error: String
+    }
 
     enum CodingKeys: String, CodingKey {
         case syncedAccountIds = "synced_account_ids"
         case syncedTransactionIds = "synced_transaction_ids"
         case deletedAccountIds = "deleted_account_ids"
         case deletedTransactionIds = "deleted_transaction_ids"
+        case rejectedTransactions = "rejected_transactions"
+    }
+
+    init(
+        syncedAccountIds: [String],
+        syncedTransactionIds: [String],
+        deletedAccountIds: [String],
+        deletedTransactionIds: [String],
+        rejectedTransactions: [RejectedManualSyncItem] = []
+    ) {
+        self.syncedAccountIds = syncedAccountIds
+        self.syncedTransactionIds = syncedTransactionIds
+        self.deletedAccountIds = deletedAccountIds
+        self.deletedTransactionIds = deletedTransactionIds
+        self.rejectedTransactions = rejectedTransactions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        syncedAccountIds = try container.decode([String].self, forKey: .syncedAccountIds)
+        syncedTransactionIds = try container.decode([String].self, forKey: .syncedTransactionIds)
+        deletedAccountIds = try container.decode([String].self, forKey: .deletedAccountIds)
+        deletedTransactionIds = try container.decode([String].self, forKey: .deletedTransactionIds)
+        rejectedTransactions = (try? container.decodeIfPresent([RejectedManualSyncItem].self, forKey: .rejectedTransactions)) ?? []
     }
 }
 

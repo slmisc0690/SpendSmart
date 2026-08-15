@@ -75,6 +75,10 @@ final class AccountRelatedOptionsViewModel {
         /// CLIENT UI PHASE — `monthlySavings` is an independent global-only category, never
         /// sharing this case with `.monthlyPlan` (see `setGlobalSharing`'s own explicit mapping).
         case monthlySavings
+        /// SAVED VIA TRANSFER SHARING — `savedViaTransfer` is an independent global-only category
+        /// (migration 0023), never sharing this case with `.monthlyPlan`/`.monthlySavings` (see
+        /// `setGlobalSharing`'s own explicit mapping).
+        case savedViaTransfer
         case sendInvitation
         case resendInvitation
         case revokeInvitation
@@ -276,6 +280,7 @@ final class AccountRelatedOptionsViewModel {
         case "connectedAccounts": .connectedGlobal
         case "manualAccounts": .manualGlobal
         case "monthlySavings": .monthlySavings
+        case "savedViaTransfer": .savedViaTransfer
         default: .monthlyPlan
         }
         await setSharing(mutation: mutation, category: category, itemId: nil, isShared: isShared)

@@ -83,6 +83,7 @@ struct SettingsView: View {
     @State private var isPresentingAccount = false
     @State private var isPresentingAccountRelatedOptions = false
     @State private var isPresentingFavorites = false
+    @State private var isPresentingQuickStats = false
     /// LOCAL DATA RESTORE — drives the "Restore from Cloud" row's inline status. `nil` = idle
     /// (default state, including after a successful restore's brief confirmation fades away via
     /// user navigation — this is never auto-dismissed on a timer, only replaced by the next action).
@@ -253,6 +254,9 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $isPresentingFavorites) {
                 FavoritesConfigurationView()
+            }
+            .sheet(isPresented: $isPresentingQuickStats) {
+                QuickStatsConfigurationView()
             }
             .sheet(isPresented: $isPresentingCSVImportPreview) {
                 if let csvImportPreview {
@@ -645,63 +649,41 @@ struct SettingsView: View {
                 title: "Quick Stats",
                 infoTitle: "About Quick Stats",
                 infoExplanation: """
-                    Two switches controlling which small stat tiles appear on your Dashboard's \
-                    Quick Stats grid.
+                    Which small stat tiles appear on your Dashboard's Quick Stats grid — Planned \
+                    Weekly Spending, Spent This Week, Planned Monthly Spending, Projected Available \
+                    After Spend, Saved This Month, and Saved.
 
-                    SHOW MONTHLY SPENDING — turns the "Planned Monthly Spending" tile on the \
-                    Dashboard on or off.
+                    Tap "Quick Stats" below to check or uncheck any of them — the same picker also \
+                    reachable from the small "+" next to "Quick Stats" on your Dashboard. Nothing is \
+                    deleted when you hide one; it just tidies up the grid to show only the numbers \
+                    you actually check.
 
-                    SHOW SAVED THIS MONTH — turns the "Saved This Month" tile on or off (this \
-                    switch is only shown to a Primary — if you're a Secondary viewing someone else's \
-                    shared finances, whether you see their savings figure is controlled entirely by \
-                    what they've chosen to share with you, not by a setting here).
-
-                    Turning a tile off doesn't delete anything — it just tidies up the Dashboard to \
-                    show only the numbers you actually check.
-
-                    Example: if you never look at "Saved This Month," turning it off here removes \
-                    it from the grid, leaving more room for the stats you actually use.
+                    Example: if you never look at "Saved This Month," open this picker and uncheck \
+                    it — it disappears from the grid, leaving more room for the stats you actually \
+                    use.
                     """
             )
 
             CardBackground {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    TransactionToggleRow(
-                        title: "Show Monthly Spending",
-                        subtitle: "Show the Monthly Spending Quick Stat on the Dashboard",
-                        isOn: Binding(
-                            get: { showMonthlySpendingQuickStat },
-                            set: { newValue in
-                                showMonthlySpendingQuickStat = newValue
-                                settings.showMonthlySpendingQuickStat = newValue
-                                settings.updatedAt = .now
-                            }
-                        )
-                    )
-
-                    // LOCKED PRODUCT RULE — a Secondary never gets this toggle: their shared
-                    // savings Quick Stat visibility is controlled exclusively by the Primary's own
-                    // "Share Monthly Savings" permission (Account Related Options), not by a local
-                    // per-device preference. Role comes from `accountRelatedOptionsViewModel`
-                    // (server-sourced), never from `BudgetSettings` — this does not touch the
-                    // primitive-snapshot rule above.
-                    if accountRelatedOptionsViewModel.response?.role != .secondary {
-                        Divider().overlay(Theme.cardStroke)
-
-                        TransactionToggleRow(
-                            title: "Show Saved This Month",
-                            subtitle: "Show the Saved This Month Quick Stat on the Dashboard",
-                            isOn: Binding(
-                                get: { showSavedThisMonthQuickStat },
-                                set: { newValue in
-                                    showSavedThisMonthQuickStat = newValue
-                                    settings.showSavedThisMonthQuickStat = newValue
-                                    settings.updatedAt = .now
-                                }
-                            )
-                        )
+                Button {
+                    isPresentingQuickStats = true
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Quick Stats")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("Choose which stats appear on the Dashboard")
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
                     }
                 }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }

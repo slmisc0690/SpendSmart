@@ -24,6 +24,14 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
     /// moving INTO this account from another account (manual or connected). Also respects the
     /// per-entry Weekly/Monthly toggles, same as `.transferWithdrawal`.
     case transferDeposit
+    /// SAVED-TRACKING — money moving OUT of this account into a Savings-type Manual Account,
+    /// per Scott's explicit request for a dedicated, trackable "Transfer To Savings" type distinct
+    /// from a plain `.transferWithdrawal`. Unlike every other transfer case, this one does NOT
+    /// respect the per-entry Weekly/Monthly toggles — `BudgetCalculator.countsToward` forces both
+    /// to `false` structurally, so a save can never accidentally affect Monthly Remaining or
+    /// Projected Available. Feeds the Dashboard's "Saved" Quick Stat (`SavedViaTransferCalculator`)
+    /// instead.
+    case transferToSavings
 
     var id: String { rawValue }
 
@@ -37,6 +45,7 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
         case .balanceAdjustment: return "Balance Adjustment"
         case .transferWithdrawal: return "Transfer WD"
         case .transferDeposit: return "Transfer Dep"
+        case .transferToSavings: return "Transfer To Savings"
         }
     }
 
@@ -45,7 +54,7 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .expense: return true
         case .income, .transfer, .creditCardPayment, .refund, .balanceAdjustment,
-             .transferWithdrawal, .transferDeposit:
+             .transferWithdrawal, .transferDeposit, .transferToSavings:
             return false
         }
     }

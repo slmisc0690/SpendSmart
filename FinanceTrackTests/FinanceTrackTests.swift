@@ -11624,7 +11624,54 @@ final class FinanceTrackTests: XCTestCase {
         let connection = PlaidConnection(id: "conn-1", institutionId: "ins_1", institutionName: "Totally Different Bank", cachedBalances: ["acc-1": cachedBalance])
         let displays = ConnectedAccountsDashboardPresenter.displays(for: [connection])
         XCTAssertEqual(displays.first?.institutionName, "Totally Different Bank")
-        XCTAssertEqual(displays.first?.primaryRow?.label, "Current Balance")
+        XCTAssertEqual(displays.first?.primaryRow?.label, "Available Balance")
+    }
+
+    /// Scott: "can we have it so it shows both Available Balance and Current Balance? Under the
+    /// Connected Accounts on the dashboard? like it shows in the Connected Accounts under
+    /// settings?" — the Dashboard's `Display` must carry every row `PlaidBalanceFormatter`
+    /// produces, not just the first, for full parity with Settings ▸ Connected Accounts.
+    func testConnectedAccountsDashboardPresenterExposesBothAvailableAndCurrentBalanceForDepository() {
+        let cachedBalance = CachedPlaidAccountBalance(
+            accountId: "acc-1", name: "Checking", mask: "0001", type: "depository", subtype: "checking",
+            currentBalance: 1200, availableBalance: 1150, creditLimit: nil,
+            isoCurrencyCode: "USD", unofficialCurrencyCode: nil, updatedAt: Date()
+        )
+        let connection = PlaidConnection(id: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo", cachedBalances: ["acc-1": cachedBalance])
+        let displays = ConnectedAccountsDashboardPresenter.displays(for: [connection])
+        XCTAssertEqual(displays.first?.rows, [
+            .init(label: "Available Balance", amount: 1150),
+            .init(label: "Current Balance", amount: 1200),
+        ])
+    }
+
+    /// Same parity requirement, credit-card side — the Dashboard must show all three rows
+    /// (Balance Owed, Available Credit, Credit Limit), same as Settings.
+    func testConnectedAccountsDashboardPresenterExposesAllRowsForCredit() {
+        let cachedBalance = CachedPlaidAccountBalance(
+            accountId: "acc-amex", name: nil, mask: "1001", type: "credit", subtype: "credit card",
+            currentBalance: 641.68, availableBalance: 9358.32, creditLimit: 10000,
+            isoCurrencyCode: "USD", unofficialCurrencyCode: nil, updatedAt: Date()
+        )
+        let connection = PlaidConnection(id: "conn-amex", institutionId: "ins_amex", institutionName: "American Express", cachedBalances: ["acc-amex": cachedBalance])
+        let displays = ConnectedAccountsDashboardPresenter.displays(for: [connection])
+        XCTAssertEqual(displays.first?.rows, [
+            .init(label: "Balance Owed", amount: 641.68),
+            .init(label: "Available Credit", amount: 9358.32),
+            .init(label: "Credit Limit", amount: 10000),
+        ])
+    }
+
+    /// The Dashboard's `ConnectedAccountBalanceRow` must render every row, not just the first —
+    /// the actual UI-level parity requirement, not just the presenter's data shape.
+    func testDashboardConnectedAccountBalanceRowRendersEveryRowNotJustPrimary() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private struct ConnectedAccountBalanceRow") else {
+            XCTFail("ConnectedAccountBalanceRow not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(1600))
+        XCTAssertTrue(section.contains("ForEach(Array(display.rows.enumerated())"), "must iterate every row, matching Settings ▸ Connected Accounts' full presentation")
+        XCTAssertFalse(section.contains("display.primaryRow"), "must no longer read only the single primaryRow")
     }
 
     func testConnectedAccountsDashboardPresenterHandlesMultipleAccountsAndInstitutions() {
@@ -13027,13 +13074,23 @@ final class FinanceTrackTests: XCTestCase {
         )
     }
 
-    func testPlaidBalanceFormatterDepositoryShowsCurrentAndAvailable() {
+    /// Available Balance must come first (it's what `.first`/"primaryRow" surfaces in compact UI
+    /// like the Dashboard) — it's what's actually free to spend, per Scott's explicit request.
+    func testPlaidBalanceFormatterDepositoryShowsAvailableBeforeCurrent() {
         let balance = makeBalance(type: "depository", subtype: "checking", current: 500, available: 480)
         let rows = PlaidBalanceFormatter.rows(for: balance)
         XCTAssertEqual(rows, [
-            .init(label: "Current Balance", amount: 500),
             .init(label: "Available Balance", amount: 480),
+            .init(label: "Current Balance", amount: 500),
         ])
+    }
+
+    /// If a bank doesn't report `available` at all, the depository case must still fall back to
+    /// showing Current Balance alone rather than an empty row list.
+    func testPlaidBalanceFormatterDepositoryFallsBackToCurrentWhenAvailableMissing() {
+        let balance = makeBalance(type: "depository", subtype: "checking", current: 500, available: nil)
+        let rows = PlaidBalanceFormatter.rows(for: balance)
+        XCTAssertEqual(rows, [.init(label: "Current Balance", amount: 500)])
     }
 
     func testPlaidBalanceFormatterCreditShowsBalanceOwedNeverCurrentBalance() {
@@ -13407,7 +13464,21 @@ final class FinanceTrackTests: XCTestCase {
         )
         let connection = PlaidConnection(id: "conn-1", institutionId: "ins_amex", institutionName: "American Express", cachedBalances: ["acc-amex": balance])
         let options = ConnectedAccountOptionPresenter.options(for: [connection])
-        XCTAssertEqual(options, [ConnectedAccountOption(id: "acc-amex", label: "American Express")])
+        XCTAssertEqual(options, [ConnectedAccountOption(id: "acc-amex", label: "American Express", subtype: nil)])
+    }
+
+    /// SAVED-TRACKING — Plaid's own `subtype` must thread through unmodified so
+    /// `AddExpenseView`'s Transfer To Savings picker can verify a Connected account is actually a
+    /// savings account.
+    func testConnectedAccountOptionPresenterCarriesSubtypeThrough() {
+        let balance = CachedPlaidAccountBalance(
+            accountId: "acc-savings", name: "Online Savings", mask: "2002", type: "depository", subtype: "savings",
+            currentBalance: 5000, availableBalance: 5000, creditLimit: nil,
+            isoCurrencyCode: "USD", unofficialCurrencyCode: nil, updatedAt: Date()
+        )
+        let connection = PlaidConnection(id: "conn-1", institutionId: "ins_chase", institutionName: "Chase", cachedBalances: ["acc-savings": balance])
+        let options = ConnectedAccountOptionPresenter.options(for: [connection])
+        XCTAssertEqual(options.first?.subtype, "savings")
     }
 
     func testConnectedAccountOptionPresenterDisambiguatesMultipleAccountsSameInstitution() {
@@ -18832,7 +18903,7 @@ final class FinanceTrackTests: XCTestCase {
         // unchanged by this task.
         let signPrefix: String
         switch deposit.type {
-        case .expense, .transferWithdrawal: signPrefix = "-"
+        case .expense, .transferWithdrawal, .transferToSavings: signPrefix = "-"
         case .refund, .income, .transferDeposit: signPrefix = "+"
         case .transfer, .creditCardPayment, .balanceAdjustment: signPrefix = ""
         }
@@ -19799,6 +19870,31 @@ final class FinanceTrackTests: XCTestCase {
             return try sharedMonthlySavingsSummaryResult.get()
         }
 
+        // MARK: SAVED VIA TRANSFER SHARING
+
+        var upsertSavedViaTransferSummaryResult: Result<UpsertSavedViaTransferSummaryResponse, Error> = .success(
+            UpsertSavedViaTransferSummaryResponse(ok: true)
+        )
+        var lastUpsertSavedViaTransferSummaryRequest: UpsertSavedViaTransferSummaryRequest?
+        var upsertSavedViaTransferSummaryCallCount = 0
+        var sharedSavedViaTransferSummaryResult: Result<SharedSavedViaTransferSummaryResponse, Error> = .success(
+            SharedSavedViaTransferSummaryResponse(summary: nil)
+        )
+        var lastSharedSavedViaTransferSummaryOwnerUserId: UUID?
+        var getSavedViaTransferSummaryCallCount = 0
+
+        func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse {
+            upsertSavedViaTransferSummaryCallCount += 1
+            lastUpsertSavedViaTransferSummaryRequest = request
+            return try upsertSavedViaTransferSummaryResult.get()
+        }
+
+        func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse {
+            getSavedViaTransferSummaryCallCount += 1
+            lastSharedSavedViaTransferSummaryOwnerUserId = ownerUserId
+            return try sharedSavedViaTransferSummaryResult.get()
+        }
+
         // MARK: USER B DASHBOARD PARITY — authoritative shared Dashboard aggregates
 
         var upsertDashboardSummaryResult: Result<UpsertDashboardSummaryResponse, Error> = .success(UpsertDashboardSummaryResponse(ok: true))
@@ -20140,7 +20236,8 @@ final class FinanceTrackTests: XCTestCase {
         primarySharedConnectedAccounts: [SharedConnectedAccountDTO] = [],
         primarySharedManualAccounts: [SharedManualAccountDTO] = [],
         primaryMonthlyPlanShared: Bool = false,
-        primaryMonthlySavingsShared: Bool = false
+        primaryMonthlySavingsShared: Bool = false,
+        primarySavedViaTransferShared: Bool = false
     ) -> AccountRelatedOptionsResponse {
         AccountRelatedOptionsResponse(
             householdId: UUID(), role: .secondary, status: .active,
@@ -20150,7 +20247,8 @@ final class FinanceTrackTests: XCTestCase {
             primarySharedConnectedAccounts: primarySharedConnectedAccounts,
             primarySharedManualAccounts: primarySharedManualAccounts,
             primaryMonthlyPlanShared: primaryMonthlyPlanShared,
-            primaryMonthlySavingsShared: primaryMonthlySavingsShared
+            primaryMonthlySavingsShared: primaryMonthlySavingsShared,
+            primarySavedViaTransferShared: primarySavedViaTransferShared
         )
     }
 
@@ -20221,6 +20319,8 @@ final class FinanceTrackTests: XCTestCase {
             func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse { throw DummyError() }
             func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse { throw DummyError() }
             func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse { throw DummyError() }
+            func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse { throw DummyError() }
+            func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse { throw DummyError() }
             func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse { throw DummyError() }
             func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse { throw DummyError() }
             func getMyManualAccounts() async throws -> MyManualAccountsResponse { throw DummyError() }
@@ -20276,6 +20376,8 @@ final class FinanceTrackTests: XCTestCase {
             func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse { throw DummyError() }
             func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse { throw DummyError() }
             func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse { throw DummyError() }
+            func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse { throw DummyError() }
+            func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse { throw DummyError() }
             func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse { throw DummyError() }
             func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse { throw DummyError() }
             func getMyManualAccounts() async throws -> MyManualAccountsResponse { throw DummyError() }
@@ -20398,6 +20500,8 @@ final class FinanceTrackTests: XCTestCase {
             func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse { throw DummyError() }
             func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse { throw DummyError() }
             func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse { throw DummyError() }
+            func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse { throw DummyError() }
+            func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse { throw DummyError() }
             func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse { throw DummyError() }
             func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse { throw DummyError() }
             func getMyManualAccounts() async throws -> MyManualAccountsResponse { throw DummyError() }
@@ -21001,6 +21105,12 @@ final class FinanceTrackTests: XCTestCase {
         }
         func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse {
             SharedMonthlySavingsSummaryResponse(summary: nil)
+        }
+        func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse {
+            UpsertSavedViaTransferSummaryResponse(ok: true)
+        }
+        func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse {
+            SharedSavedViaTransferSummaryResponse(summary: nil)
         }
         func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse {
             UpsertDashboardSummaryResponse(ok: true)
@@ -23682,6 +23792,8 @@ final class FinanceTrackTests: XCTestCase {
             func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse { throw HouseholdSharingError.unauthorized }
             func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse { throw HouseholdSharingError.unauthorized }
             func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse { throw HouseholdSharingError.unauthorized }
             func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse { throw HouseholdSharingError.unauthorized }
             func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse { throw HouseholdSharingError.unauthorized }
             func getMyManualAccounts() async throws -> MyManualAccountsResponse { throw HouseholdSharingError.unauthorized }
@@ -23756,15 +23868,19 @@ final class FinanceTrackTests: XCTestCase {
 
     // MARK: SECONDARY SETTINGS
 
-    func testSettingsViewHidesShowSavedThisMonthToggleForSecondary() throws {
+    /// QUICK STATS CUSTOMIZATION superseded the old per-toggle Settings row — Quick Stats
+    /// visibility (including Saved This Month) is now controlled entirely from the Dashboard's own
+    /// "+" picker (`QuickStatsConfigurationView`), which applies identically regardless of
+    /// Primary/Secondary role (each user's own local Quick Stats preference), so there is no
+    /// Secondary-specific gating left in Settings to test for.
+    func testSettingsViewQuickStatsSectionPointsToTheDashboardPicker() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3200))
-        XCTAssertTrue(section.contains("role != .secondary"), "Show Saved This Month must be gated away from a Secondary")
-        XCTAssertTrue(section.contains("Show Saved This Month"))
-        XCTAssertTrue(section.contains("Show Monthly Spending"), "Show Monthly Spending must remain unconditional — unrelated to this feature")
+        let section = String(source[range.lowerBound...].prefix(2000))
+        XCTAssertTrue(section.contains("\"+\""), "must point the user to the Dashboard's own \"+\" picker")
+        XCTAssertFalse(section.contains("TransactionToggleRow"), "the old per-toggle controls must be gone, superseded by the Dashboard picker")
     }
 
     func testSettingsViewNeverShowsShareMonthlySavingsToggleControl() throws {
@@ -23840,7 +23956,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3200))
+        let section = String(source[range.lowerBound...].prefix(4200))
         XCTAssertTrue(section.contains("showLocalSavedThisMonthQuickStat"))
         XCTAssertTrue(section.contains("sharedSavingsQuickStatVisible"))
         XCTAssertTrue(section.contains("SharedSavedThisMonthQuickStatCard"))
@@ -23959,6 +24075,239 @@ final class FinanceTrackTests: XCTestCase {
         let section = String(source[range.lowerBound...].prefix(1700))
         XCTAssertTrue(section.contains("case .failed(let message)"), "a genuine failure must be distinguishable from .loading/.loaded(nil)")
         XCTAssertTrue(section.contains("Text(message)"), "must surface the failure to the user, not render nothing")
+    }
+
+    // MARK: - SAVED VIA TRANSFER SHARING
+
+    func testAccountRelatedOptionsViewHasShareSavedViaTransferSection() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/AccountRelatedOptionsView.swift")
+        guard let range = source.range(of: "private var primaryContent") else {
+            XCTFail("primaryContent not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(1400))
+        XCTAssertTrue(section.contains("SavedViaTransferSharingSectionView"), "Primary must see Share Saved (Transfers) — Account Related Options is the only place it belongs")
+    }
+
+    func testShareSavedViaTransferUsesCategorySavedViaTransfer() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/AccountRelatedOptionsView.swift")
+        guard let range = source.range(of: "private struct SavedViaTransferSharingSectionView") else {
+            XCTFail("SavedViaTransferSharingSectionView not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(1400))
+        XCTAssertTrue(section.contains("\"savedViaTransfer\""))
+        XCTAssertTrue(section.contains("Share Saved (Transfers)"))
+    }
+
+    func testSecondaryContentNeverIncludesSavedViaTransferSharingSection() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/AccountRelatedOptionsView.swift")
+        guard let range = source.range(of: "private var secondaryContent") else {
+            XCTFail("secondaryContent not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertFalse(section.contains("SavedViaTransferSharingSectionView"), "a Secondary must NEVER have a Share Saved (Transfers) control")
+    }
+
+    @MainActor
+    func testShareSavedViaTransferDefaultsOff() {
+        XCTAssertFalse(accountRelatedOptionsEffectiveIsShared(permissions: [], category: "savedViaTransfer", itemId: nil))
+    }
+
+    @MainActor
+    func testSetGlobalSharingSavedViaTransferUsesDistinctMutationFromOtherCategories() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        var observedMutationDuringCall: AccountRelatedOptionsViewModel.Mutation?
+        fake.onBeforeUpdateSharingPermissionReturns = { observedMutationDuringCall = viewModel.activeMutation }
+
+        await viewModel.setGlobalSharing(category: "savedViaTransfer", isShared: true)
+
+        XCTAssertEqual(observedMutationDuringCall, .savedViaTransfer, "savedViaTransfer must use its own Mutation case, never collide with .monthlyPlan/.monthlySavings's busy-state")
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.category, "savedViaTransfer")
+        XCTAssertNil(fake.lastSharingPermissionRequest?.itemId, "savedViaTransfer is global-only")
+    }
+
+    @MainActor
+    func testChangingSavedViaTransferSharingDoesNotAlterMonthlySavingsRequest() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makePrimaryResponse())
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        await viewModel.setGlobalSharing(category: "savedViaTransfer", isShared: true)
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.category, "savedViaTransfer")
+
+        await viewModel.setGlobalSharing(category: "monthlySavings", isShared: true)
+        XCTAssertEqual(fake.lastSharingPermissionRequest?.category, "monthlySavings", "each write independently targets its own category — never a coupled/derived write")
+    }
+
+    @MainActor
+    func testAccountRelatedOptionsResponseDecodesPrimarySavedViaTransferSharedIndependently() async {
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeSecondaryResponse(
+            primaryUserId: UUID(), primaryMonthlySavingsShared: false, primarySavedViaTransferShared: true
+        ))
+        let viewModel = AccountRelatedOptionsViewModel(backend: fake)
+        await viewModel.refresh()
+
+        XCTAssertTrue(viewModel.response?.primarySavedViaTransferShared ?? false)
+        XCTAssertFalse(viewModel.response?.primaryMonthlySavingsShared ?? true, "the two categories must decode independently — one ON does not imply the other")
+    }
+
+    func testAccountRelatedOptionsResponseDecodesPrimarySavedViaTransferSharedFromJSON() throws {
+        let json = """
+        {"household_id": null, "role": null, "status": null, "primary_saved_via_transfer_shared": true}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(AccountRelatedOptionsResponse.self, from: json)
+        XCTAssertTrue(decoded.primarySavedViaTransferShared)
+    }
+
+    func testAccountRelatedOptionsResponseDefaultsPrimarySavedViaTransferSharedFalseWhenFieldMissing() throws {
+        let json = """
+        {"household_id": null, "role": null, "status": null}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(AccountRelatedOptionsResponse.self, from: json)
+        XCTAssertFalse(decoded.primarySavedViaTransferShared, "an older/unrelated response missing this field entirely must default OFF, never crash the decode")
+    }
+
+    func testUpsertSavedViaTransferSummaryRequestEncodesOnlyTheOneAggregateField() throws {
+        let request = UpsertSavedViaTransferSummaryRequest(savedViaTransferThisMonth: 125.50)
+        let data = try JSONEncoder().encode(request)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(Set((object ?? [:]).keys), ["saved_via_transfer_this_month"], "must upload ONLY the one aggregate total — no transaction id, date, or register history")
+        XCTAssertEqual(object?["saved_via_transfer_this_month"] as? String, "125.5")
+    }
+
+    @MainActor
+    func testSavedViaTransferSummarySyncServiceUploadsCorrectTotal() async throws {
+        let context = makeSavingsEntryContext()
+        let calendar = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let now = calendar.date(from: DateComponents(year: 2026, month: 7, day: 15))!
+        let account = Account(name: "Checking", type: .checking)
+        context.insert(account)
+        let thisMonthTransfer = FinanceTransaction(amount: 200, date: now, type: .transferToSavings, account: account)
+        let priorMonthTransfer = FinanceTransaction(amount: 300, date: calendar.date(byAdding: .month, value: -1, to: now)!, type: .transferToSavings, account: account)
+        let unrelatedExpense = FinanceTransaction(amount: 40, date: now, type: .expense, account: account)
+        context.insert(thisMonthTransfer)
+        context.insert(priorMonthTransfer)
+        context.insert(unrelatedExpense)
+        try context.save()
+
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        await SavedViaTransferSummarySyncService.sync(transactions: [thisMonthTransfer, priorMonthTransfer, unrelatedExpense], backend: fake)
+
+        XCTAssertEqual(fake.upsertSavedViaTransferSummaryCallCount, 1)
+        XCTAssertNotNil(fake.lastUpsertSavedViaTransferSummaryRequest?.savedViaTransferThisMonth)
+    }
+
+    @MainActor
+    func testSavedViaTransferSummarySyncServiceUploadFailureDoesNotThrowOrCrash() async {
+        final class AlwaysFailingBackend: HouseholdSharingService {
+            func initializeHousehold() async throws -> HouseholdStateResponse { throw HouseholdSharingError.unauthorized }
+            func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse { throw HouseholdSharingError.unauthorized }
+            func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse { throw HouseholdSharingError.unauthorized }
+            func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse { throw HouseholdSharingError.unauthorized }
+            func previewInvitation(token: String) async throws -> InvitationPreviewResponse { throw HouseholdSharingError.unauthorized }
+            func acceptInvitation(token: String) async throws -> AcceptInvitationResponse { throw HouseholdSharingError.unauthorized }
+            func checkMyPendingInvitation() async throws -> MyPendingInvitationResponse { throw HouseholdSharingError.unauthorized }
+            func acceptInvitation(invitationId: UUID) async throws -> AcceptInvitationResponse { throw HouseholdSharingError.unauthorized }
+            func declineInvitation(invitationId: UUID) async throws -> DeclineInvitationResponse { throw HouseholdSharingError.unauthorized }
+            func getSharedConnectedAccountTransactions(plaidAccountId: UUID) async throws -> SharedConnectedAccountTransactionsResponse { throw HouseholdSharingError.unauthorized }
+            func getSharedManualAccountData(manualAccountId: UUID) async throws -> SharedManualAccountDataResponse { throw HouseholdSharingError.unauthorized }
+            func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse { throw HouseholdSharingError.unauthorized }
+            func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse { throw HouseholdSharingError.unauthorized }
+            func getMyManualAccounts() async throws -> MyManualAccountsResponse { throw HouseholdSharingError.unauthorized }
+        }
+
+        let account = Account(name: "Checking", type: .checking)
+        let transfer = FinanceTransaction(amount: 50, date: .now, type: .transferToSavings, account: account)
+        // Must complete without throwing — a failed upload is a fire-and-forget no-op; local data
+        // (the transaction passed in) is never touched by this call.
+        await SavedViaTransferSummarySyncService.sync(transactions: [transfer], backend: AlwaysFailingBackend())
+        XCTAssertEqual(transfer.amount, 50, "local FinanceTransaction data must be completely unaffected by an upload failure")
+    }
+
+    func testDashboardCallsSavedViaTransferSummarySyncServiceOnLoadAndForeground() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private func syncSavedViaTransferSummaryIfNeeded") else {
+            XCTFail("syncSavedViaTransferSummaryIfNeeded not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(section.contains("SavedViaTransferSummarySyncService.sync(transactions: transactions)"))
+        XCTAssertTrue(source.contains("Task { await syncSavedViaTransferSummaryIfNeeded() }"), "must reconcile on scenePhase foreground return, mirroring the Monthly Savings/Dashboard aggregate triggers")
+    }
+
+    func testSavedViaTransferSyncIntroducesNoPollingTimerOrAsyncAfter() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/SavedViaTransferSummarySyncService.swift")
+        XCTAssertFalse(source.contains("Timer("), "must not introduce a Timer")
+        XCTAssertFalse(source.contains(".asyncAfter("), "must not introduce asyncAfter-based polling")
+        XCTAssertFalse(source.contains("while true"), "must not introduce a background loop")
+    }
+
+    @MainActor
+    func testSharedSavedViaTransferViewModelLoadsSummary() async {
+        let primaryUserId = UUID()
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        let dto = SharedSavedViaTransferSummaryDTO(savedViaTransferThisMonth: 500, updatedAt: Date())
+        fake.sharedSavedViaTransferSummaryResult = .success(SharedSavedViaTransferSummaryResponse(summary: dto))
+        let viewModel = SharedSavedViaTransferViewModel(primaryUserId: primaryUserId, backend: fake)
+
+        await viewModel.load()
+
+        guard case .loaded(let summary?) = viewModel.state else { return XCTFail("expected .loaded with a non-nil summary") }
+        XCTAssertEqual(summary.savedViaTransferThisMonth, 500)
+        XCTAssertEqual(fake.lastSharedSavedViaTransferSummaryOwnerUserId, primaryUserId, "must request the server-discovered Primary id, never fabricated")
+    }
+
+    @MainActor
+    func testSharedSavedViaTransferViewModelClearsOnRevocation() async {
+        let primaryUserId = UUID()
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        fake.sharedSavedViaTransferSummaryResult = .success(SharedSavedViaTransferSummaryResponse(
+            summary: SharedSavedViaTransferSummaryDTO(savedViaTransferThisMonth: 500, updatedAt: Date())
+        ))
+        let viewModel = SharedSavedViaTransferViewModel(primaryUserId: primaryUserId, backend: fake)
+        await viewModel.load()
+        guard case .loaded(.some) = viewModel.state else { return XCTFail("expected an initially-loaded summary") }
+
+        fake.sharedSavedViaTransferSummaryResult = .success(SharedSavedViaTransferSummaryResponse(summary: nil))
+        await viewModel.load()
+
+        guard case .loaded(let summary) = viewModel.state else { return XCTFail("expected .loaded") }
+        XCTAssertNil(summary, "revocation must clear the previously-held summary on the very next load")
+    }
+
+    func testSharedSavedViaTransferSummaryDTODecodesMoneyAsDecimalStrings() throws {
+        let json = """
+        {"saved_via_transfer_this_month": "500.00", "updated_at": "2026-07-28T11:22:54.964388Z"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(SharedSavedViaTransferSummaryDTO.self, from: json)
+        XCTAssertEqual(decoded.savedViaTransferThisMonth, Decimal(string: "500.00"))
+    }
+
+    func testDashboardQuickStatsSectionRoutesSavedViaTransferByRoleAndSharingState() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private var quickStatsSection") else {
+            XCTFail("quickStatsSection not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(6000))
+        XCTAssertTrue(section.contains("sharedSavedViaTransferQuickStatVisible"), "must gate on the dedicated shared-visibility flag")
+        XCTAssertTrue(section.contains("SharedSavedViaTransferQuickStatCard("), "an authorized Secondary must use the shared architecture, never a local reconstruction")
+    }
+
+    func testBackendManualTransactionsAllowlistIncludesTransferTypes() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../supabase/functions/_shared/manual.ts")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        for transferType in ["transferWithdrawal", "transferDeposit", "transferToSavings"] {
+            XCTAssertTrue(source.contains("\"\(transferType)\""), "VALID_TRANSACTION_TYPES must include \(transferType) — this was the bug that silently dropped transfer transactions from cloud sync")
+        }
     }
 
     // MARK: - CLIENT CORRECTION — Secondary Dashboard Monthly Outlook uses the shared architecture
@@ -24972,11 +25321,11 @@ final class FinanceTrackTests: XCTestCase {
     func testConnectedAccountsSectionOnRefreshIsNilForSharedDisplay() {
         let ownedDisplay = ConnectedAccountsDashboardPresenter.Display(
             id: "owned-1", connectionId: "conn-1", accountId: "acct-1",
-            institutionName: "Chase", primaryRow: nil, updatedAt: nil
+            institutionName: "Chase", rows: [], updatedAt: nil
         )
         let sharedDisplay = ConnectedAccountsDashboardPresenter.Display(
             id: "shared-connected-abc", connectionId: "shared", accountId: nil,
-            institutionName: "Delta SkyMiles® Reserve Card", primaryRow: nil, updatedAt: nil
+            institutionName: "Delta SkyMiles® Reserve Card", rows: [], updatedAt: nil
         )
         let owned = [ownedDisplay]
         XCTAssertTrue(owned.contains(ownedDisplay))
@@ -28610,7 +28959,7 @@ final class FinanceTrackTests: XCTestCase {
         let filtered = ActivityTabPresenter.transactions(for: tab, in: transactions).filter { interval.contains($0.date) }
         return filtered.reduce(Decimal(0)) { total, transaction in
             switch transaction.type {
-            case .expense, .transferWithdrawal: return total - transaction.amount
+            case .expense, .transferWithdrawal, .transferToSavings: return total - transaction.amount
             case .refund, .income, .transferDeposit: return total + transaction.amount
             case .transfer, .creditCardPayment, .balanceAdjustment: return total + transaction.amount
             }
@@ -28747,7 +29096,7 @@ final class FinanceTrackTests: XCTestCase {
             XCTFail("signedActivityAmount not found"); return
         }
         let scoped = String(source[range.lowerBound...].prefix(400))
-        XCTAssertTrue(scoped.contains("case .expense, .transferWithdrawal: return -transaction.amount"))
+        XCTAssertTrue(scoped.contains("case .expense, .transferWithdrawal, .transferToSavings: return -transaction.amount"))
         XCTAssertTrue(scoped.contains("case .refund, .income, .transferDeposit: return transaction.amount"))
         XCTAssertTrue(scoped.contains("case .transfer, .creditCardPayment, .balanceAdjustment: return transaction.amount"))
     }
@@ -29012,7 +29361,7 @@ final class FinanceTrackTests: XCTestCase {
 
     private func activitySignedAmountSpec(_ transaction: FinanceTransaction) -> Decimal {
         switch transaction.type {
-        case .expense, .transferWithdrawal: return -transaction.amount
+        case .expense, .transferWithdrawal, .transferToSavings: return -transaction.amount
         case .refund, .income, .transferDeposit: return transaction.amount
         case .transfer, .creditCardPayment, .balanceAdjustment: return transaction.amount
         }
@@ -29685,7 +30034,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let sectionRange = source.range(of: "private var quickStatsSection: some View {") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let scoped = String(source[sectionRange.lowerBound...].prefix(3000))
+        let scoped = String(source[sectionRange.lowerBound...].prefix(3500))
         let titles = ["\"Planned Weekly Spending\"", "\"Spent This Week\"", "\"Planned Monthly Spending\"", "\"Projected Available After Spend\""]
         var lastIndex: String.Index?
         for title in titles {
@@ -29712,7 +30061,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let sectionRange = source.range(of: "private var quickStatsSection: some View {") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let scoped = String(source[sectionRange.lowerBound...].prefix(3000))
+        let scoped = String(source[sectionRange.lowerBound...].prefix(3500))
         XCTAssertTrue(scoped.contains("plannedWeeklySpendingForOutlook"))
         XCTAssertTrue(scoped.contains("spentThisWeek"))
         XCTAssertTrue(scoped.contains("plannedMonthlySpendingForOutlook"))
@@ -32749,6 +33098,277 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(names.contains("Transfer"))
     }
 
+    // MARK: - Transfer To Savings ("Saved" Quick Stat feature)
+
+    func testTransferToSavingsLabel() {
+        XCTAssertEqual(TransactionType.transferToSavings.label, "Transfer To Savings")
+    }
+
+    func testTransferToSavingsNeverCountsAsSpendingByDefault() {
+        XCTAssertFalse(TransactionType.transferToSavings.countsAsSpending)
+    }
+
+    /// STRUCTURAL GUARANTEE — Scott's explicit requirement: a save must never affect Monthly
+    /// Remaining or Projected Available, EVEN IF the per-entry toggle were somehow on (unlike
+    /// Transfer WD/Dep, which do respect the toggle) — proven here with the toggle explicitly set
+    /// to `true` on both axes.
+    @MainActor
+    func testTransferToSavingsNeverCountsTowardWeeklyOrMonthlySpendingEvenWithTogglesOn() {
+        let weekInterval = DateInterval(start: day(2026, 8, 1), end: day(2026, 8, 8))
+        let monthInterval = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let save = FinanceTransaction(
+            amount: 200, date: day(2026, 8, 3), type: .transferToSavings, source: .manual,
+            countsTowardWeeklyBudget: true, countsTowardMonthlySpending: true
+        )
+        XCTAssertEqual(BudgetCalculator.weeklySpent([save], in: weekInterval), 0)
+        XCTAssertEqual(BudgetCalculator.monthlySpent([save], in: monthInterval), 0)
+        XCTAssertFalse(BudgetCalculator.isCounted(save, includePending: true, context: .weekly))
+        XCTAssertFalse(BudgetCalculator.isCounted(save, includePending: true, context: .monthly))
+    }
+
+    func testFinanceTransactionAmountEditViewExcludesTransferToSavings() {
+        let save = FinanceTransaction(amount: 10, type: .transferToSavings)
+        XCTAssertFalse(TransactionAmountEditView.isEligible(save))
+    }
+
+    /// Deleting a Transfer To Savings entry must reverse both legs identically to a plain
+    /// Transfer WD — its only difference from Transfer WD is Saved-tracking eligibility, not
+    /// balance-effect semantics.
+    @MainActor
+    func testManualTransactionDeletionServiceReversesTransferToSavingsBothLegs() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 400)
+        let savings = Account(name: "Savings", type: .savings, currentBalance: 600)
+        context.insert(checking)
+        context.insert(savings)
+        let transfer = FinanceTransaction(amount: 100, type: .transferToSavings, source: .manual, account: checking, transferCounterpartyAccount: savings)
+        context.insert(transfer)
+
+        XCTAssertTrue(ManualTransactionDeletionService.delete(transfer, context: context))
+        XCTAssertEqual(checking.currentBalance, 500, "deleting a Transfer To Savings must give the source account its money back")
+        XCTAssertEqual(savings.currentBalance, 500, "deleting a Transfer To Savings must take back what the counterparty received")
+    }
+
+    // MARK: - SavedViaTransferCalculator
+
+    func testSavedViaTransferCalculatorSumsOnlyTransferToSavingsInMonth() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let save1 = FinanceTransaction(amount: 200, date: day(2026, 8, 3), type: .transferToSavings)
+        let save2 = FinanceTransaction(amount: 50, date: day(2026, 8, 20), type: .transferToSavings)
+        let outsideMonth = FinanceTransaction(amount: 999, date: day(2026, 7, 31), type: .transferToSavings)
+        let wrongType = FinanceTransaction(amount: 999, date: day(2026, 8, 5), type: .expense)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([save1, save2, outsideMonth, wrongType], in: month), 250)
+    }
+
+    /// Half-open containment (`>= start`, `< end`) — a transfer dated exactly at the month boundary
+    /// must count for the month it starts, never both, matching `BudgetCalculator`'s own fix for
+    /// this exact bug class.
+    func testSavedViaTransferCalculatorUsesHalfOpenMonthBoundary() {
+        let august = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let september = DateInterval(start: day(2026, 9, 1), end: day(2026, 10, 1))
+        let boundaryTx = FinanceTransaction(amount: 100, date: day(2026, 9, 1), type: .transferToSavings)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([boundaryTx], in: august), 0)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([boundaryTx], in: september), 100)
+    }
+
+    func testSavedViaTransferCalculatorExcludesTransactionsExcludedFromReports() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let excluded = FinanceTransaction(amount: 200, date: day(2026, 8, 3), type: .transferToSavings, isExcludedFromReports: true)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([excluded], in: month), 0)
+    }
+
+    func testSavedViaTransferCalculatorReturnsZeroForEmptyInput() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([], in: month), 0)
+    }
+
+    // MARK: - AddExpenseView Transfer To Savings wiring (source-scan)
+
+    func testAddExpenseViewOffersTransferToSavingsOnlyWhenSavingsAccountExists() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        XCTAssertTrue(source.contains("hasSavingsAccount"))
+        guard let range = source.range(of: "private var availableTypes: [TransactionType]") else {
+            XCTFail("availableTypes not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(400))
+        XCTAssertTrue(section.contains("if hasSavingsAccount { types.append(.transferToSavings) }"))
+    }
+
+    func testAddExpenseViewNavigationTitleForTransferToSavings() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let range = source.range(of: "private var navigationTitle: String") else {
+            XCTFail("navigationTitle not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(400))
+        XCTAssertTrue(section.contains("case .transferToSavings: return \"Add Transfer To Savings\""))
+    }
+
+    /// The "To" picker for Transfer To Savings must be restricted to Savings-type Manual Accounts
+    /// only — never every account, and never a Connected/Plaid account.
+    func testAddExpenseViewRestrictsTransferToSavingsDestinationToSavingsAccounts() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let range = source.range(of: "private var transferToOptions") else {
+            XCTFail("transferToOptions not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(section.contains("activeAccounts.filter { $0.type == .savings }.map { TransferAccountSelection.manual($0) }"))
+    }
+
+    /// A Connected/Plaid account whose own reported `subtype` is `"savings"` must also be offered
+    /// as a Transfer To Savings destination — not just Manual Savings accounts.
+    func testAddExpenseViewIncludesConnectedSavingsAccountsAsTransferDestination() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let range = source.range(of: "private var transferToOptions") else {
+            XCTFail("transferToOptions not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(section.contains("connectedAccountOptions"))
+        XCTAssertTrue(section.contains("$0.subtype?.lowercased() == \"savings\""))
+        XCTAssertTrue(section.contains("TransferAccountSelection.connected(id: $0.id, label: $0.label)"))
+    }
+
+    /// Transfer To Savings must also be OFFERED as a Type choice when the only savings account
+    /// available is a Connected one — not just when a Manual Savings account exists.
+    func testAddExpenseViewOffersTransferToSavingsForConnectedSavingsAccountToo() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let range = source.range(of: "private var hasSavingsAccount: Bool") else {
+            XCTFail("hasSavingsAccount not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(400))
+        XCTAssertTrue(section.contains("activeAccounts.contains { $0.type == .savings }"))
+        XCTAssertTrue(section.contains("connectedAccountOptions.contains { $0.subtype?.lowercased() == \"savings\" }"))
+    }
+
+    /// The weekly/monthly toggles must be hidden for Transfer To Savings, same reasoning as
+    /// `.income` — showing controls that structurally have no effect would be misleading.
+    func testAddExpenseViewHidesSpendingTogglesForTransferToSavings() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let range = source.range(of: "private var optionsControls") else {
+            XCTFail("optionsControls not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(1100))
+        XCTAssertTrue(section.contains("if type != .income && type != .transferToSavings"))
+    }
+
+    // MARK: - QuickStatID / QuickStatsSettings
+
+    func testQuickStatIDHasSixCases() {
+        XCTAssertEqual(QuickStatID.allCases.count, 6)
+        XCTAssertTrue(QuickStatID.allCases.contains(.savedViaTransfer))
+        XCTAssertTrue(QuickStatID.allCases.contains(.savedThisMonth))
+    }
+
+    func testQuickStatsSettingsNewRecordHidesNothingByDefault() {
+        let settings = QuickStatsSettings()
+        for stat in QuickStatID.allCases {
+            XCTAssertFalse(settings.isHidden(stat), "\(stat) must be shown by default so a brand-new user sees every stat, including future additions")
+        }
+    }
+
+    func testQuickStatsSettingsSetHiddenTogglesMembership() {
+        let settings = QuickStatsSettings()
+        settings.setHidden(.savedViaTransfer, hidden: true)
+        XCTAssertTrue(settings.isHidden(.savedViaTransfer))
+        settings.setHidden(.savedViaTransfer, hidden: false)
+        XCTAssertFalse(settings.isHidden(.savedViaTransfer))
+    }
+
+    func testQuickStatsSettingsSetHiddenIsNoOpWhenAlreadyInDesiredState() {
+        let settings = QuickStatsSettings()
+        let originalUpdatedAt = settings.updatedAt
+        settings.setHidden(.savedViaTransfer, hidden: false)
+        XCTAssertEqual(settings.updatedAt, originalUpdatedAt, "must not touch updatedAt when the state doesn't actually change")
+    }
+
+    private func makeInMemoryQuickStatsContext() -> ModelContext {
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        let container = try! ModelContainer(for: QuickStatsSettings.self, configurations: config)
+        return ModelContext(container)
+    }
+
+    func testQuickStatsSettingsResolveCanonicalRecordCreatesInsertsAndSavesWhenNoneExists() throws {
+        let context = makeInMemoryQuickStatsContext()
+        let record = QuickStatsSettings.resolveCanonicalRecord(existing: [], in: context)
+        XCTAssertTrue(record.hiddenRawIDs.isEmpty)
+
+        let freshContext = ModelContext(context.container)
+        let fetched = try freshContext.fetch(FetchDescriptor<QuickStatsSettings>())
+        XCTAssertEqual(fetched.count, 1)
+        XCTAssertEqual(fetched.first?.id, record.id)
+    }
+
+    func testQuickStatsSettingsResolveCanonicalRecordIsIdempotentWhenExactlyOneRowExists() {
+        let context = makeInMemoryQuickStatsContext()
+        let existing = QuickStatsSettings(hiddenRawIDs: [QuickStatID.savedThisMonth.rawValue])
+        context.insert(existing)
+        let resolved = QuickStatsSettings.resolveCanonicalRecord(existing: [existing], in: context)
+        XCTAssertTrue(resolved === existing)
+        XCTAssertEqual(resolved.hiddenRawIDs, [QuickStatID.savedThisMonth.rawValue])
+    }
+
+    func testQuickStatsSettingsResolveCanonicalRecordMergesDuplicatesPreservingFirstSeenOrder() {
+        let context = makeInMemoryQuickStatsContext()
+        let first = QuickStatsSettings(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!,
+            hiddenRawIDs: [QuickStatID.savedThisMonth.rawValue]
+        )
+        let second = QuickStatsSettings(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!,
+            hiddenRawIDs: [QuickStatID.savedThisMonth.rawValue, QuickStatID.savedViaTransfer.rawValue]
+        )
+        context.insert(first)
+        context.insert(second)
+        let sorted = [first, second].sorted { $0.id.uuidString < $1.id.uuidString }
+        let survivor = QuickStatsSettings.resolveCanonicalRecord(existing: sorted, in: context)
+        XCTAssertEqual(Set(survivor.hiddenRawIDs), Set([QuickStatID.savedThisMonth.rawValue, QuickStatID.savedViaTransfer.rawValue]))
+
+        let freshContext = ModelContext(context.container)
+        let fetchedAll = try! freshContext.fetch(FetchDescriptor<QuickStatsSettings>())
+        XCTAssertEqual(fetchedAll.count, 1, "duplicates must be deleted, only the survivor remains")
+    }
+
+    // MARK: - Dashboard Quick Stats customization wiring (source-scan)
+
+    func testDashboardHasQuickStatsPlusButton() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private var quickStatsSection") else {
+            XCTFail("quickStatsSection not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(1200))
+        XCTAssertTrue(section.contains("isPresentingQuickStatsConfiguration = true"))
+        XCTAssertTrue(section.contains("plus.circle"))
+    }
+
+    func testDashboardPresentsQuickStatsConfigurationSheet() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private var quickStatsSection") else {
+            XCTFail("quickStatsSection not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(6300))
+        XCTAssertTrue(section.contains(".sheet(isPresented: $isPresentingQuickStatsConfiguration)"))
+        XCTAssertTrue(section.contains("QuickStatsConfigurationView()"))
+    }
+
+    /// Every one of the 6 Quick Stat tiles must be individually gated by `isQuickStatShown`, not
+    /// unconditionally rendered — the actual behavioral requirement, not just presence of the
+    /// picker UI.
+    func testDashboardEveryQuickStatTileIsGatedByVisibility() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private var quickStatsSection") else {
+            XCTFail("quickStatsSection not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(5000))
+        for stat in ["plannedWeeklySpending", "spentThisWeek", "plannedMonthlySpending", "projectedAvailableAfterSpend", "savedViaTransfer"] {
+            XCTAssertTrue(section.contains("isQuickStatShown(.\(stat))"), "\(stat) must be gated by isQuickStatShown")
+        }
+    }
+
+    func testQuickStatsConfigurationViewFileExists() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/QuickStatsConfigurationView.swift")
+        XCTAssertTrue(source.contains("struct QuickStatsConfigurationView: View"))
+        XCTAssertTrue(source.contains("QuickStatID.allCases"))
+    }
+
     // MARK: - Pay Bills default-unchecked / zero-amount entries (source-scan)
 
     func testPayBillsRowsDefaultToUnselected() throws {
@@ -32791,7 +33411,7 @@ final class FinanceTrackTests: XCTestCase {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
         XCTAssertTrue(source.contains("private var transferAccountSection"), "a Transfer entry must replace the single Account picker with From/To dropdowns")
         XCTAssertTrue(source.contains("transferAccountDropdown(title: \"From\""))
-        XCTAssertTrue(source.contains("transferAccountDropdown(title: \"To\""))
+        XCTAssertTrue(source.contains("type == .transferToSavings ? \"To (Savings Account)\" : \"To\""), "the To dropdown's title, distinctly labeled for Transfer To Savings")
     }
 
     func testAddExpenseViewBillTagIsADropdown() throws {

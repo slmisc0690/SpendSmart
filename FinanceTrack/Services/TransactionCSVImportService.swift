@@ -199,7 +199,7 @@ enum TransactionCSVImportService {
     /// `FinanceTransaction.amount` stores, for the restorable types only.
     private static func rawAmount(signed: Decimal, type: TransactionType) -> Decimal {
         switch type {
-        case .expense, .transferWithdrawal: return -signed
+        case .expense, .transferWithdrawal, .transferToSavings: return -signed
         case .refund, .income, .transferDeposit: return signed
         case .transfer, .creditCardPayment, .balanceAdjustment: return signed
         }
@@ -415,7 +415,7 @@ enum TransactionCSVImportService {
                     originalBalancesByAccountID[account.id] = account.currentBalance
                 }
                 switch row.type {
-                case .expense, .transferWithdrawal: AccountBalanceManager.applyExpense(amount: row.rawAmount, to: account)
+                case .expense, .transferWithdrawal, .transferToSavings: AccountBalanceManager.applyExpense(amount: row.rawAmount, to: account)
                 case .refund: AccountBalanceManager.applyRefund(amount: row.rawAmount, to: account)
                 case .income, .transferDeposit: AccountBalanceManager.applyIncome(amount: row.rawAmount, to: account)
                 case .transfer, .creditCardPayment, .balanceAdjustment:

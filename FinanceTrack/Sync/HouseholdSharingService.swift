@@ -74,6 +74,16 @@ protocol HouseholdSharingService {
     /// "server-discovered id only" contract as `getSharedMonthlyPlan`.
     func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse
 
+    /// SAVED VIA TRANSFER SHARING — the Primary's own aggregate Saved-via-Transfer total upload
+    /// (`savedViaTransferThisMonth` only). Caller identity comes from the access token alone;
+    /// `set_saved_via_transfer_summary` always writes to the authenticated caller's own row.
+    func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse
+
+    /// SAVED VIA TRANSFER SHARING — reads the Primary's shared Saved-via-Transfer aggregate when
+    /// `primarySavedViaTransferShared` is true, using the server-discovered `primaryUserId`. Same
+    /// "server-discovered id only" contract as `getSharedMonthlyPlan`.
+    func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse
+
     /// USER B DASHBOARD PARITY — the Primary's own authoritative Dashboard aggregate upload
     /// (`actualSpentThisMonth`/`monthlySpendRemaining`/`weeklySpendingLimit`/`actualSpentThisWeek`/
     /// `weeklyRemaining`, already privacy-filtered to only explicitly-shared accounts, plus the
@@ -173,6 +183,14 @@ struct SupabaseHouseholdSharingService: HouseholdSharingService {
 
     func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse {
         try await post("get-monthly-savings-summary", body: OwnerUserIdRequest(ownerUserId: ownerUserId.uuidString))
+    }
+
+    func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse {
+        try await post("upsert-saved-via-transfer-summary", body: request)
+    }
+
+    func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse {
+        try await post("get-saved-via-transfer-summary", body: OwnerUserIdRequest(ownerUserId: ownerUserId.uuidString))
     }
 
     func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse {
