@@ -5,23 +5,42 @@ name) with a Supabase backend for Plaid bank-linking and household sharing. Sing
 (Scott), long-running iterative sessions — this file exists so a fresh session doesn't have to
 re-derive architecture/conventions from scratch.
 
-## Current Status (as of 2026-07-21)
+## Current Status (as of 2026-08-16)
 
-Phase 8F (Secondary Invitation + Share-Back Production Deployment) is complete: migration 0015 and
-its 5 Edge Functions are live on Production, verified via a 25-section report (PASS). The full
-household-sharing feature set — Primary invites/manages sharing, Secondary auto-discovers/accepts/
-declines/shares back their own accounts — is now live end-to-end in Production for real users. See
-Session Log below for this session's specifics. The working tree was committed for the first time
-in this session after months of intentionally-uncommitted iterative work — see the git commit this
-session produced for exactly what landed.
+Migrations `0001`–`0023` and their Edge Functions are live on **Production**. Household sharing is
+complete end-to-end (Primary invites/manages; Secondary auto-discovers/accepts/declines/shares
+back), and three further sharing categories have landed since Phase 8F: `monthlySavings`, the
+dashboard-summary mirror, and `savedViaTransfer`. The last feature session (2026-08-15) also fixed a
+**silent data-loss bug** — the backend's `manual_transactions.transaction_type` allowlist had never
+been widened for `transferWithdrawal`/`transferDeposit`/`transferToSavings`, so every such
+transaction was rejected server-side and would have been lost on a cloud restore (migration 0022).
+
+Swift test suite: **2719/2719 passing** as of 2026-08-15, zero new warnings.
+
+There is **no in-progress code task.** Everything described above is committed and pushed to
+`origin/main` (verified live against GitHub on 2026-08-16 — an earlier handoff wrongly claimed the
+2026-08-15 commits were unpushed; they were pushed on 2026-08-15 at 11:09, apparently via Xcode's
+own Source Control integration).
 
 ## Next Step
 
-No specific follow-up phase has been requested yet — await Scott's next task brief. Known
-candidates if asked: real end-to-end manual testing per Phase 8F's recommended sequence (invitation
-popup on foreground return, Accept/Decline, Secondary share-back visibility to Primary), Secondary
-Monthly Plan visibility polish, or investigating the `FinanceTrack 2.xcodeproj` anomaly (see Known
-Issues below).
+No follow-up phase has been requested — await Scott's next task brief. Genuinely open items, none
+of which are unfinished code:
+
+1. **Production spot-check owed**: `manual_transactions` on Production had 0 rows at the time of the
+   migration 0022 fix (expected — nothing could ever land there before). Nobody has yet created a
+   real Transfer-to-Savings entry on-device and confirmed it now reaches the cloud. This is the only
+   open item carrying real risk.
+2. **Unconfirmed**: Xcode showed "Cannot find … in scope" errors (`QuickStatsSettings`,
+   `SavedViaTransferCalculator`, `QuickStatID`, `SavedViaTransferSummarySyncService`,
+   `QuickStatsConfigurationView`) after `xcodegen generate` regenerated the project file while Xcode
+   was open. CLI `xcodebuild` built and tested clean *after* those errors appeared, so this is very
+   likely a stale Xcode editor index, not a code problem. Fix is quit+reopen Xcode, fallback
+   `DerivedData/Index.noindex`. Never confirmed resolved by Scott.
+3. **Unanswered question**: the `S&L_Development_Information_Security_Policy…docx` / `SLD-*.docx`
+   files and `Calculator_App_Icon.png`/`Calculator_Icon.png` in the repo root are unrelated to this
+   app by name and undocumented. Flagged to Scott, no answer yet. Do not touch until he clarifies.
+4. Not started, explicitly out of scope until requested: Secondary-side Monthly Plan sharing.
 
 ## Repository / environment facts
 
@@ -61,43 +80,60 @@ Issues below).
   `.git`, `build/` (Xcode's local index cache — huge file count, not real source, rsync will stall
   copying it), and `*.xcuserstate`. Verify with `diff -rq` (same excludes) before editing.
 - **Full Swift build + full test suite, zero new warnings**, before any "done" report. Report the
-  *actual* test total from that run, never assume a remembered number. As of 2026-07-21 the suite
-  is at **1020 tests**.
+  *actual* test total from that run, never assume a remembered number. As of **2026-08-15** the
+  suite is at **2719 tests** (it was 1020 on 2026-07-21 — it has roughly tripled across two
+  undocumented sessions, so treat any remembered figure as stale and re-run).
+- **Some tests are raw source-string scans with a hardcoded `prefix(N)` window** over
+  `DashboardView.swift` (e.g. `testDashboardEveryQuickStatTileIsGatedByVisibility`). Adding code to
+  a scanned property pushes the searched-for strings past the window and fails the test for a
+  non-real reason. The correct fix is to **widen the `prefix()` argument, never to change what is
+  asserted** — this happened and was fixed that way on 2026-08-15 (4 call sites).
 - **Final reports** follow a consistent numbered-section format (safety baseline → root
   cause/design → security → files → tests → validation → git summary → exclusions confirmed →
   deployment status with explicit YES/NO lines → RESULT: PASS/BLOCKED). Keep using that shape —
   it's what the user expects and cross-references against.
+- **Never edit an already-shipped migration.** `0001`–`0023` have all been applied to at least one
+  environment. Migration numbering is sequential and must never be reused or reordered — the next
+  new migration is `0024_….sql`. Any further schema change is a new file, following the established
+  dynamic-constraint-name-lookup pattern (`pg_constraint`/`pg_get_constraintdef` matching — never
+  hardcode an auto-generated constraint name).
 - **Never commit or push** unless explicitly asked. Historically the working tree was kept
   deliberately dirty across sessions with many completed-but-uncommitted features; the first commit
   landed 2026-07-21 (explicitly requested — see Session Log). This rule remains in force going
   forward: don't commit/push proactively just because a task finished.
-- Known dirty working-tree baseline **immediately before the 2026-07-21 commit** (for historical
-  reference — once committed this snapshot is obsolete; always check `git status --short` fresh
-  rather than trusting a stored list):
-  - Modified: `FinanceTrack.xcodeproj/project.pbxproj`, `FinanceTrack/App/FinanceTrackApp.swift`,
-    `FinanceTrack/Services/AccountRelatedOptionsViewModel.swift`,
-    `FinanceTrack/Sync/{HouseholdSharingPayload,HouseholdSharingService}.swift`,
-    `FinanceTrack/Views/Settings/{AccountRelatedOptionsView,AccountView,SettingsView}.swift`,
-    `FinanceTrackTests/FinanceTrackTests.swift`, `supabase/config.toml`,
-    `supabase/functions/{accept-household-invitation,get-account-related-options,
-    update-sharing-permission}/index.ts`.
-  - New (untracked): `FinanceTrack/Services/PendingInvitationPopupViewModel.swift`,
-    `FinanceTrack/Views/Settings/PendingInvitationPopupView.swift`,
-    `supabase/functions/{decline-household-invitation,get-my-pending-household-invitation}/`,
-    `supabase/migrations/0015_secondary_connected_account_sharing.sql`.
+- **Working-tree baseline as of 2026-08-16: clean**, apart from one intentionally-untracked file.
+  The long-standing "keep the tree dirty for months" era ended on 2026-07-21; since then work has
+  been committed per session. Always check `git status --short` fresh rather than trusting any
+  stored list.
+  - `SESSION_HANDOFF.md` is **untracked and deliberately left untracked** — it is a per-session
+    working document, not project content. It is *not* in `.gitignore` (unlike the sibling
+    StreamDrop repo, which does ignore its own), so take care never to sweep it in with a blanket
+    `git add -A`.
   - `Untitled 5.rtfd/` — unrelated macOS TextEdit document in the repo root. **Leave it untouched.**
     Do NOT delete, modify, move, stage, or add it to Xcode.
-  - **Anomaly, not resolved**: `FinanceTrack 2.xcodeproj/` (a duplicate-project artifact) is already
-    tracked in git history (not part of any pending change) — see Known Issues below.
+  - `_archive/` (`debug-screenshots/`, `scripts/`) holds old verification screenshots and a sandbox
+    setup script moved out of the repo root on 2026-08-16. These are tracked moves, not deletions —
+    the files remain in git history either way.
 
 ## Known Issues / Anomalies
 
-- **`FinanceTrack 2.xcodeproj/` duplicate project directory** exists alongside the real
-  `FinanceTrack.xcodeproj/` and is already committed to git history. Looks like an accidental
-  Xcode duplicate-project artifact, not something any task intentionally created. Not touched or
-  investigated in this session — ask Scott before touching it if it comes up.
-- No new issues were found during Phase 8F (2026-07-21) — Production data checksums, unrelated
-  Edge Function versions, and the Swift test suite all matched baseline exactly with zero anomalies.
+- **RESOLVED 2026-08-16 — duplicate `.xcodeproj` shells.** `FinanceTrack 2` through
+  `FinanceTrack 7.xcodeproj` had accumulated alongside the real `FinanceTrack.xcodeproj`, some
+  already committed to git history. All six were confirmed unused (via Xcode's own recent-documents
+  record: `strings ~/Library/Preferences/com.apple.dt.Xcode.plist | grep FinanceTrack`) and deleted;
+  the deletion is committed. **Only `FinanceTrack.xcodeproj` should ever exist.** If Xcode produces
+  another stray shell, flag it to Scott and confirm via that same method before deleting.
+- **Xcode's Source Control panel has committed and pushed on its own.** Commit `d6d40ee`
+  (2026-08-15) added `FinanceTrack 7.xcodeproj/*` to history and pushed it, outside any Claude
+  session. Consequence: `git status` being clean does **not** prove a Claude session committed it,
+  and this repo's "never commit unless asked" rule can be bypassed by the IDE. Always verify push
+  state against the remote (`git ls-remote origin refs/heads/main`) rather than trusting a stored
+  claim — the 2026-08-16 handoff asserted these commits were unpushed and was wrong.
+- **`manual_transactions` had 0 rows on Production** as of the migration 0022 deploy. Expected (the
+  bug being fixed was that they never reached the cloud), but the fix has not yet been confirmed
+  against real usage — see Next Step item 1.
+- No anomalies were found during Phase 8F (2026-07-21) — Production data checksums, unrelated Edge
+  Function versions, and the Swift test suite all matched baseline exactly.
 
 ## Feature Roadmap / Completed Features
 
@@ -124,11 +160,29 @@ Issues below).
       accounts (per-item, auto-bootstrapped category toggle, migration 0015)
 - [x] **All of the above deployed and verified on Production** (migrations 0008–0015, all
       associated Edge Functions) — Phase 8F, 2026-07-21
+- [x] Secondary shared-data discovery + Connected-account balance parity (migrations 0016, 0017)
+- [x] Monthly Savings sharing — `monthlySavings` global-only category, aggregate-mirror table
+      (migration 0018)
+- [x] Dashboard summary sharing + monthly-outlook week (migrations 0019, 0020)
+- [x] Owner manual-accounts restore (migration 0021)
+- [x] Transaction CSV import/export, Pay Bills, Users Guide, in-app calculator, biometric auth,
+      exclude-from-reports — landed 2026-08-04 / 2026-08-15 (see Session Log caveat: reconstructed
+      from git, not from a contemporaneous session record)
+- [x] Connected (Plaid) savings accounts usable as a Transfer-To-Savings destination — Plaid
+      `subtype` threaded through to `AddExpenseView` (2026-08-15)
+- [x] **Backend transfer-type allowlist fix (data-loss bug)** — migration 0022 + widened
+      `_shared/manual.ts` `VALID_TRANSACTION_TYPES`; client now also decodes the server's
+      `rejected_transactions` field instead of silently dropping it (2026-08-15)
+- [x] Saved via Transfer sharing — `savedViaTransfer` global-only category, its own aggregate-mirror
+      table + 2 Edge Functions (migration 0023, 2026-08-15)
+- [x] Settings → Quick Stats picker — `QuickStatID` / `QuickStatsSettings` /
+      `QuickStatsConfigurationView`, replacing a static inert info card (2026-08-15)
+- [x] **All of the above deployed and verified on both Preview and Production** (migrations
+      0016–0023) — 2026-08-15
 
 Not yet built (explicitly out of scope until requested):
 - [ ] Secondary-side Monthly Plan sharing/control — Secondary remains read-only via the Primary's
       global toggle; no Secondary Monthly Plan UI exists
-- [ ] Resolution of the `FinanceTrack 2.xcodeproj` duplicate-project anomaly
 
 ## Architecture landmarks
 
@@ -178,6 +232,46 @@ Not yet built (explicitly out of scope until requested):
     the category's global toggle exactly once since Secondaries have no global toggle of their own.
   - Secondary has **no Monthly Plan control** — read-only via the Primary's global toggle, by
     design.
+- **Full shareable-category list** (as of migration 0023): `connectedAccounts` (per-item),
+  `manualAccounts` (per-item), `monthlyPlan` (global-only), `monthlySavings` (global-only),
+  `savedViaTransfer` (global-only). Every one plugs into the same
+  `is_effectively_shared_for_user` evaluator — there is **no per-category bespoke authorization
+  logic anywhere**, and the single trusted write path for any toggle is the `set_sharing_permission`
+  SQL function called via the `update-sharing-permission` Edge Function.
+- **Aggregate-mirror-table pattern** (used by `monthlySavings` and `savedViaTransfer`): one row per
+  `owner_user_id` holding a pre-computed total. The **client always computes the aggregate locally
+  and POSTs it; the server never aggregates, and raw entries never sync.** Push:
+  `<Feature>SummarySyncService.sync(...)` — stateless, best-effort, no retry queue (the next
+  successful trigger simply re-sends the current correct total). Pull:
+  `Shared<Feature>ViewModel.load()` → `HouseholdSharingService.get<Feature>Summary(ownerUserId:)` →
+  Edge Function → SQL function → canonical evaluator. Follow this shape for any future category;
+  do not introduce a second raw-data sharing surface.
+- **Adding a sharing category is a 3-layer hand-propagation, easy to half-finish**: the
+  `get_secondary_shared_data` SQL function, the `get-account-related-options` Edge Function's
+  hand-written field mapping, and the Swift DTO's hand-written field mapping each need the new field
+  added separately — neither layer passes the other's JSON through verbatim. Verified by reading the
+  Edge Function source directly, not assumed.
+- **Identity always comes from the JWT, never the request body** for summary read/write functions
+  (`requireAuthenticatedUserId`) — this is the anti-spoofing guarantee. Do not add a body-supplied
+  identity parameter to any of them.
+- **`TransactionType` (Swift) ↔ `_shared/manual.ts` `VALID_TRANSACTION_TYPES` ↔
+  `manual_transactions.transaction_type` CHECK constraint must be kept in exact sync.** Drift here
+  caused a silent server-side rejection / data-loss bug (fixed by migration 0022, 2026-08-15): three
+  enum cases were added Swift-side and neither backend allowlist was widened, so those transactions
+  never reached the cloud and would have been lost on restore. **Any future `TransactionType` case
+  addition must update all three in the same change.**
+- **Money is always wire-transmitted as JSON strings, never numbers** — universal convention across
+  every Edge Function in this project.
+- **`SavedViaTransferCalculator.savedThisMonth`** sums only `.transferToSavings` transactions using
+  **half-open interval containment** (`>= start`, `< end`) and skips `isExcludedFromReports`. This
+  matches `BudgetCalculator`'s boundary-fix precedent — changing it to a closed interval
+  reintroduces a documented month-boundary double-count bug.
+- **Quick Stats picker**: `QuickStatID` (enum, `allCases`) + `QuickStatsSettings` (SwiftData model,
+  `hiddenRawIDs: [String]`, `resolveCanonicalRecord` dedup helper) + `QuickStatsConfigurationView`
+  (picker UI) + `DashboardView.isQuickStatShown(_:)` (the gate every tile in `quickStatsSection`
+  checks). Note `sharedSavedViaTransferQuickStatVisible` is a **separate** flag from
+  `isQuickStatShown` — it gates whether the Secondary's shared-architecture card renders instead of
+  a local reconstruction.
 - **SQL convention** for every privileged function: `SECURITY DEFINER` + `SET search_path = ''` +
   full schema-qualification + explicit `REVOKE ... FROM PUBLIC, anon, authenticated, service_role`
   then `GRANT ... TO service_role` only. Rate-limit style tables use a single
@@ -210,6 +304,60 @@ Not yet built (explicitly out of scope until requested):
   manifest cannot be accessed" error (hit and fixed during Phase 8F, 2026-07-21).
 
 ## Session Log
+
+### 2026-08-16 — Handoff reconciliation + repo housekeeping (no app code)
+- Compared the repo against `SESSION_HANDOFF.md`. Feature work all verified present and correct;
+  found one wrong claim in the handoff — it said the 2026-08-15 commits were unpushed. They were
+  already on GitHub (confirmed live via `git ls-remote`; reflog shows `update by push` at
+  2026-08-15 11:09). Cause: Xcode's Source Control integration pushed them, not a Claude session.
+- Committed the previously-uncommitted cleanup pass (`b3846de`): deleted 23 files across the six
+  duplicate `FinanceTrack 2-7.xcodeproj` shells, and moved 16 debug screenshots + 1 sandbox script
+  into `_archive/`. Git records the 17 moves as renames — nothing was lost. **Zero application
+  source files touched** (no `.swift`/`.ts`/`.sql`/`.toml` in that commit). `SESSION_HANDOFF.md`
+  deliberately left untracked.
+- Updated this file, which had drifted badly: it still said 1020 tests (actual: 2719), still listed
+  migrations as ending at 0015 (actual: 0023), and still carried the duplicate-`.xcodeproj` anomaly
+  as unresolved. Two full sessions (2026-08-04, 2026-08-15) had never been logged here at all.
+- **Not done, still owed:** the on-device Production spot-check of transfer-type manual transactions
+  (Next Step item 1), and confirmation that the Xcode "cannot find in scope" errors cleared.
+
+### 2026-08-15 — Saved via Transfer sharing, transfer-type data-loss fix, Quick Stats picker
+- Commit `a131a13` (40 files). Three pieces of work plus one rebuild:
+  1. **Connected Savings support for Transfer To Savings** — Plaid `subtype` threaded through to
+     `AddExpenseView` so a Connected account typed `savings` can be a transfer destination, not
+     just Manual Accounts. No backend change.
+  2. **Backend transfer-type allowlist fix** — found by audit, *not* user-reported. See the
+     Architecture landmark on `TransactionType` sync for the full description; migration 0022 +
+     widened `_shared/manual.ts`. `ManualDataSyncResult` now also decodes `rejected_transactions`
+     (previously silently dropped) and logs it in DEBUG — closing the blind spot that hid this.
+  3. **`savedViaTransfer` sharing category** (migration 0023) — new global-only category mirroring
+     `monthlySavings` exactly; 2 new Edge Functions, full client stack, Dashboard wiring, Account
+     Related Options toggle.
+  4. **Settings → Quick Stats** rebuilt from a static info card into a working picker.
+- Deployed to **Preview first, then Production** (both migrations, all 4 new/updated Edge
+  Functions), verified live: SQL function/constraint checks, no-JWT smoke checks returning 401 on
+  all 4, and before/after row counts confirming zero data mutation.
+- Tests: **2719/2719 passing**, zero new warnings. Five pre-existing source-scan tests broke on the
+  new code and were fixed by widening their `prefix()` windows — see Testing conventions.
+- Two build gotchas hit and resolved: new Swift files aren't picked up until `xcodegen generate` is
+  re-run; and running `xcodegen` while Xcode is open leaves Xcode's index stale (see Next Step 2).
+- Commit `d6d40ee` landed after this, **not from a Claude session** — it added
+  `FinanceTrack 7.xcodeproj/*` and pushed. See Known Issues.
+
+### 2026-08-04 and 2026-08-15 (early) — not logged at the time
+- Commits `4c0d20a` (107 files) and `12df617` (60 files). **These were never documented here, and
+  the entries below are reconstructed from git stats after the fact — treat them as an index of
+  where to look, not as a verified account of what was decided or why.**
+- `4c0d20a` added migrations **0016–0021** (secondary shared-data discovery, Connected-account
+  balance parity, monthly-savings sharing, dashboard-summary sharing + monthly-outlook week, owner
+  manual-accounts restore) and their Edge Functions (`get-dashboard-summary`,
+  `upsert-dashboard-summary`, `get-monthly-savings-summary`, `upsert-savings-summary`,
+  `get-my-manual-accounts`, and the invitation functions), plus `SharedPrimaryDataViews.swift`.
+- `12df617` was client-side and large: transaction CSV import/export, Pay Bills, Users Guide,
+  in-app calculator, biometric auth changes, exclude-from-reports, bill-payment backfill,
+  transaction amount/bill-tag editing, and a ~5800-line test expansion.
+- If precise detail on either is ever needed, read the commits directly rather than trusting this
+  summary.
 
 ### 2026-07-21 — Phase 8F: Secondary Invitation + Share-Back Production Deployment
 - Deployed migration 0015 to Production: `set_secondary_connected_account_sharing`,
