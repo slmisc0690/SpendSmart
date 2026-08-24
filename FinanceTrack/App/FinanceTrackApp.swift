@@ -310,8 +310,12 @@ struct FinanceTrackApp: App {
             .animation(.easeInOut(duration: 0.25), value: authService.isEmailVerified)
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
+            // GRACE PERIOD (2026-08-18) — was an unconditional `lock()` on every background
+            // transition, re-prompting Face ID after even a few seconds away. Now only re-locks
+            // once `BiometricAuthManager.gracePeriod` (1 hour) has actually elapsed since the
+            // last successful unlock — see that method's own header.
             if newPhase == .background, biometricAuth.isFaceIDRequired {
-                biometricAuth.lock()
+                biometricAuth.lockIfGraceExpired()
             }
             // Phase 8D FOLLOW-UP — foreground-return pending-invitation discovery (Phase 5's own
             // locked lifecycle requirement). `oldPhase != .active` excludes the launch transition
@@ -395,6 +399,12 @@ private struct RootView: View {
     @Query private var settingsList: [BudgetSettings]
     @Query private var categories: [Category]
     @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
+    /// ONBOARDING (2026-08-18) — sorted deterministically for the same reason
+    /// `QuickStatsSettings`/`FavoritesSettings` are: guarantees `.first` always resolves the same
+    /// row if a duplicate-row race ever occurred (see those models' own headers for the proven
+    /// real-device bug this pattern exists to prevent), even though nothing else in this app
+    /// currently mutates this row from more than one screen the way those two are.
+    @Query(sort: \OnboardingSettings.id) private var onboardingSettingsList: [OnboardingSettings]
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(AutoBackupManager.self) private var autoBackupManager
@@ -413,31 +423,59 @@ private struct RootView: View {
         Binding(get: { pendingInvitationPopupViewModel.shouldPresentPopup }, set: { _ in })
     }
 
+    /// ONBOARDING (2026-08-18) — gates the very first render before bootstrap has had a chance to
+    /// run, so neither the real `TabView` nor the onboarding flow ever flashes briefly showing the
+    /// wrong one while `onboardingSettingsList` is still empty (the moment before `.task` inserts
+    /// its row). Same "blank until bootstrap resolves" posture `FinanceTrackApp`'s own
+    /// `AuthLoadingView`/`userDataStore` resolution gate already uses one level up.
+    @State private var isBootstrapped = false
+
+    private var onboardingSettings: OnboardingSettings? {
+        onboardingSettingsList.first
+    }
+
     var body: some View {
-        TabView {
-            DashboardView()
-                .tabItem { Label("Dashboard", systemImage: "square.grid.2x2.fill") }
+        Group {
+            if !isBootstrapped {
+                AuthLoadingView()
+            } else if let onboarding = onboardingSettings, !onboarding.hasCompletedOnboarding {
+                OnboardingFlowView { path in
+                    onboarding.selectedPathRawValue = path == .none ? nil : path.rawValue
+                    onboarding.hasCompletedOnboarding = true
+                    onboarding.updatedAt = .now
+                }
+            } else {
+                TabView {
+                    DashboardView()
+                        .tabItem { Label("Dashboard", systemImage: "square.grid.2x2.fill") }
 
-            WeeklyBudgetView()
-                .tabItem { Label("Weekly", systemImage: "calendar") }
+                    WeeklyBudgetView()
+                        .tabItem { Label("Weekly", systemImage: "calendar") }
 
-            ExpenseListView()
-                .tabItem { Label("Activity", systemImage: "list.bullet") }
+                    ExpenseListView()
+                        .tabItem { Label("Activity", systemImage: "list.bullet") }
 
-            AccountListView()
-                .tabItem { Label("Manual Accounts", systemImage: "creditcard.fill") }
+                    AccountListView()
+                        .tabItem { Label("Manual Accounts", systemImage: "creditcard.fill") }
 
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape.fill") }
-        }
-        .tint(Theme.accent)
-        .fullScreenCover(isPresented: pendingInvitationPopupBinding) {
-            PendingInvitationPopupView()
+                    SettingsView()
+                        .tabItem { Label("Settings", systemImage: "gearshape.fill") }
+                }
+                .tint(Theme.accent)
+                .fullScreenCover(isPresented: pendingInvitationPopupBinding) {
+                    PendingInvitationPopupView()
+                }
+            }
         }
         .task {
             let freshlyCreatedSettings = bootstrapDefaultSettingsIfNeeded()
             bootstrapDefaultCategoriesIfNeeded()
             bootstrapDefaultMonthlyPlanSettingsIfNeeded()
+            // ONBOARDING — must run AFTER bootstrapDefaultSettingsIfNeeded above so
+            // `freshlyCreatedSettings != nil` (a genuinely brand-new user) is known; see
+            // `OnboardingSettings`'s own header for why an existing user must never be
+            // retroactively dropped into this flow.
+            bootstrapDefaultOnboardingSettingsIfNeeded(isFreshUser: freshlyCreatedSettings != nil)
             autoBackupManager.startObserving(context: modelContext)
             cloudBackupManager.startObserving(context: modelContext)
             // RootView only ever renders once userDataStore.resolvedUserId == authService
@@ -456,7 +494,17 @@ private struct RootView: View {
             // fire-and-forget, and harmless to run alongside the refresh above.
             Task { await pendingInvitationPopupViewModel.checkForPendingInvitation() }
             await enablePendingFaceIDOptInIfNeeded(for: freshlyCreatedSettings)
+            isBootstrapped = true
         }
+    }
+
+    /// ONBOARDING — creates the row exactly once. `isFreshUser` (from
+    /// `bootstrapDefaultSettingsIfNeeded`'s own return value) decides the STARTING value of
+    /// `hasCompletedOnboarding`: `false` only for a genuinely brand-new signup, `true` for an
+    /// existing install just now picking up this app version — see this type's own header.
+    private func bootstrapDefaultOnboardingSettingsIfNeeded(isFreshUser: Bool) {
+        guard onboardingSettingsList.isEmpty else { return }
+        modelContext.insert(OnboardingSettings(hasCompletedOnboarding: !isFreshUser))
     }
 
     /// Returns the newly-created `BudgetSettings` row when this is a genuinely fresh user (no

@@ -39,6 +39,7 @@ struct SharedConnectedAccountDetailView: View {
         .navigationTitle(viewModel.account.name ?? "Shared Account")
         .navigationBarTitleDisplayMode(.inline)
         .task { await viewModel.load() }
+        .refreshable { await viewModel.load() }
     }
 
     private var header: some View {
@@ -152,6 +153,7 @@ struct SharedManualAccountDetailView: View {
         .navigationTitle(viewModel.account.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await viewModel.load() }
+        .refreshable { await viewModel.load() }
     }
 
     @ViewBuilder

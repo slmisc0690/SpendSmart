@@ -20,10 +20,11 @@ enum PlaidTransactionImportService {
         account: Account?,
         category: Category? = nil
     ) -> FinanceTransaction {
-        FinanceTransaction(
-            amount: dto.amount,
+        let (type, amount) = classifyPlaidAmount(dto.amount)
+        return FinanceTransaction(
+            amount: amount,
             date: dto.postedDate ?? dto.authorizedDate ?? .now,
-            type: .expense,
+            type: type,
             source: .plaid,
             note: "",
             countsTowardWeeklyBudget: false,
@@ -40,6 +41,18 @@ enum PlaidTransactionImportService {
             account: account,
             category: category
         )
+    }
+
+    /// Plaid's sign convention: a positive `amount` is money leaving the account (a purchase); a
+    /// negative `amount` is money coming back INTO the account — for a credit card, a payment or
+    /// credit posted to it (e.g. paying the bill from checking). `FinanceTransaction.amount` is
+    /// always a positive magnitude elsewhere in this app (type conveys direction), so a raw
+    /// negative Plaid amount must never be stored as-is under `.expense` — doing so let a card
+    /// payment silently net against real spending in `BudgetCalculator.autoTrackedDelta` (which,
+    /// unlike manual entries, counts every Auto-Tracked transaction regardless of review-approval
+    /// flags), instead of being excluded like the `.creditCardPayment` type it actually is.
+    private static func classifyPlaidAmount(_ amount: Decimal) -> (type: TransactionType, amount: Decimal) {
+        amount < 0 ? (.creditCardPayment, -amount) : (.expense, amount)
     }
 
     /// The result of applying one `PlaidSyncResult` to SwiftData.
@@ -59,6 +72,11 @@ enum PlaidTransactionImportService {
         /// date (from before the local-midnight parser fix) corrected in place this sync — see
         /// `repairStaleUTCMidnightDate`. Zero once every affected row has been repaired once.
         let repairedDateCount: Int
+        /// How many already-persisted `source == .plaid` transactions were stored as `.expense`
+        /// with a negative amount (from before `classifyPlaidAmount` existed) and reclassified to
+        /// `.creditCardPayment` in place this sync — see `repairMisclassifiedCreditCardPayment`.
+        /// Zero once every affected row has been repaired once.
+        let repairedCreditCardPaymentCount: Int
     }
 
     /// Applies a full backend sync result to SwiftData: inserts new Plaid transactions, updates
@@ -110,6 +128,19 @@ enum PlaidTransactionImportService {
         for transaction in existingPlaidTransactions {
             if repairStaleUTCMidnightDate(on: transaction) {
                 repairedDateCount += 1
+            }
+        }
+
+        // Self-healing repair for transactions persisted before `classifyPlaidAmount` existed,
+        // when every Plaid transaction was stored as `.expense` regardless of Plaid's amount sign
+        // — see `repairMisclassifiedCreditCardPayment`'s own doc comment. Runs on every sync for
+        // the same reason the date repair above does: Plaid's `/transactions/sync` cursor never
+        // redelivers a transaction that hasn't itself changed on Plaid's side, so an
+        // already-persisted misclassified payment would otherwise stay wrong forever.
+        var repairedCreditCardPaymentCount = 0
+        for transaction in existingPlaidTransactions {
+            if repairMisclassifiedCreditCardPayment(on: transaction) {
+                repairedCreditCardPaymentCount += 1
             }
         }
 
@@ -182,6 +213,7 @@ enum PlaidTransactionImportService {
         print("[PlaidTransactionImportService] merged-from-pending count: \(mergedFromPendingCount)")
         print("[PlaidTransactionImportService] removed count: \(removedCount)")
         print("[PlaidTransactionImportService] repaired stale-UTC-midnight-date count: \(repairedDateCount)")
+        print("[PlaidTransactionImportService] repaired misclassified-credit-card-payment count: \(repairedCreditCardPaymentCount)")
         #endif
 
         do {
@@ -202,7 +234,8 @@ enum PlaidTransactionImportService {
             duplicateSkippedCount: duplicateSkippedCount,
             removedCount: removedCount,
             mergedFromPendingCount: mergedFromPendingCount,
-            repairedDateCount: repairedDateCount
+            repairedDateCount: repairedDateCount,
+            repairedCreditCardPaymentCount: repairedCreditCardPaymentCount
         )
     }
 
@@ -298,6 +331,53 @@ enum PlaidTransactionImportService {
         return repairedCount
     }
 
+    /// Reclassifies `transaction` in place from `.expense` with a negative amount to
+    /// `.creditCardPayment` with the equivalent positive magnitude, if it still carries the
+    /// signature of a transaction imported before `classifyPlaidAmount` existed (see that
+    /// function's own doc comment for the underlying bug: every Plaid transaction used to be
+    /// forced to `.expense` regardless of Plaid's amount sign, so a payment/credit posted to a
+    /// credit card silently netted against real spending in `BudgetCalculator.autoTrackedDelta`
+    /// instead of being excluded). Returns whether anything changed.
+    ///
+    /// WHY THIS IS SAFE, NOT A GUESS: a genuine `.expense` transaction can never have a negative
+    /// `amount` under the current (fixed) import path — `classifyPlaidAmount` and `applyUpdates`
+    /// both guarantee `.expense` only ever carries a positive magnitude going forward. So finding
+    /// `.expense` with `amount < 0` on an already-persisted `source == .plaid` row is an
+    /// unambiguous signature of the old bug, never a coincidental match on a correctly-imported
+    /// row. Scope: only `source == .plaid` transactions are ever passed here — manual entries
+    /// (where a user could conceivably enter a negative amount some other way) are never touched.
+    @discardableResult
+    static func repairMisclassifiedCreditCardPayment(on transaction: FinanceTransaction) -> Bool {
+        guard transaction.source == .plaid, transaction.type == .expense, transaction.amount < 0 else { return false }
+        transaction.type = .creditCardPayment
+        transaction.amount = -transaction.amount
+        transaction.updatedAt = .now
+        return true
+    }
+
+    /// Runs the exact same misclassified-credit-card-payment repair sweep `applySync` runs on
+    /// every transaction sync, but purely locally: no network call, no `PlaidSyncResult` required.
+    /// Exists for the same reason `repairStaleUTCMidnightDatesLocally` does — so
+    /// `UserDataStoreManager.resolve(for:)` can self-heal a user's already-persisted Plaid
+    /// transactions the moment their local store is attached, without depending on the user ever
+    /// triggering an actual transaction sync. Saves at most once, and only if something actually
+    /// changed.
+    @discardableResult
+    static func repairMisclassifiedCreditCardPaymentsLocally(in context: ModelContext) throws -> Int {
+        let plaidTransactions = try context.fetch(FetchDescriptor<FinanceTransaction>())
+            .filter { $0.source == .plaid }
+        var repairedCount = 0
+        for transaction in plaidTransactions {
+            if repairMisclassifiedCreditCardPayment(on: transaction) {
+                repairedCount += 1
+            }
+        }
+        if repairedCount > 0 {
+            try context.save()
+        }
+        return repairedCount
+    }
+
     /// Copies mutable, sync-safe fields from `dto` onto `existing` — never `id`, `source`,
     /// `countsTowardWeeklyBudget`, or `isExcludedFromReports`, which stay under the app's own
     /// control. Account/category association aren't touched here either: neither is resolved at
@@ -306,7 +386,9 @@ enum PlaidTransactionImportService {
     /// actually changed, so the caller can tell a genuine update apart from a no-op re-delivery.
     private static func applyUpdates(from dto: PlaidTransactionDTO, to existing: FinanceTransaction) -> Bool {
         var changed = false
-        if existing.amount != dto.amount { existing.amount = dto.amount; changed = true }
+        let (type, amount) = classifyPlaidAmount(dto.amount)
+        if existing.amount != amount { existing.amount = amount; changed = true }
+        if existing.type != type { existing.type = type; changed = true }
         let newDate = dto.postedDate ?? dto.authorizedDate ?? existing.date
         if existing.date != newDate { existing.date = newDate; changed = true }
         if existing.isPending != dto.isPending { existing.isPending = dto.isPending; changed = true }

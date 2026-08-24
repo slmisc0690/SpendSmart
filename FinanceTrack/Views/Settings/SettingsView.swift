@@ -80,6 +80,8 @@ struct SettingsView: View {
     @State private var isPresentingCSVImportPreview = false
     @State private var csvImportErrorMessage: String?
     @State private var isPresentingCSVImportError = false
+    @State private var isPresentingWeeklySpendingEdit = false
+    @State private var isPresentingSavingsGoalEdit = false
     @State private var isPresentingAccount = false
     @State private var isPresentingAccountRelatedOptions = false
     @State private var isPresentingFavorites = false
@@ -149,14 +151,41 @@ struct SettingsView: View {
     /// `MonthlyPlanView`'s own lifecycle hooks. Deliberately NOT actual-spending-adjusted (unlike
     /// the prior `currentMonthlySpendRemaining`) — Effective Planned Weekly Spending is a stable
     /// planning figure, never reduced by spending that's already happened.
-    private var currentEffectivePlannedWeeklySpending: Decimal {
+    private var currentMonthFlexibleSpendingAvailable: Decimal {
         let month = DateRangeHelper.currentMonthRange()
         let income = MonthlyPlanCalculator.estimatedMonthlyIncome(incomeSources, in: month)
         let fixedExpenses = MonthlyPlanCalculator.estimatedMonthlyFixedExpenses(recurringExpenses, in: month)
         let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
         let buffer = monthlyPlanSettingsList.first?.bufferAmount ?? 0
-        let flexible = MonthlyPlanCalculator.flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: goal, bufferAmount: buffer)
-        return MonthlyPlanCalculator.effectivePlannedWeeklySpending(override: monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: flexible)
+        return MonthlyPlanCalculator.flexibleSpendingAvailable(income: income, fixedExpenses: fixedExpenses, savingsGoal: goal, bufferAmount: buffer)
+    }
+
+    private var currentEffectivePlannedWeeklySpending: Decimal {
+        MonthlyPlanCalculator.effectivePlannedWeeklySpending(override: monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: currentMonthFlexibleSpendingAvailable)
+    }
+
+    /// The RAW automatic Planned Weekly Spending (Flexible Spending Available ÷ 4), ignoring any
+    /// Custom override — passed to `PlannedWeeklySpendingEditView` so its "Automatic" segment shows
+    /// the same value `MonthlyPlanView` itself would, computed from the same
+    /// `currentMonthFlexibleSpendingAvailable` that `currentEffectivePlannedWeeklySpending` uses.
+    private var automaticPlannedWeeklySpending: Decimal {
+        MonthlyPlanCalculator.automaticPlannedWeeklySpending(flexibleSpendingAvailable: currentMonthFlexibleSpendingAvailable)
+    }
+
+    /// CORRECTION (2026-08-18, Scott's request — tapping Weekly Spending Limit/Monthly Savings
+    /// Goal now opens the REAL Monthly Plan edit sheets) — re-syncs Budget Settings' derived
+    /// display values to whatever the Monthly Plan now says, both on first appearance AND right
+    /// after either edit sheet closes (this screen stays mounted underneath them the whole time,
+    /// so nothing else would otherwise trigger a refresh). Safe to call anytime: only writes to
+    /// the live `settings` model when the derived values have actually changed.
+    private func syncBudgetSettingsFromMonthlyPlan() {
+        let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
+        let expectedWeeklyLimit = currentEffectivePlannedWeeklySpending
+        if settings.monthlyGoal != goal || settings.weeklySpendingLimit != expectedWeeklyLimit {
+            settings.applyMonthlyPlanAutoCalculate(monthlyPlanSavingsGoal: goal, monthlySpendRemaining: expectedWeeklyLimit * 4)
+        }
+        weeklyLimit = settings.weeklySpendingLimit
+        monthlyGoal = settings.monthlyGoal
     }
 
     var body: some View {
@@ -205,13 +234,7 @@ struct SettingsView: View {
                 // (covers both new users and users who had values from before this formula
                 // existed). Safe to call before the primitive snapshots below are set: it only
                 // writes to the live `settings` model, never reads back from `body`.
-                let goal = monthlyPlanSettingsList.first?.monthlySavingsGoal ?? 0
-                let expectedWeeklyLimit = currentEffectivePlannedWeeklySpending
-                if settings.monthlyGoal != goal || settings.weeklySpendingLimit != expectedWeeklyLimit {
-                    settings.applyMonthlyPlanAutoCalculate(monthlyPlanSavingsGoal: goal, monthlySpendRemaining: expectedWeeklyLimit * 4)
-                }
-                weeklyLimit = settings.weeklySpendingLimit
-                monthlyGoal = settings.monthlyGoal
+                syncBudgetSettingsFromMonthlyPlan()
                 includePendingTransactions = settings.includePendingTransactions
                 spendSenseEnabled = settings.spendSenseEnabled ?? true
                 showMonthlySpendingQuickStat = settings.showMonthlySpendingQuickStat ?? true
@@ -237,6 +260,23 @@ struct SettingsView: View {
                 // plan directly — see `MonthlyPlanEntryView`'s own header.
                 MonthlyPlanEntryView()
             }
+            // CORRECTION (2026-08-18) — reuses the SAME real Monthly Plan edit sheets
+            // `MonthlyPlanView` itself presents (never a second, competing edit surface), reached
+            // directly by tapping the corresponding read-only row above. `settings` here is
+            // `MonthlyPlanSettings?` (the Monthly Plan's own model), unrelated to `settings` (no
+            // qualifier, `BudgetSettings`) used everywhere else in this file.
+            .sheet(isPresented: $isPresentingWeeklySpendingEdit) {
+                PlannedWeeklySpendingEditView(settings: monthlyPlanSettingsList.first, automaticAmount: automaticPlannedWeeklySpending)
+            }
+            .sheet(isPresented: $isPresentingSavingsGoalEdit) {
+                MonthlyPlanSettingsEditView(settings: monthlyPlanSettingsList.first)
+            }
+            .onChange(of: isPresentingWeeklySpendingEdit) { _, isPresented in
+                if !isPresented { syncBudgetSettingsFromMonthlyPlan() }
+            }
+            .onChange(of: isPresentingSavingsGoalEdit) { _, isPresented in
+                if !isPresented { syncBudgetSettingsFromMonthlyPlan() }
+            }
             .sheet(isPresented: $isPresentingCategoryManagement) {
                 CategoryManagementView()
             }
@@ -251,6 +291,21 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $isPresentingAccountRelatedOptions) {
                 AccountRelatedOptionsView()
+            }
+            // CORRECTION (2026-08-18) — a modally-presented sheet does not auto-dismiss just
+            // because the content underneath it swaps (e.g. `FinanceTrackApp`'s root Group
+            // switching to `AuthFlowView` once `sessionState` flips to `.signedOut`). Without this,
+            // sign-out from `AccountView`'s sheet visibly "does nothing" until the user manually
+            // taps Done, closing the sheet and only THEN revealing the already-signed-out root.
+            // Safe to do here (unlike the `dismiss()` call deliberately removed from
+            // `AccountView.signOut()` — see that file's header comment for the exact crash that
+            // caused): this view's `body` only ever reads primitive `@State` snapshots, never a
+            // live `settings.<property>` Binding, so re-evaluating it here touches no
+            // already-invalidated `BudgetSettings`/`ModelContext` state.
+            .onChange(of: authService.sessionState) { _, newValue in
+                guard newValue == .signedOut else { return }
+                isPresentingAccount = false
+                isPresentingAccountRelatedOptions = false
             }
             .sheet(isPresented: $isPresentingFavorites) {
                 FavoritesConfigurationView()
@@ -410,6 +465,27 @@ struct SettingsView: View {
                 }
             }
             .padding(.horizontal, Theme.Spacing.lg)
+
+            // LOCK NOW (2026-08-18) — moved here from Security & Privacy, directly under the
+            // Account Related Options card, centered. Same trigger/condition as before
+            // (`requireFaceIDSetting`, `biometricAuth.lock()`), just relocated per Scott's
+            // explicit request.
+            if requireFaceIDSetting {
+                Button {
+                    biometricAuth.lock()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("Lock Now")
+                            .font(Theme.bodyFont)
+                    }
+                    .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
         }
     }
 
@@ -469,10 +545,10 @@ struct SettingsView: View {
                 infoExplanation: """
                     A read-only summary plus one real control.
 
-                    WEEKLY SPENDING LIMIT / MONTHLY SAVINGS GOAL — these two fields are shown for \
-                    reference only (you can't type into them here); they're always calculated from \
-                    your Monthly Plan (or your Custom Planned Weekly Spending, if you've set one — \
-                    see the Planning section). To actually change them, go to Planning → Monthly Plan.
+                    WEEKLY SPENDING LIMIT / MONTHLY SAVINGS GOAL — these are always calculated from \
+                    your Monthly Plan, so you can't type directly into the amount shown here — but \
+                    tapping either row opens the real Monthly Plan editor for it (Planned Weekly \
+                    Spending / Savings Goal), the same one reachable from Planning → Monthly Plan.
 
                     INCLUDE PENDING TRANSACTIONS — a "pending" transaction is one your bank has \
                     authorized but hasn't fully posted yet (common with debit/credit card purchases \
@@ -488,9 +564,13 @@ struct SettingsView: View {
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    labeledAmountField(title: "Weekly Spending Limit", amount: $weeklyLimit, isDisabled: true)
+                    labeledAmountField(title: "Weekly Spending Limit", amount: $weeklyLimit) {
+                        isPresentingWeeklySpendingEdit = true
+                    }
                     Divider().overlay(Theme.cardStroke)
-                    labeledAmountField(title: "Monthly Savings Goal", amount: $monthlyGoal, isDisabled: true)
+                    labeledAmountField(title: "Monthly Savings Goal", amount: $monthlyGoal) {
+                        isPresentingSavingsGoalEdit = true
+                    }
                     derivedBudgetValuesHelperRow
                     Divider().overlay(Theme.cardStroke)
 
@@ -959,22 +1039,6 @@ struct SettingsView: View {
                             set: { newValue in privacyMode.isEnabled = newValue }
                         )
                     )
-
-                    if requireFaceIDSetting {
-                        Divider().overlay(Theme.cardStroke)
-                        Button {
-                            biometricAuth.lock()
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text("Lock Now")
-                                    .font(Theme.bodyFont)
-                            }
-                            .foregroundStyle(Theme.accent)
-                        }
-                        .buttonStyle(.plain)
-                    }
 
                     Divider().overlay(Theme.cardStroke)
 
@@ -1495,22 +1559,31 @@ struct SettingsView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
-    /// REVISED PRODUCT DIRECTION — read-only display of a Budget Settings amount. `onSubmit`
-    /// removed entirely: both call sites (Weekly Spending Limit, Monthly Savings Goal) always
-    /// pass `isDisabled: true` now, since neither field is ever manually editable.
-    private func labeledAmountField(title: String, amount: Binding<Decimal?>, isDisabled: Bool) -> some View {
-        HStack {
-            Text(title)
-                .font(Theme.bodyFont)
-                .foregroundStyle(isDisabled ? Theme.textTertiary : Theme.textPrimary)
-            Spacer()
-            CurrencyAmountField(
-                amount: amount,
-                style: .inline,
-                isDisabled: isDisabled,
-                accessibilityLabel: title
-            )
+    /// CORRECTION (2026-08-18) — still a read-only display of a derived Budget Settings amount
+    /// (the amount itself is never directly typable, and the underlying value still always comes
+    /// from the Monthly Plan), but the row as a whole is now a tap target that opens the real
+    /// Monthly Plan editor for it, via `onEdit`. Both call sites (Weekly Spending Limit, Monthly
+    /// Savings Goal) always pass one now.
+    private func labeledAmountField(title: String, amount: Binding<Decimal?>, onEdit: @escaping () -> Void) -> some View {
+        Button(action: onEdit) {
+            HStack {
+                Text(title)
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                CurrencyAmountField(
+                    amount: amount,
+                    style: .inline,
+                    isDisabled: true,
+                    accessibilityLabel: title
+                )
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     /// Turning "Require Face ID" ON must succeed a real biometric check first — never flips the

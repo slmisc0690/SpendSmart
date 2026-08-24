@@ -78,6 +78,8 @@ enum PrimaryDashboardSummarySyncService {
         weekStartsOnSunday: Bool,
         includePending: Bool,
         warningThreshold: Double,
+        autoTrackedAccountIds: Set<String> = [],
+        excludedTransactionIDs: Set<UUID> = [],
         backend: HouseholdSharingService = SupabaseHouseholdSharingService()
     ) async {
         let summary = MonthlyPlanCalculator.summary(
@@ -90,18 +92,29 @@ enum PrimaryDashboardSummarySyncService {
             weekInterval: weekInterval,
             weekStartsOnSunday: weekStartsOnSunday,
             includePending: includePending,
-            warningThreshold: warningThreshold
+            warningThreshold: warningThreshold,
+            autoTrackedAccountIds: autoTrackedAccountIds,
+            excludedTransactionIDs: excludedTransactionIDs
         )
 
-        let moneyAfterBills = MonthlyPlanCalculator.moneyAfterBills(
-            income: summary.estimatedMonthlyIncome,
-            fixedExpenses: summary.estimatedMonthlyFixedExpenses
+        // FIXED BILLS UNIFICATION PARITY — replicates `DashboardView`'s own
+        // `correctedFlexibleSpendingAvailableForOutlook` exactly: the corrected Fixed Bills total
+        // (`FixedBillsTimingFilter.displayedTotal`, not the legacy frequency-converted
+        // `estimatedMonthlyFixedExpenses`) PLUS Bill Payment Variance (planned vs. actually paid
+        // per bill this month). Before this fix, this service used the OLD `moneyAfterBills`/
+        // `monthlySpendingBudget` pipeline, which predates the Fixed Bills Unification work and
+        // never applied either correction — so a Secondary's Monthly Remaining silently diverged
+        // from the Primary's own displayed figure by exactly the bill-payment-variance amount
+        // whenever a bill was paid for more or less than planned.
+        let correctedFixedBillsTotal = FixedBillsTimingFilter.displayedTotal(for: recurringExpenses.filter { $0.isActive })
+        let correctedPlannedFlexibleSpendingAvailable = summary.estimatedMonthlyIncome - correctedFixedBillsTotal - summary.monthlySavingsGoal - summary.bufferAmount
+        let billVariance = MonthlyPlanCalculator.billPaymentVariance(
+            recurringExpenses: recurringExpenses,
+            transactions: transactions,
+            in: monthInterval
         )
-        let monthlySpendingBudget = MonthlyPlanCalculator.monthlySpendingBudget(
-            moneyAfterBills: moneyAfterBills,
-            savingsGoal: summary.monthlySavingsGoal,
-            bufferAmount: summary.bufferAmount
-        )
+        let correctedFlexibleSpendingAvailable = correctedPlannedFlexibleSpendingAvailable + billVariance
+        let monthlySpendingBudget = max(0, correctedFlexibleSpendingAvailable)
         let monthlySpendRemaining = MonthlyPlanCalculator.monthlySpendRemaining(
             monthlySpendingBudget: monthlySpendingBudget,
             actualMonthlySpending: summary.actualSpentThisMonth
@@ -113,14 +126,16 @@ enum PrimaryDashboardSummarySyncService {
         // `DashboardView`'s own `projectedMonthlySavingsForOutlook` uses, applied to this
         // function's own `summary`/`planSettings` — one shared calculation path, never a second
         // formula. `summary.projectedMonthlySavings` (the legacy actual-spending formula) is left
-        // completely unused here now.
+        // completely unused here now. FIXED BILLS UNIFICATION PARITY carries through here too:
+        // `effectivePlannedWeeklySpending` is fed the corrected `correctedFlexibleSpendingAvailable`
+        // (Fixed Bills total + bill-payment-variance), not the legacy `summary.flexibleSpendingAvailable`.
         let plannedWeeklySpending = MonthlyPlanCalculator.effectivePlannedWeeklySpending(
             override: planSettings?.plannedWeeklySpendingOverride,
-            flexibleSpendingAvailable: summary.flexibleSpendingAvailable
+            flexibleSpendingAvailable: correctedFlexibleSpendingAvailable
         )
         let plannedMonthlySpendingFromPlan = MonthlyPlanCalculator.plannedMonthlySpending(plannedWeeklySpending: plannedWeeklySpending)
         let additionalPlannedSavings = MonthlyPlanCalculator.additionalPlannedSavings(
-            flexibleSpendingAvailable: summary.flexibleSpendingAvailable,
+            flexibleSpendingAvailable: correctedFlexibleSpendingAvailable,
             plannedMonthlySpending: plannedMonthlySpendingFromPlan
         )
         let projectedMonthlySavingsFromPlan = MonthlyPlanCalculator.projectedSavingsFromPlannedSpending(
@@ -145,6 +160,26 @@ enum PrimaryDashboardSummarySyncService {
             )
         }
 
+        // USER B FULL WEEK-BY-WEEK PARITY — ALL 4 of this month's weeks (`summary.weeklyComparisons`
+        // itself always has exactly 4 entries for the month, a future week simply reading as $0
+        // actual with its full recommended/remaining), freshly recomputed and pushed every call —
+        // never an incrementally-cached/appended value. A past week's totals naturally settle to
+        // their final numbers the moment that week is over; nothing here needs to remember or merge
+        // a prior push's array.
+        let weeklyComparisonsForUpload = summary.weeklyComparisons.enumerated().map { index, comparison in
+            UpsertDashboardSummaryRequest.CurrentPlanWeek(
+                index: index,
+                number: index + 1,
+                startDate: comparison.weekInterval.start,
+                endDate: comparison.weekInterval.end,
+                recommended: comparison.recommendedLimit,
+                actual: comparison.actualSpent,
+                remaining: comparison.remaining,
+                status: comparison.status,
+                calendar: .current
+            )
+        }
+
         _ = try? await backend.upsertDashboardSummary(
             UpsertDashboardSummaryRequest(
                 actualSpentThisMonth: summary.actualSpentThisMonth,
@@ -157,7 +192,9 @@ enum PrimaryDashboardSummarySyncService {
                 monthlyOutlookActual: summary.actualSpentThisMonth,
                 monthlyOutlookProjectedSavings: projectedMonthlySavingsFromPlan,
                 monthlyOutlookStatus: statusFromPlan,
-                currentPlanWeek: currentPlanWeek
+                currentPlanWeek: currentPlanWeek,
+                additionalPlannedSavings: additionalPlannedSavings,
+                weeklyComparisons: weeklyComparisonsForUpload
             )
         )
     }

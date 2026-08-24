@@ -16,7 +16,7 @@ struct DashboardView: View {
     /// which row was canonical. This screen NEVER creates or merges rows itself (see
     /// `favoriteDestinations`'s own header) — it only ever needs to agree with Settings on which
     /// existing row to read.
-    @Query(sort: \FavoritesSettings.id) private var favoritesSettingsList: [FavoritesSettings]
+    @Query(sort: \FavoritesSettings.id) private var favoritesSettingsList:  [FavoritesSettings]
     /// Same deterministic-sort reasoning as `favoritesSettingsList` above, for the analogous
     /// Quick Stats visibility picker (`QuickStatsConfigurationView`). This screen never creates or
     /// merges rows itself — only that screen's own explicit `.onAppear`/mutation call sites do.
@@ -24,6 +24,10 @@ struct DashboardView: View {
     @State private var isPresentingQuickStatsConfiguration = false
 
     @Environment(PrivacyModeManager.self) private var privacyMode
+    /// LOCK ICON (2026-08-18) — read-only here; only used to decide whether the header's lock
+    /// icon appears at all (mirrors `SettingsView`'s own `if requireFaceIDSetting` condition for
+    /// its "Lock Now" button) and to trigger an immediate `lock()` when tapped.
+    @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(PlaidConnectionManager.self) private var plaidConnection
     @Environment(\.modelContext) private var modelContext
     #if DEBUG
@@ -44,10 +48,10 @@ struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    @State private var isPresentingSetBudget = false
     @State private var isPresentingAddExpense = false
     @State private var isPresentingSettings = false
     @State private var isPresentingActivity = false
+    @State private var isPresentingMonthlyOutlookBreakdown = false
     @State private var isPresentingExcludeTransactionsPicker = false
     /// Non-`nil` while a Favorites Bar destination's sheet is presented — drives the single
     /// `.sheet(item:)` below (`destinationView(for:)`), which routes to each destination's existing
@@ -285,7 +289,9 @@ struct DashboardView: View {
             monthInterval: monthInterval,
             weekStartsOnSunday: settings?.weekStartsOnSunday ?? true,
             includePending: includePending,
-            warningThreshold: settings?.warningThreshold ?? 0.70
+            warningThreshold: settings?.warningThreshold ?? 0.70,
+            autoTrackedAccountIds: autoTrackedAccountIds,
+            excludedTransactionIDs: excludedTransactionIDs
         )
     }
 
@@ -492,9 +498,6 @@ struct DashboardView: View {
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationBarHidden(true)
-            .sheet(isPresented: $isPresentingSetBudget) {
-                WeeklyLimitEditView(limit: plannedWeeklySpendingForOutlook)
-            }
             .sheet(isPresented: $isPresentingAddExpense) {
                 AddExpenseView()
             }
@@ -506,6 +509,13 @@ struct DashboardView: View {
                 // a second one — presented modally, matching every other Dashboard destination in
                 // this file, and opened with whatever tab is currently selected here.
                 ExpenseListView(initialTab: effectiveActivityTab)
+            }
+            .sheet(isPresented: $isPresentingMonthlyOutlookBreakdown) {
+                MonthlyOutlookBreakdownView(
+                    weeks: monthlyOutlookBreakdown,
+                    connections: plaidConnection.connections,
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                )
             }
             .sheet(item: $presentedFavoriteDestination) { destination in
                 favoriteDestinationView(for: destination)
@@ -527,6 +537,12 @@ struct DashboardView: View {
                     Task { await syncSavingsSummaryIfNeeded() }
                     Task { await syncDashboardSummaryIfNeeded() }
                     Task { await syncSavedViaTransferSummaryIfNeeded() }
+                    // SHARED USER REFRESH PARITY — re-pulls the Secondary's own shared Dashboard
+                    // aggregate on foreground-return, same trigger the Primary's own push above
+                    // already uses. A no-op for a Primary (`secondaryOutlookPrimaryUserId` is nil,
+                    // same as `loadDashboardSummaryIfNeeded`'s own existing `.task(id:)` call
+                    // already handles) — never touches what a Primary's own Dashboard displays.
+                    Task { await loadDashboardSummaryIfNeeded() }
                 }
             }
             // CLIENT CORRECTION — `RootView.task`'s own single, fire-and-forget
@@ -575,6 +591,15 @@ struct DashboardView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
                 HStack(spacing: Theme.Spacing.sm) {
+                    // LOCK ICON (2026-08-18) — only shown once Face ID is actually required,
+                    // same condition Settings' own "Lock Now" button already uses; tapping it
+                    // locks immediately, same as that button.
+                    if biometricAuth.isFaceIDRequired {
+                        HeaderIconButton(systemName: "lock.fill") {
+                            biometricAuth.lock()
+                        }
+                        .accessibilityLabel("Lock Now")
+                    }
                     HeaderIconButton(systemName: privacyMode.isEnabled ? "eye.slash.fill" : "eye.fill") {
                         privacyMode.toggle()
                     }
@@ -678,10 +703,8 @@ struct DashboardView: View {
     /// hid the real card behind a setup prompt Scott never asked for. Neither state has any
     /// bearing on whether Monthly Plan data exists; Automatic mode's own value (Flexible Spending
     /// Available ÷ 4) is a real number the moment income/bills exist, with nothing left for the
-    /// user to set up first. Tapping the card still reaches the same `WeeklyLimitEditView` sheet
-    /// the removed button used to (Automatic mode shown as Automatic, Custom mode shown with its
-    /// real amount) — see `isPresentingSetBudget`'s own sheet below; the card's own appearance is
-    /// unchanged (no redesign).
+    /// user to set up first. CORRECTION (2026-08-18) — the card is no longer itself a tap target;
+    /// see `WeeklyLimitEditView`'s own header for why (it's read-only, nothing to edit there).
     @ViewBuilder
     private var weeklyCardSection: some View {
         if accountRelatedOptionsLoaded {
@@ -701,6 +724,34 @@ struct DashboardView: View {
                         isPrivacyModeEnabled: privacyMode.isEnabled
                     )
                     .padding(.horizontal, Theme.Spacing.lg)
+
+                    // SHARED USER REFRESH PARITY — explicit, on-demand re-pull of the Primary's
+                    // shared Dashboard aggregate. Secondary-only; a Primary never sees this
+                    // control, and their own Dashboard is otherwise untouched. Styled as a
+                    // prominent centered pill (rather than a small text link) per Scott's
+                    // explicit request — the Secondary consistently missed the previous
+                    // low-visibility text-only control.
+                    Button {
+                        Task { await loadDashboardSummaryIfNeeded() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if dashboardSummaryViewModel?.isRefreshing == true {
+                                ProgressView().controlSize(.mini).tint(.white)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            Text("Refresh Dashboard")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, Theme.Spacing.md)
+                        .padding(.vertical, 10)
+                        .background(Theme.accent, in: Capsule())
+                    }
+                    .disabled(dashboardSummaryViewModel?.isRefreshing == true)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, Theme.Spacing.lg)
                 }
                 // else: not authorized, or shared data not yet loaded — nothing, never a fake
                 // local "set a budget" prompt for a Secondary.
@@ -714,10 +765,6 @@ struct DashboardView: View {
                     isPrivacyModeEnabled: privacyMode.isEnabled
                 )
                 .padding(.horizontal, Theme.Spacing.lg)
-                .contentShape(Rectangle())
-                .onTapGesture { isPresentingSetBudget = true }
-                .accessibilityAddTraits(.isButton)
-                .accessibilityHint("Edit Weekly Limit")
             }
         }
     }
@@ -790,16 +837,20 @@ struct DashboardView: View {
         DateRangeHelper.currentFourWeekBlock()
     }
 
-    /// LOCKED PRODUCT RULE — a Secondary's local `showSavedThisMonthQuickStat` preference is never
-    /// consulted for the shared card (that Settings toggle isn't even shown to a Secondary — see
-    /// `SettingsView.quickStatsSection`); the Primary's `Share Monthly Savings` permission is the
-    /// only thing gating `sharedSavingsQuickStatVisible` below.
+    /// SUPERSEDES the old "LOCKED PRODUCT RULE" (a Secondary's own Quick Stats picker was
+    /// deliberately ignored for this shared card, per an earlier product decision) — Scott
+    /// confirmed on 2026-08-18 that unchecking "Saved This Month" must hide it for a Secondary
+    /// exactly like every other Quick Stat, including its own sibling
+    /// (`sharedSavedViaTransferQuickStatVisible`, which already worked this way). This screen's
+    /// own local `QuickStatsSettings` picker (`isQuickStatShown`) is a per-DEVICE display
+    /// preference, distinct from `showSavedThisMonthQuickStat`'s now-superseded old Settings
+    /// toggle, and applies to a Secondary the same as a Primary.
     private var showLocalSavedThisMonthQuickStat: Bool {
         accountRelatedOptionsLoaded && !isSecondary && showSavedThisMonthQuickStat
     }
 
     private var sharedSavingsQuickStatVisible: Bool {
-        accountRelatedOptionsLoaded && isSecondary && (accountRelatedOptionsViewModel.response?.primaryMonthlySavingsShared ?? false)
+        isQuickStatShown(.savedThisMonth) && accountRelatedOptionsLoaded && isSecondary && (accountRelatedOptionsViewModel.response?.primaryMonthlySavingsShared ?? false)
     }
 
     /// SAVED VIA TRANSFER SHARING — same gating shape as `sharedSavingsQuickStatVisible`, for the
@@ -841,45 +892,94 @@ struct DashboardView: View {
             .padding(.horizontal, Theme.Spacing.lg)
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.sm), GridItem(.flexible())], spacing: Theme.Spacing.sm) {
+                // SHARED USER QUICK STATS PARITY — a Secondary reads these 4 tiles from the
+                // Primary's own pushed `sharedDashboardSummary` aggregate instead of this device's
+                // local (empty, for a Secondary) planning properties — never a second, local
+                // reconstruction. A Primary's own branch below is completely unchanged from before
+                // this parity work.
                 if isQuickStatShown(.plannedWeeklySpending) {
-                    StatCard(
-                        title: "Planned Weekly Spending",
-                        systemIconName: "calendar",
-                        amount: plannedWeeklySpendingForOutlook,
-                        subtitle: isPlannedWeeklySpendingCustomForOutlook ? "Custom" : "Automatic",
-                        accentColor: Theme.accent,
-                        isPrivacyModeEnabled: privacyMode.isEnabled
-                    )
+                    if !isSecondary {
+                        StatCard(
+                            title: "Planned Weekly Spending",
+                            systemIconName: "calendar",
+                            amount: plannedWeeklySpendingForOutlook,
+                            subtitle: isPlannedWeeklySpendingCustomForOutlook ? "Custom" : "Automatic",
+                            accentColor: Theme.accent,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    } else if secondaryOutlookAuthorized, let summary = sharedDashboardSummary {
+                        StatCard(
+                            title: "Planned Weekly Spending",
+                            systemIconName: "calendar",
+                            amount: summary.weeklySpendingLimit,
+                            subtitle: DateRangeHelper.weekDisplayText(for: sharedCurrentWeekInterval),
+                            accentColor: Theme.accent,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    }
                 }
                 if isQuickStatShown(.spentThisWeek) {
-                    StatCard(
-                        title: "Spent This Week",
-                        systemIconName: "cart.fill",
-                        amount: spentThisWeek,
-                        subtitle: DateRangeHelper.weekDisplayText(for: weekInterval),
-                        accentColor: Theme.statusOver,
-                        isPrivacyModeEnabled: privacyMode.isEnabled
-                    )
+                    if !isSecondary {
+                        StatCard(
+                            title: "Spent This Week",
+                            systemIconName: "cart.fill",
+                            amount: spentThisWeek,
+                            subtitle: DateRangeHelper.weekDisplayText(for: weekInterval),
+                            accentColor: Theme.statusOver,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    } else if secondaryOutlookAuthorized, let summary = sharedDashboardSummary {
+                        StatCard(
+                            title: "Spent This Week",
+                            systemIconName: "cart.fill",
+                            amount: summary.actualSpentThisWeek,
+                            subtitle: DateRangeHelper.weekDisplayText(for: sharedCurrentWeekInterval),
+                            accentColor: Theme.statusOver,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    }
                 }
                 if isQuickStatShown(.plannedMonthlySpending) {
-                    StatCard(
-                        title: "Planned Monthly Spending",
-                        systemIconName: "calendar.badge.clock",
-                        amount: plannedMonthlySpendingForOutlook,
-                        subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                        accentColor: Theme.accentSecondary,
-                        isPrivacyModeEnabled: privacyMode.isEnabled
-                    )
+                    if !isSecondary {
+                        StatCard(
+                            title: "Planned Monthly Spending",
+                            systemIconName: "calendar.badge.clock",
+                            amount: plannedMonthlySpendingForOutlook,
+                            subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                            accentColor: Theme.accentSecondary,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    } else if secondaryOutlookAuthorized, let summary = sharedDashboardSummary, let monthlyOutlookBudgeted = summary.monthlyOutlookBudgeted {
+                        StatCard(
+                            title: "Planned Monthly Spending",
+                            systemIconName: "calendar.badge.clock",
+                            amount: monthlyOutlookBudgeted,
+                            subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                            accentColor: Theme.accentSecondary,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    }
                 }
                 if isQuickStatShown(.projectedAvailableAfterSpend) {
-                    StatCard(
-                        title: "Projected Available After Spend",
-                        systemIconName: "banknote.fill",
-                        amount: projectedAvailableAfterSpendForOutlook,
-                        subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
-                        accentColor: Theme.statusGood,
-                        isPrivacyModeEnabled: privacyMode.isEnabled
-                    )
+                    if !isSecondary {
+                        StatCard(
+                            title: "Projected Available After Spend",
+                            systemIconName: "banknote.fill",
+                            amount: projectedAvailableAfterSpendForOutlook,
+                            subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                            accentColor: Theme.statusGood,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    } else if secondaryOutlookAuthorized, let summary = sharedDashboardSummary, let additionalPlannedSavings = summary.additionalPlannedSavings {
+                        StatCard(
+                            title: "Projected Available After Spend",
+                            systemIconName: "banknote.fill",
+                            amount: additionalPlannedSavings,
+                            subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
+                            accentColor: Theme.statusGood,
+                            isPrivacyModeEnabled: privacyMode.isEnabled
+                        )
+                    }
                 }
                 if showLocalSavedThisMonthQuickStat {
                     SavedThisMonthQuickStatCard(
@@ -1223,6 +1323,24 @@ struct DashboardView: View {
         }
     }
 
+    /// All 4 weeks' spending, each broken down by account (plus Bill Payment Variance for
+    /// whichever account bills were actually paid from that week) — the drill-down behind tapping
+    /// the Monthly Outlook card. Built from the exact same `transactions`/`recurringExpenses`
+    /// this view's own `monthlyPlanSummary`/`weeklyComparisons` already read, so the per-account
+    /// totals can never disagree with the numbers already on screen.
+    private var monthlyOutlookBreakdown: [WeeklyOutlookBreakdown] {
+        WeeklyOutlookBreakdownCalculator.breakdown(
+            recurringExpenses: recurringExpenses,
+            transactions: transactions,
+            in: monthInterval,
+            recommendedWeekly: plannedWeeklySpendingForOutlook,
+            includePending: includePending,
+            autoTrackedAccountIds: autoTrackedAccountIds,
+            excludedTransactionIDs: excludedTransactionIDs,
+            warningThreshold: settings?.warningThreshold ?? 0.70
+        )
+    }
+
     private var monthlyOutlookSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Monthly Outlook")
@@ -1234,6 +1352,10 @@ struct DashboardView: View {
                 status: projectedStatusForOutlook,
                 isPrivacyModeEnabled: privacyMode.isEnabled
             )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isPresentingMonthlyOutlookBreakdown = true
+            }
             .padding(.horizontal, Theme.Spacing.lg)
         }
     }
@@ -1563,14 +1685,52 @@ private struct SavedThisMonthQuickStatCard: View {
     }
 }
 
+/// RELIABILITY CORRECTION (2026-08-18) — a card-shaped placeholder (spinner + "Loading…") shown
+/// only while a shared Quick Stat card is genuinely fetching, matching `StatCard`'s own exact
+/// background/stroke/padding so the Quick Stats grid never visibly jumps between this and the
+/// real card. Deliberately NOT shown for `.loaded(nil)` (confirmed not shared) — a spinner there
+/// would be actively misleading, not just unhelpful.
+private struct SharedQuickStatLoadingPlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 30, height: 30)
+
+            Text(" ")
+                .font(Theme.amountFont(19))
+                .opacity(0)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Loading…")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
+                Text(" ")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .opacity(0)
+            }
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .fill(Theme.cardSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .strokeBorder(Theme.cardStroke, lineWidth: 1)
+        )
+    }
+}
+
 /// CLIENT UI PHASE — Secondary-only read-only counterpart to `SavedThisMonthQuickStatCard` above.
 /// Fully transient (see `SharedMonthlySavingsViewModel`'s own header): loads from
 /// `get-monthly-savings-summary` on appear, never touches SwiftData, never inserts a local
-/// `SavingsEntry`, and renders NOTHING (not even a placeholder) while loading or once revoked —
-/// only `.loaded(let summary)` with a non-nil `summary` ever produces the tile, reusing
-/// `SavedThisMonthQuickStatCard` verbatim so a Secondary's shared figure looks identical to a
-/// Primary's own. No tap target of any kind — same as the Primary's own card, this offers no
-/// savings-edit navigation.
+/// `SavingsEntry`. RELIABILITY CORRECTION — shows `SharedQuickStatLoadingPlaceholder` while
+/// genuinely loading (see that type's own header); still renders nothing once confirmed not
+/// shared. Reuses `SavedThisMonthQuickStatCard` verbatim once loaded, so a Secondary's shared
+/// figure looks identical to a Primary's own. No tap target of any kind — same as the Primary's
+/// own card, this offers no savings-edit navigation.
 private struct SharedSavedThisMonthQuickStatCard: View {
     let primaryUserId: UUID
     let isPrivacyModeEnabled: Bool
@@ -1586,7 +1746,14 @@ private struct SharedSavedThisMonthQuickStatCard: View {
     var body: some View {
         Group {
             switch viewModel.state {
-            case .loading, .loaded(nil):
+            // RELIABILITY CORRECTION (2026-08-18, Scott's explicit request) — a genuine "still
+            // loading" must never look identical to "not shared" (both previously rendered
+            // nothing, which read as unreliable/flaky rather than as a normal brief load). Only
+            // `.loading` gets the placeholder; `.loaded(nil)` (confirmed not shared) stays
+            // EmptyView() — showing a spinner there would be actively misleading.
+            case .loading:
+                SharedQuickStatLoadingPlaceholder()
+            case .loaded(nil):
                 EmptyView()
             case .loaded(let summary?):
                 SavedThisMonthQuickStatCard(
@@ -1611,10 +1778,12 @@ private struct SharedSavedThisMonthQuickStatCard: View {
 }
 
 /// SAVED VIA TRANSFER SHARING — Secondary-only read-only counterpart to the local "Saved" Quick
-/// Stat card above, mirroring `SharedSavedThisMonthQuickStatCard` exactly. Fully transient (see
-/// `SharedSavedViaTransferViewModel`'s own header): loads from `get-saved-via-transfer-summary` on
-/// appear, never touches SwiftData, and renders NOTHING (not even a placeholder) while loading or
-/// once revoked — only `.loaded(let summary)` with a non-nil `summary` ever produces the tile.
+/// Stat card above, mirroring `SharedSavedThisMonthQuickStatCard` exactly, including the
+/// RELIABILITY CORRECTION loading placeholder (see `SharedQuickStatLoadingPlaceholder`'s own
+/// header). Fully transient (see `SharedSavedViaTransferViewModel`'s own header): loads from
+/// `get-saved-via-transfer-summary` on appear, never touches SwiftData, and renders nothing once
+/// confirmed not shared — only `.loaded(let summary)` with a non-nil `summary` ever produces the
+/// tile.
 private struct SharedSavedViaTransferQuickStatCard: View {
     let primaryUserId: UUID
     let monthInterval: DateInterval
@@ -1632,7 +1801,11 @@ private struct SharedSavedViaTransferQuickStatCard: View {
     var body: some View {
         Group {
             switch viewModel.state {
-            case .loading, .loaded(nil):
+            // RELIABILITY CORRECTION — see `SharedSavedThisMonthQuickStatCard`'s own identical
+            // header for why only `.loading` gets a placeholder.
+            case .loading:
+                SharedQuickStatLoadingPlaceholder()
+            case .loaded(nil):
                 EmptyView()
             case .loaded(let summary?):
                 StatCard(
@@ -1673,6 +1846,11 @@ private struct SharedMonthlyOutlookSection: View {
     let viewModel: SharedDashboardSummaryViewModel?
     let isPrivacyModeEnabled: Bool
 
+    /// USER B FULL WEEK-BY-WEEK PARITY — nil means "no explicit choice yet", same
+    /// fallback-to-current-week convention as `DashboardView.selectedWeekIndex`/
+    /// `effectiveWeekIndex` itself.
+    @State private var selectedWeekIndex: Int?
+
     var body: some View {
         content
     }
@@ -1709,23 +1887,7 @@ private struct SharedMonthlyOutlookSection: View {
                         unavailableText.padding(.horizontal, Theme.Spacing.lg)
                     }
                 }
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    DashboardSectionHeader(title: "Week-by-Week")
-                    if let currentPlanWeek = summary.currentPlanWeek {
-                        WeeklyPlanComparisonRow(
-                            comparison: MonthlyPlanCalculator.WeeklyPlanComparison(
-                                weekInterval: currentPlanWeek.weekInterval,
-                                recommendedLimit: currentPlanWeek.recommended,
-                                actualSpent: currentPlanWeek.actual,
-                                status: currentPlanWeek.status
-                            ),
-                            isPrivacyModeEnabled: isPrivacyModeEnabled
-                        )
-                        .padding(.horizontal, Theme.Spacing.lg)
-                    } else {
-                        unavailableText.padding(.horizontal, Theme.Spacing.lg)
-                    }
-                }
+                weekByWeekBlock(summary: summary)
             }
         }
     }
@@ -1734,6 +1896,78 @@ private struct SharedMonthlyOutlookSection: View {
         Text("Not available yet.")
             .font(Theme.captionFont)
             .foregroundStyle(Theme.textTertiary)
+    }
+
+    /// USER B FULL WEEK-BY-WEEK PARITY — when the Primary has pushed the full 4-week array
+    /// (migration 0026), shows the SAME week selector `DashboardView.weekByWeekSection` itself
+    /// uses, backed by `summary.weeklyComparisons` instead of a second independent calculation.
+    /// Falls back to the single `currentPlanWeek` (pre-0026 behavior) for an older row that
+    /// predates this field — never a hard "unavailable" for data that's still perfectly valid,
+    /// just narrower.
+    @ViewBuilder
+    private func weekByWeekBlock(summary: SharedDashboardSummaryDTO) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack {
+                DashboardSectionHeader(title: "Week-by-Week")
+                if let comparisons = summary.weeklyComparisons, comparisons.count > 1 {
+                    Spacer()
+                    Menu {
+                        ForEach(comparisons.indices, id: \.self) { index in
+                            Button("Week \(index + 1): \(DateRangeHelper.weekDisplayText(for: comparisons[index].weekInterval))") {
+                                selectedWeekIndex = index
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Week \(effectiveWeekIndex(comparisons: comparisons) + 1)")
+                                .font(Theme.captionFont)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(Theme.accent)
+                    }
+                    .padding(.trailing, Theme.Spacing.lg)
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+
+            if let comparisons = summary.weeklyComparisons, !comparisons.isEmpty {
+                let index = effectiveWeekIndex(comparisons: comparisons)
+                WeeklyPlanComparisonRow(
+                    comparison: MonthlyPlanCalculator.WeeklyPlanComparison(
+                        weekInterval: comparisons[index].weekInterval,
+                        recommendedLimit: comparisons[index].recommended,
+                        actualSpent: comparisons[index].actual,
+                        status: comparisons[index].status
+                    ),
+                    weekNumber: index + 1,
+                    isPrivacyModeEnabled: isPrivacyModeEnabled
+                )
+                .padding(.horizontal, Theme.Spacing.lg)
+            } else if let currentPlanWeek = summary.currentPlanWeek {
+                WeeklyPlanComparisonRow(
+                    comparison: MonthlyPlanCalculator.WeeklyPlanComparison(
+                        weekInterval: currentPlanWeek.weekInterval,
+                        recommendedLimit: currentPlanWeek.recommended,
+                        actualSpent: currentPlanWeek.actual,
+                        status: currentPlanWeek.status
+                    ),
+                    isPrivacyModeEnabled: isPrivacyModeEnabled
+                )
+                .padding(.horizontal, Theme.Spacing.lg)
+            } else {
+                unavailableText.padding(.horizontal, Theme.Spacing.lg)
+            }
+        }
+    }
+
+    /// Defaults to whichever week contains today (matching `DashboardView.currentWeekComparisonIndex`'s
+    /// own rule), falling back to index 0 if today somehow isn't covered.
+    private func effectiveWeekIndex(comparisons: [SharedDashboardSummaryDTO.CurrentPlanWeek]) -> Int {
+        if let selectedWeekIndex, comparisons.indices.contains(selectedWeekIndex) {
+            return selectedWeekIndex
+        }
+        return comparisons.firstIndex(where: { $0.weekInterval.contains(.now) }) ?? 0
     }
 }
 

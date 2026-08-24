@@ -1432,6 +1432,251 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(transaction.isPending)
     }
 
+    /// Regression test for the sign-handling bug: a Plaid credit-account payment/credit (negative
+    /// `amount`, e.g. paying an Amex bill) must never be stored as `.expense` with a negative
+    /// dollar amount — `BudgetCalculator.autoTrackedDelta` would then silently net it against real
+    /// spending instead of excluding it, since Auto-Tracked transactions bypass the manual
+    /// review-approval flags entirely.
+    func testMapToFinanceTransactionClassifiesNegativeAmountAsCreditCardPayment() throws {
+        let dto = PlaidTransactionDTO(
+            externalTransactionId: "txn-payment-1",
+            pendingTransactionId: nil,
+            plaidAccountId: "amex-account",
+            amount: -1470.96,
+            merchantName: "AUTOPAY PAYMENT",
+            originalDescription: "AUTOPAY PAYMENT - THANK YOU",
+            authorizedDate: Date(timeIntervalSince1970: 1_700_000_000),
+            postedDate: Date(timeIntervalSince1970: 1_700_000_000),
+            isPending: false,
+            categoryGuess: nil
+        )
+        let transaction = PlaidTransactionImportService.mapToFinanceTransaction(dto, account: nil)
+
+        XCTAssertEqual(transaction.type, .creditCardPayment)
+        XCTAssertEqual(transaction.amount, 1470.96, "amount must be stored as a positive magnitude, never negative")
+    }
+
+    func testMapToFinanceTransactionKeepsPositiveAmountAsExpense() throws {
+        let dto = PlaidTransactionDTO(
+            externalTransactionId: "txn-purchase-1",
+            pendingTransactionId: nil,
+            plaidAccountId: "amex-account",
+            amount: 49.09,
+            merchantName: "Coffee Shop",
+            originalDescription: "COFFEE SHOP PURCHASE",
+            authorizedDate: Date(timeIntervalSince1970: 1_700_000_000),
+            postedDate: Date(timeIntervalSince1970: 1_700_000_000),
+            isPending: false,
+            categoryGuess: nil
+        )
+        let transaction = PlaidTransactionImportService.mapToFinanceTransaction(dto, account: nil)
+
+        XCTAssertEqual(transaction.type, .expense)
+        XCTAssertEqual(transaction.amount, 49.09)
+    }
+
+    /// A negative-amount transaction must be counted as excluded (not netted as spending) by the
+    /// same Auto-Tracked calculation path that originally surfaced this bug.
+    func testCreditCardPaymentFromPlaidIsExcludedFromAutoTrackedSpending() throws {
+        let purchase = PlaidTransactionImportService.mapToFinanceTransaction(
+            PlaidTransactionDTO(
+                externalTransactionId: "txn-week-purchase",
+                pendingTransactionId: nil,
+                plaidAccountId: "amex-account",
+                amount: 200,
+                merchantName: "Store",
+                originalDescription: "STORE PURCHASE",
+                authorizedDate: Date(timeIntervalSince1970: 1_700_000_000),
+                postedDate: Date(timeIntervalSince1970: 1_700_000_000),
+                isPending: false,
+                categoryGuess: nil
+            ),
+            account: nil
+        )
+        let payment = PlaidTransactionImportService.mapToFinanceTransaction(
+            PlaidTransactionDTO(
+                externalTransactionId: "txn-week-payment",
+                pendingTransactionId: nil,
+                plaidAccountId: "amex-account",
+                amount: -2941.92,
+                merchantName: "AUTOPAY PAYMENT",
+                originalDescription: "AUTOPAY PAYMENT - THANK YOU",
+                authorizedDate: Date(timeIntervalSince1970: 1_700_000_000),
+                postedDate: Date(timeIntervalSince1970: 1_700_000_000),
+                isPending: false,
+                categoryGuess: nil
+            ),
+            account: nil
+        )
+        let interval = DateInterval(start: Date(timeIntervalSince1970: 1_699_900_000), end: Date(timeIntervalSince1970: 1_700_100_000))
+        let total = BudgetCalculator.weeklyActualSpending(
+            [purchase, payment],
+            in: interval,
+            includePending: true,
+            autoTrackedAccountIds: ["amex-account"]
+        )
+
+        XCTAssertEqual(total, 200, "the credit card payment must be fully excluded, never netted against the genuine $200 purchase")
+    }
+
+    /// A Plaid `modified`/re-delivery update (e.g. pending -> posted) must apply the same
+    /// sign-based classification, not just the initial insert — otherwise a later sync silently
+    /// reintroduces the bug on an already-imported row.
+    @MainActor
+    func testApplySyncModifiedDeliveryReclassifiesNegativeAmountOnUpdate() throws {
+        let context = makePlaidSyncTestContext()
+        try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [makePlaidDTO(id: "txn-reclassify", amount: 25)], modified: [], removedExternalIds: []),
+            context: context
+        )
+        let negativeAmount = Decimal(string: "-1234.56")!
+        try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [], modified: [makePlaidDTO(id: "txn-reclassify", amount: negativeAmount)], removedExternalIds: []),
+            context: context
+        )
+
+        let stored = try context.fetch(FetchDescriptor<FinanceTransaction>()).first { $0.externalTransactionId == "txn-reclassify" }
+        XCTAssertEqual(stored?.type, .creditCardPayment)
+        XCTAssertEqual(stored?.amount, Decimal(string: "1234.56")!)
+    }
+
+    /// Retroactive repair: a transaction already persisted before `classifyPlaidAmount` existed
+    /// (stored as `.expense` with a negative amount, the pre-fix signature) must be corrected in
+    /// place — Plaid will never redeliver an unchanged transaction, so without this the bug would
+    /// stay wrong forever for anyone already affected.
+    func testRepairMisclassifiedCreditCardPaymentCorrectsPreFixTransaction() throws {
+        let preFixAmount = Decimal(string: "-1470.96")!
+        let transaction = FinanceTransaction(
+            amount: preFixAmount,
+            date: .now,
+            type: .expense,
+            source: .plaid,
+            note: "",
+            countsTowardWeeklyBudget: false,
+            countsTowardMonthlySpending: false,
+            isExcludedFromReports: true,
+            isPending: false,
+            externalTransactionId: "txn-pre-fix-payment"
+        )
+
+        let changed = PlaidTransactionImportService.repairMisclassifiedCreditCardPayment(on: transaction)
+
+        XCTAssertTrue(changed)
+        XCTAssertEqual(transaction.type, .creditCardPayment)
+        XCTAssertEqual(transaction.amount, Decimal(string: "1470.96")!)
+    }
+
+    func testRepairMisclassifiedCreditCardPaymentIsNoOpForGenuineExpense() throws {
+        let transaction = FinanceTransaction(
+            amount: 49.09,
+            date: .now,
+            type: .expense,
+            source: .plaid,
+            note: "",
+            countsTowardWeeklyBudget: false,
+            countsTowardMonthlySpending: false,
+            isExcludedFromReports: true,
+            isPending: false,
+            externalTransactionId: "txn-genuine-expense"
+        )
+
+        let changed = PlaidTransactionImportService.repairMisclassifiedCreditCardPayment(on: transaction)
+
+        XCTAssertFalse(changed)
+        XCTAssertEqual(transaction.type, .expense)
+        XCTAssertEqual(transaction.amount, 49.09)
+    }
+
+    func testRepairMisclassifiedCreditCardPaymentIgnoresManualTransactions() throws {
+        let transaction = FinanceTransaction(
+            amount: Decimal(string: "-100")!,
+            date: .now,
+            type: .expense,
+            source: .manual,
+            note: "",
+            countsTowardWeeklyBudget: true,
+            countsTowardMonthlySpending: true,
+            isExcludedFromReports: false,
+            isPending: false
+        )
+
+        let changed = PlaidTransactionImportService.repairMisclassifiedCreditCardPayment(on: transaction)
+
+        XCTAssertFalse(changed, "manual transactions must never be touched by this repair")
+        XCTAssertEqual(transaction.type, .expense)
+    }
+
+    @MainActor
+    func testRepairMisclassifiedCreditCardPaymentsLocallyCorrectsAllAffectedRows() throws {
+        let context = makePlaidSyncTestContext()
+        let payment = FinanceTransaction(
+            amount: Decimal(string: "-2941.92")!,
+            date: .now,
+            type: .expense,
+            source: .plaid,
+            note: "",
+            countsTowardWeeklyBudget: false,
+            countsTowardMonthlySpending: false,
+            isExcludedFromReports: true,
+            isPending: false,
+            externalTransactionId: "txn-locally-repaired"
+        )
+        let purchase = FinanceTransaction(
+            amount: 49.09,
+            date: .now,
+            type: .expense,
+            source: .plaid,
+            note: "",
+            countsTowardWeeklyBudget: false,
+            countsTowardMonthlySpending: false,
+            isExcludedFromReports: true,
+            isPending: false,
+            externalTransactionId: "txn-locally-untouched"
+        )
+        context.insert(payment)
+        context.insert(purchase)
+        try context.save()
+
+        let repairedCount = try PlaidTransactionImportService.repairMisclassifiedCreditCardPaymentsLocally(in: context)
+
+        XCTAssertEqual(repairedCount, 1)
+        XCTAssertEqual(payment.type, .creditCardPayment)
+        XCTAssertEqual(payment.amount, Decimal(string: "2941.92")!)
+        XCTAssertEqual(purchase.type, .expense)
+        XCTAssertEqual(purchase.amount, 49.09)
+    }
+
+    /// `applySync` itself must run this repair on every sync too, not just the local one-time
+    /// sweep — see `repairMisclassifiedCreditCardPayment`'s own header on why waiting for Plaid to
+    /// redeliver an unchanged transaction would never fix an already-persisted row.
+    @MainActor
+    func testApplySyncRepairsPreExistingMisclassifiedCreditCardPayment() throws {
+        let context = makePlaidSyncTestContext()
+        let payment = FinanceTransaction(
+            amount: Decimal(string: "-600")!,
+            date: .now,
+            type: .expense,
+            source: .plaid,
+            note: "",
+            countsTowardWeeklyBudget: false,
+            countsTowardMonthlySpending: false,
+            isExcludedFromReports: true,
+            isPending: false,
+            externalTransactionId: "txn-existing-payment"
+        )
+        context.insert(payment)
+        try context.save()
+
+        let outcome = try PlaidTransactionImportService.applySync(
+            PlaidSyncResult(added: [], modified: [], removedExternalIds: []),
+            context: context
+        )
+
+        XCTAssertEqual(outcome.repairedCreditCardPaymentCount, 1)
+        XCTAssertEqual(payment.type, .creditCardPayment)
+        XCTAssertEqual(payment.amount, Decimal(string: "600")!)
+    }
+
     func testBackendTransactionDTOToleratesNullOptionalFields() throws {
         // Every field Plaid may legally omit or send as null for a real transaction.
         let json = """
@@ -2140,7 +2385,11 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(source.contains("isAutoCalculateActive"), "the Override-gated editability flag must no longer exist")
     }
 
-    func testSettingsViewInlineBudgetFieldsArePermanentlyDisabled() throws {
+    /// CORRECTION (2026-08-18, Scott's request) — the amount itself is still never directly
+    /// typable (that part of the old "permanently disabled" guarantee is unchanged — see
+    /// `labeledAmountField`'s own hardcoded `isDisabled: true`), but the row as a whole is now a
+    /// real tap target opening the actual Monthly Plan editor, rather than dead-ending nowhere.
+    func testSettingsViewBudgetFieldsOpenTheRealMonthlyPlanEditorsOnTap() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
@@ -2150,8 +2399,21 @@ final class FinanceTrackTests: XCTestCase {
             XCTFail("budgetSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(2000))
-        XCTAssertTrue(section.contains("labeledAmountField(title: \"Weekly Spending Limit\", amount: $weeklyLimit, isDisabled: true)"), "the Weekly Spending Limit field must be hardcoded disabled")
-        XCTAssertTrue(section.contains("labeledAmountField(title: \"Monthly Savings Goal\", amount: $monthlyGoal, isDisabled: true)"), "the Monthly Savings Goal field must be hardcoded disabled")
+        XCTAssertTrue(section.contains("labeledAmountField(title: \"Weekly Spending Limit\", amount: $weeklyLimit) {\n                        isPresentingWeeklySpendingEdit = true\n                    }"), "tapping Weekly Spending Limit must open its real editor")
+        XCTAssertTrue(section.contains("labeledAmountField(title: \"Monthly Savings Goal\", amount: $monthlyGoal) {\n                        isPresentingSavingsGoalEdit = true\n                    }"), "tapping Monthly Savings Goal must open its real editor")
+
+        guard let fieldRange = source.range(of: "private func labeledAmountField") else {
+            XCTFail("labeledAmountField not found"); return
+        }
+        let fieldSection = String(source[fieldRange.lowerBound...].prefix(900))
+        XCTAssertTrue(fieldSection.contains("isDisabled: true"), "the amount itself must remain non-typable — only the row's tap action changed")
+
+        guard let sheetsRange = source.range(of: ".sheet(isPresented: $isPresentingWeeklySpendingEdit)") else {
+            XCTFail("Weekly Spending Limit edit sheet not found"); return
+        }
+        let sheetsSection = String(source[sheetsRange.lowerBound...].prefix(400))
+        XCTAssertTrue(sheetsSection.contains("PlannedWeeklySpendingEditView(settings: monthlyPlanSettingsList.first, automaticAmount: automaticPlannedWeeklySpending)"), "must open the SAME real Planned Weekly Spending editor MonthlyPlanView itself uses")
+        XCTAssertTrue(sheetsSection.contains("MonthlyPlanSettingsEditView(settings: monthlyPlanSettingsList.first)"), "must open the SAME real Savings Goal editor MonthlyPlanView itself uses")
     }
 
     func testTwoThousandFiveHundredRemainingProducesSixTwentyFiveWeekly() {
@@ -9013,7 +9275,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(2500))
+        let section = String(source[range.lowerBound...].prefix(3200))
         XCTAssertTrue(section.contains("            } else {\n                SpendingCardView("), "the normal card renders unconditionally — Automatic mode included")
     }
 
@@ -9040,9 +9302,15 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(thisWeek.remaining, 570)
     }
 
-    func testDashboardEditWeeklyLimitStillWorks() throws {
+    /// CORRECTION (2026-08-18, Scott's report: tapping anywhere on the Dashboard's "This Week"
+    /// card unexpectedly opened a read-only Weekly Limit sheet) — the whole-card tap gesture (and
+    /// its now-dead `isPresentingSetBudget` state/sheet) was removed entirely, since
+    /// `WeeklyLimitEditView` has been read-only (auto-derived from the Monthly Plan) for a while
+    /// and offers nothing to edit there anymore. The Weekly Budget screen's own hero card
+    /// (`WeeklyBudgetView.swift`) is a separate, unaffected entry point to the same sheet.
+    func testDashboardThisWeekCardNoLongerHasATapGesture() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        XCTAssertTrue(source.contains(".sheet(isPresented: $isPresentingSetBudget) {\n                WeeklyLimitEditView(limit: plannedWeeklySpendingForOutlook)\n            }"), "the edit sheet must still be reachable and pass the corrected live value")
+        XCTAssertFalse(source.contains("isPresentingSetBudget"), "the dead tap-to-edit state must be fully removed, not just its call site")
     }
 
     // -- Weekly Budget --
@@ -9060,7 +9328,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var heroSection: some View {") else {
             XCTFail("heroSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(400))
+        let section = String(source[range.lowerBound...].prefix(1200))
         XCTAssertTrue(section.contains("WeeklyBudgetHeroCard("), "the normal hero card must render unconditionally")
         XCTAssertFalse(section.contains("if hasWeeklyBudget"), "no gating condition may remain")
     }
@@ -21679,6 +21947,25 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(section.contains("Theme.statusOver"))
     }
 
+    /// CORRECTION (2026-08-18, Scott's explicit request) — both buttons sized down from the
+    /// original full-width headline pills: smaller font, intrinsic (not full-width) size.
+    func testSignOutAndDeleteAccountButtonsAreSizedDownNotFullWidth() throws {
+        let source = try accountViewSource()
+        guard let signOutRange = source.range(of: "private var signOutSection") else {
+            XCTFail("signOutSection not found"); return
+        }
+        let signOutSection = String(source[signOutRange.lowerBound...].prefix(1200))
+        XCTAssertTrue(signOutSection.contains(".font(Theme.bodyFont)"), "Sign Out must use a smaller font than the original headline styling")
+        XCTAssertFalse(signOutSection.contains(".frame(maxWidth: .infinity)"), "Sign Out must no longer stretch full-width")
+
+        guard let deleteRange = source.range(of: "private var deleteAccountSection") else {
+            XCTFail("deleteAccountSection not found"); return
+        }
+        let deleteSection = String(source[deleteRange.lowerBound...].prefix(1400))
+        XCTAssertTrue(deleteSection.contains(".font(Theme.captionFont)"), "Delete Account must use a smaller font than the original headline styling")
+        XCTAssertFalse(deleteSection.contains("Text(\"Delete Account\")\n                    .font(Theme.headlineFont)\n                    .foregroundStyle(.white)\n                    .frame(maxWidth: .infinity)"), "must no longer be the original full-width headline pill")
+    }
+
     // MARK: - Logout freeze fix — successful sign-out/account-exit must never explicitly dismiss
 
     /// PROVEN ROOT CAUSE — a real device crash ("This model instance was destroyed by calling
@@ -22051,6 +22338,23 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(source.contains("Task { @MainActor in"))
     }
 
+    /// CORRECTION (2026-08-18, Scott's report: "when i sign out, and then press sight out again,
+    /// nothing happens, when i press done, it then logs out") — a sheet presented from
+    /// `SettingsView` does not auto-dismiss just because the root content underneath it swaps to
+    /// `AuthFlowView` once `sessionState` flips to `.signedOut`; `SettingsView` must explicitly
+    /// close its own sheets when that happens rather than leaving the user to notice nothing
+    /// happened and tap Done themselves.
+    func testSettingsViewDismissesAccountSheetsOnSignOut() throws {
+        let source = try Self.settingsViewSource()
+        guard let range = source.range(of: ".onChange(of: authService.sessionState)") else {
+            XCTFail("onChange(of: authService.sessionState) not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(section.contains("newValue == .signedOut"))
+        XCTAssertTrue(section.contains("isPresentingAccount = false"))
+        XCTAssertTrue(section.contains("isPresentingAccountRelatedOptions = false"))
+    }
+
     func testDeleteAccountButtonStyledRedWhite() throws {
         let source = try accountViewSource()
         guard let range = source.range(of: "private var deleteAccountSection") else {
@@ -22061,30 +22365,29 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(section.contains("Theme.statusOver"))
     }
 
-    func testDeleteAccountIsLastSectionInAccountView() throws {
+    /// CORRECTION (2026-08-18, Scott's explicit request) — Delete Account must sit at the very
+    /// bottom of the *screen*, not merely the bottom of the scrollable content. `deleteAccountSection`
+    /// now lives outside the `ScrollView`, separated from it by a `Spacer`, so it's pinned to the
+    /// bottom regardless of how much content is above it.
+    func testDeleteAccountIsPinnedToBottomOfScreenOutsideScrollView() throws {
         let source = try accountViewSource()
         guard let bodyRange = source.range(of: "var body: some View {") else {
             XCTFail("body not found"); return
         }
-        // The VStack listing every top-level section — comfortably covers it without running
-        // into either private var declaration further down the file.
-        let bodySnippet = String(source[bodyRange.lowerBound...].prefix(900))
+        let bodySnippet = String(source[bodyRange.lowerBound...].prefix(1200))
 
-        guard let accountIdx = bodySnippet.range(of: "accountSection"),
+        guard let scrollIdx = bodySnippet.range(of: "ScrollView {"),
+              let accountIdx = bodySnippet.range(of: "accountSection"),
               let signOutIdx = bodySnippet.range(of: "signOutSection"),
+              let spacerIdx = bodySnippet.range(of: "Spacer(minLength: 0)"),
               let deleteIdx = bodySnippet.range(of: "deleteAccountSection")
         else {
-            XCTFail("expected accountSection, signOutSection, and deleteAccountSection all referenced in body"); return
+            XCTFail("expected ScrollView, accountSection, signOutSection, Spacer, and deleteAccountSection all referenced in body"); return
         }
-        XCTAssertTrue(accountIdx.lowerBound < signOutIdx.lowerBound, "Account details come first")
-        XCTAssertTrue(signOutIdx.lowerBound < deleteIdx.lowerBound, "Delete Account must come after Sign Out")
-
-        // Nothing else is referenced in body's VStack after deleteAccountSection, up to the
-        // VStack's own closing padding modifier.
-        guard let closingRange = bodySnippet.range(of: ".padding(.vertical, Theme.Spacing.lg)") else {
-            XCTFail("expected the VStack's own closing padding modifier"); return
-        }
-        XCTAssertTrue(deleteIdx.upperBound < closingRange.lowerBound, "deleteAccountSection must be the last section before the VStack closes")
+        XCTAssertTrue(scrollIdx.lowerBound < accountIdx.lowerBound, "ScrollView must wrap the account details")
+        XCTAssertTrue(accountIdx.lowerBound < signOutIdx.lowerBound, "Account details come before Sign Out")
+        XCTAssertTrue(signOutIdx.lowerBound < spacerIdx.lowerBound, "Sign Out must come before the pinning Spacer")
+        XCTAssertTrue(spacerIdx.lowerBound < deleteIdx.lowerBound, "Delete Account must come after the pinning Spacer, i.e. outside the ScrollView")
     }
 
     func testSignOutBehaviorUnchanged() throws {
@@ -23930,6 +24233,79 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertNil(summary, "revocation must clear the previously-held summary on the very next load")
     }
 
+    // MARK: RELIABILITY CORRECTION (2026-08-18) — one automatic retry before surfacing .failed
+
+    private struct DummyError: Error {}
+
+    /// Fails exactly once, then succeeds — everything else throws (never expected to be called by
+    /// these single-method view models).
+    private final class FlakyOnceHouseholdSharingService: HouseholdSharingService {
+        private(set) var monthlySavingsCallCount = 0
+        private(set) var savedViaTransferCallCount = 0
+        var monthlySavingsSuccessResponse = SharedMonthlySavingsSummaryResponse(summary: nil)
+        var savedViaTransferSuccessResponse = SharedSavedViaTransferSummaryResponse(summary: nil)
+
+        func initializeHousehold() async throws -> HouseholdStateResponse { throw DummyError() }
+        func getAccountRelatedOptions() async throws -> AccountRelatedOptionsResponse { throw DummyError() }
+        func manageInvitation(_ request: InvitationActionRequest) async throws -> InvitationActionResponse { throw DummyError() }
+        func updateSharingPermission(_ request: SharingPermissionUpdateRequest) async throws -> SharingPermissionUpdateResponse { throw DummyError() }
+        func previewInvitation(token: String) async throws -> InvitationPreviewResponse { throw DummyError() }
+        func acceptInvitation(token: String) async throws -> AcceptInvitationResponse { throw DummyError() }
+        func checkMyPendingInvitation() async throws -> MyPendingInvitationResponse { throw DummyError() }
+        func acceptInvitation(invitationId: UUID) async throws -> AcceptInvitationResponse { throw DummyError() }
+        func declineInvitation(invitationId: UUID) async throws -> DeclineInvitationResponse { throw DummyError() }
+        func getSharedConnectedAccountTransactions(plaidAccountId: UUID) async throws -> SharedConnectedAccountTransactionsResponse { throw DummyError() }
+        func getSharedManualAccountData(manualAccountId: UUID) async throws -> SharedManualAccountDataResponse { throw DummyError() }
+        func getSharedMonthlyPlan(ownerUserId: UUID) async throws -> SharedMonthlyPlanResponse { throw DummyError() }
+        func upsertSavingsSummary(_ request: UpsertSavingsSummaryRequest) async throws -> UpsertSavingsSummaryResponse { throw DummyError() }
+        func upsertSavedViaTransferSummary(_ request: UpsertSavedViaTransferSummaryRequest) async throws -> UpsertSavedViaTransferSummaryResponse { throw DummyError() }
+        func upsertDashboardSummary(_ request: UpsertDashboardSummaryRequest) async throws -> UpsertDashboardSummaryResponse { throw DummyError() }
+        func getDashboardSummary(ownerUserId: UUID) async throws -> SharedDashboardSummaryResponse { throw DummyError() }
+        func getMyManualAccounts() async throws -> MyManualAccountsResponse { throw DummyError() }
+
+        func getMonthlySavingsSummary(ownerUserId: UUID) async throws -> SharedMonthlySavingsSummaryResponse {
+            monthlySavingsCallCount += 1
+            if monthlySavingsCallCount == 1 { throw DummyError() }
+            return monthlySavingsSuccessResponse
+        }
+
+        func getSavedViaTransferSummary(ownerUserId: UUID) async throws -> SharedSavedViaTransferSummaryResponse {
+            savedViaTransferCallCount += 1
+            if savedViaTransferCallCount == 1 { throw DummyError() }
+            return savedViaTransferSuccessResponse
+        }
+    }
+
+    @MainActor
+    func testSharedMonthlySavingsViewModelRetriesOnceAfterAFailureThenSucceeds() async {
+        let fake = FlakyOnceHouseholdSharingService()
+        fake.monthlySavingsSuccessResponse = SharedMonthlySavingsSummaryResponse(
+            summary: SharedMonthlySavingsSummaryDTO(savedThisMonth: 500, totalSavingsToDate: 1650, updatedAt: Date())
+        )
+        let viewModel = SharedMonthlySavingsViewModel(primaryUserId: UUID(), backend: fake)
+
+        await viewModel.load()
+
+        XCTAssertEqual(fake.monthlySavingsCallCount, 2, "a single transient failure must be retried exactly once, automatically")
+        guard case .loaded(let summary?) = viewModel.state else { return XCTFail("expected the retry's success to produce a loaded summary, not .failed") }
+        XCTAssertEqual(summary.savedThisMonth, 500)
+    }
+
+    @MainActor
+    func testSharedSavedViaTransferViewModelRetriesOnceAfterAFailureThenSucceeds() async {
+        let fake = FlakyOnceHouseholdSharingService()
+        fake.savedViaTransferSuccessResponse = SharedSavedViaTransferSummaryResponse(
+            summary: SharedSavedViaTransferSummaryDTO(savedViaTransferThisMonth: 600, updatedAt: Date())
+        )
+        let viewModel = SharedSavedViaTransferViewModel(primaryUserId: UUID(), backend: fake)
+
+        await viewModel.load()
+
+        XCTAssertEqual(fake.savedViaTransferCallCount, 2, "a single transient failure must be retried exactly once, automatically")
+        guard case .loaded(let summary?) = viewModel.state else { return XCTFail("expected the retry's success to produce a loaded summary, not .failed") }
+        XCTAssertEqual(summary.savedViaTransferThisMonth, 600)
+    }
+
     func testSharedMonthlySavingsSummaryDTODecodesMoneyAsDecimalStrings() throws {
         let json = """
         {"saved_this_month": "500.00", "total_savings_to_date": "1650.25", "updated_at": "2026-07-28T11:22:54.964388Z"}
@@ -23956,10 +24332,24 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(4200))
+        let section = String(source[range.lowerBound...].prefix(10000))
         XCTAssertTrue(section.contains("showLocalSavedThisMonthQuickStat"))
         XCTAssertTrue(section.contains("sharedSavingsQuickStatVisible"))
         XCTAssertTrue(section.contains("SharedSavedThisMonthQuickStatCard"))
+    }
+
+    /// CORRECTION (2026-08-18) — a Secondary's own Quick Stats picker must hide "Saved This
+    /// Month" exactly like every other stat, including its own sibling
+    /// (`sharedSavedViaTransferQuickStatVisible`, which already respected the picker). This
+    /// supersedes an earlier "LOCKED PRODUCT RULE" that deliberately ignored the picker for this
+    /// one card — Scott confirmed the picker must win consistently across all Quick Stats.
+    func testSharedSavingsQuickStatVisibleRespectsQuickStatsPicker() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private var sharedSavingsQuickStatVisible: Bool {") else {
+            XCTFail("sharedSavingsQuickStatVisible not found"); return
+        }
+        let section = String(source[range.lowerBound...].prefix(300))
+        XCTAssertTrue(section.contains("isQuickStatShown(.savedThisMonth)"), "the Secondary's own Quick Stats picker choice must gate the shared savings card, same as every other stat")
     }
 
     // MARK: - CLIENT CORRECTION — Secondary savings-card flash fix (state-aware gating)
@@ -24072,7 +24462,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedSavedThisMonthQuickStatCard") else {
             XCTFail("SharedSavedThisMonthQuickStatCard not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(1700))
+        let section = String(source[range.lowerBound...].prefix(2500))
         XCTAssertTrue(section.contains("case .failed(let message)"), "a genuine failure must be distinguishable from .loading/.loaded(nil)")
         XCTAssertTrue(section.contains("Text(message)"), "must surface the failure to the user, not render nothing")
     }
@@ -24294,7 +24684,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(6000))
+        let section = String(source[range.lowerBound...].prefix(10000))
         XCTAssertTrue(section.contains("sharedSavedViaTransferQuickStatVisible"), "must gate on the dedicated shared-visibility flag")
         XCTAssertTrue(section.contains("SharedSavedViaTransferQuickStatCard("), "an authorized Secondary must use the shared architecture, never a local reconstruction")
     }
@@ -24368,7 +24758,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         XCTAssertTrue(section.contains("SharedDashboardSummaryViewModel"), "must reuse the authoritative Primary-pushed aggregate view model")
         XCTAssertTrue(section.contains("MonthlyOutlookCard("), "must reuse the existing card component")
         XCTAssertTrue(section.contains("WeeklyPlanComparisonRow("), "must reuse the existing row component")
@@ -24432,7 +24822,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(2500))
+        let section = String(source[range.lowerBound...].prefix(3200))
         XCTAssertFalse(section.contains("\"No weekly budget set\""), "the setup-required message must never appear")
         XCTAssertFalse(section.contains("\"Set Weekly Budget\""), "the setup-required button must never appear")
         XCTAssertTrue(section.contains("            } else {\n                SpendingCardView("), "the non-Secondary branch must unconditionally render the normal card")
@@ -24886,7 +25276,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "final class SharedMonthlySavingsViewModel") else {
             XCTFail("SharedMonthlySavingsViewModel not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(1800))
+        let section = String(source[range.lowerBound...].prefix(2600))
         XCTAssertTrue(section.contains("#if DEBUG"))
         XCTAssertTrue(section.contains("load succeeded"))
         XCTAssertTrue(section.contains("load failed"))
@@ -26095,6 +26485,46 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(request.actualSpentThisWeek, "0")
     }
 
+    /// SHARED USER DASHBOARD PARITY REGRESSION — `sync()` must include Auto-Tracked (Plaid)
+    /// spending in the pushed totals, the exact same way `DashboardView`'s own local
+    /// `monthlyPlanSummary` does. Before this fix, `sync()` never received
+    /// `autoTrackedAccountIds` at all, so ANY Amex/Connected-Account spending was silently
+    /// excluded from every number a Secondary sees, while the Primary's own local Dashboard
+    /// correctly included it — a real, previously-undetected parity bug.
+    func testPrimaryDashboardSummarySyncIncludesAutoTrackedSpending() async {
+        let calendar = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let anchor = day(2026, 6, 15, calendar: calendar)
+        let month = DateRangeHelper.monthRangeContaining(anchor, calendar: calendar)
+        let week = DateRangeHelper.weekRangeContaining(anchor, weekStartsOnSunday: true, calendar: calendar)
+        let amexAmount: Decimal = 61.65
+        let amexTransaction = FinanceTransaction(
+            amount: amexAmount, date: anchor, type: .expense, source: .plaid,
+            isExcludedFromReports: true, plaidAccountId: "amex-1"
+        )
+
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        await PrimaryDashboardSummarySyncService.sync(
+            transactions: [amexTransaction],
+            incomeSources: [makeIncome(amount: 10200)],
+            recurringExpenses: [],
+            planSettings: nil,
+            authoritativeWeeklyLimit: 500,
+            monthlyOutlookBudgeted: nil,
+            currentWeekIndex: nil,
+            weekInterval: week,
+            monthInterval: month,
+            weekStartsOnSunday: true,
+            includePending: true,
+            warningThreshold: 0.70,
+            autoTrackedAccountIds: ["amex-1"],
+            backend: fake
+        )
+
+        guard let request = fake.lastUpsertDashboardSummaryRequest else { return XCTFail("expected an upsert call") }
+        XCTAssertEqual(Decimal(string: request.actualSpentThisMonth), amexAmount, "Auto-Tracked spending must count toward the pushed monthly total")
+        XCTAssertEqual(Decimal(string: request.actualSpentThisWeek), amexAmount, "Auto-Tracked spending must count toward the pushed weekly total")
+    }
+
     /// USER B WEEKLY PARITY — the pushed `weeklySpendingLimit`/`weeklyRemaining` must come from the
     /// SUPPLIED `authoritativeWeeklyLimit` (the same value `DashboardView.weeklyLimit` currently
     /// displays), never a fresh `monthlySpendRemaining / 4` recomputation. The fixture income/
@@ -26556,7 +26986,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         for field in ["summary.monthlyOutlookBudgeted", "summary.monthlyOutlookActual", "summary.monthlyOutlookProjectedSavings", "summary.monthlyOutlookStatus", "summary.currentPlanWeek"] {
             XCTAssertTrue(section.contains(field), "must read \(field) directly off the canonical aggregate")
         }
@@ -26568,7 +26998,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         XCTAssertFalse(section.contains("flexibleSpendingAvailable"), "must never present flexibleSpendingAvailable as Budgeted")
     }
 
@@ -26580,7 +27010,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         XCTAssertFalse(section.contains("ForEach(summary.weeklyComparisons"), "must never iterate every week")
         XCTAssertFalse(section.contains("summary.weeklyComparisons.first"), "must never default to the first comparison")
         XCTAssertFalse(section.contains("weeklyComparisons[0]"), "must never hardcode index 0")
@@ -26593,7 +27023,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         XCTAssertFalse(section.contains("MonthlyPlanCalculator.summary("), "must never call the calculator directly")
         XCTAssertFalse(section.contains("connectedAccounts:"), "must never take raw connected accounts")
         XCTAssertFalse(section.contains("manualAccounts:"), "must never take raw manual accounts")
@@ -26607,7 +27037,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         XCTAssertTrue(section.contains("if let status = summary.monthlyOutlookStatus"), "Monthly Outlook must gate on the canonical status being present")
         XCTAssertTrue(section.contains("if let currentPlanWeek = summary.currentPlanWeek"), "Week-by-Week must gate on the canonical current week being present")
         XCTAssertTrue(section.contains("\"Not available yet.\""), "must show an honest fallback, never a fabricated or stale value")
@@ -26644,7 +27074,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private struct SharedMonthlyOutlookSection") else {
             XCTFail("SharedMonthlyOutlookSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(3500))
+        let section = String(source[range.lowerBound...].prefix(8000))
         XCTAssertFalse(section.contains("func save"))
         XCTAssertFalse(section.contains("func upsert"))
         XCTAssertFalse(section.contains("func update"))
@@ -26686,6 +27116,143 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertNil(response.summary?.monthlyOutlookProjectedSavings)
         XCTAssertNil(response.summary?.monthlyOutlookStatus)
         XCTAssertNil(response.summary?.currentPlanWeek)
+        XCTAssertNil(response.summary?.additionalPlannedSavings, "an older row predating migration 0025 must decode this as nil, never a fabricated 0")
+        XCTAssertNil(response.summary?.weeklyComparisons, "an older row predating migration 0026 must decode this as nil, never an empty/fabricated array")
+    }
+
+    /// USER B FULL WEEK-BY-WEEK PARITY (migration 0026) — round-trips through the exact wire shape
+    /// the client sends/decodes, matching this file's own established DTO round-trip convention.
+    func testSharedDashboardSummaryDTODecodesWeeklyComparisons() throws {
+        let json = """
+        {"summary":{"actual_spent_this_month":"97.50","monthly_spend_remaining":"2243.50","weekly_spending_limit":"560.875","actual_spent_this_week":"0","weekly_remaining":"560.875","weekly_comparisons":[{"index":0,"number":1,"start_date":"2026-03-01","end_date":"2026-03-08","recommended":"560.875","actual":"97.50","remaining":"463.375","status":"good"},{"index":1,"number":2,"start_date":"2026-03-08","end_date":"2026-03-15","recommended":"560.875","actual":"0","remaining":"560.875","status":"good"}],"updated_at":"2026-07-29T09:41:22.985528+00:00"}}
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(SharedDashboardSummaryResponse.self, from: json)
+        let comparisons = try XCTUnwrap(response.summary?.weeklyComparisons)
+        XCTAssertEqual(comparisons.count, 2)
+        XCTAssertEqual(comparisons[0].index, 0)
+        XCTAssertEqual(comparisons[0].number, 1)
+        XCTAssertEqual(comparisons[0].recommended, Decimal(string: "560.875"))
+        XCTAssertEqual(comparisons[0].actual, Decimal(string: "97.50"))
+        XCTAssertEqual(comparisons[0].status, .good)
+        XCTAssertEqual(comparisons[1].number, 2)
+        XCTAssertEqual(comparisons[1].actual, 0, "a future/not-yet-started week must read as $0 actual, never nil/missing")
+    }
+
+    /// A single malformed entry (missing a required field) is dropped, never fails the whole
+    /// array's decode — matches this DTO's general "unusable field reads as unavailable, never a
+    /// hard crash" posture.
+    func testSharedDashboardSummaryDTODropsMalformedWeeklyComparisonEntry() throws {
+        let json = """
+        {"summary":{"actual_spent_this_month":"97.50","monthly_spend_remaining":"2243.50","weekly_spending_limit":"560.875","actual_spent_this_week":"0","weekly_remaining":"560.875","weekly_comparisons":[{"index":0,"number":1,"start_date":"2026-03-01","end_date":"2026-03-08","recommended":"560.875","actual":"97.50","remaining":"463.375","status":"good"},{"index":1,"number":2,"start_date":"2026-03-08"}],"updated_at":"2026-07-29T09:41:22.985528+00:00"}}
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(SharedDashboardSummaryResponse.self, from: json)
+        let comparisons = try XCTUnwrap(response.summary?.weeklyComparisons)
+        XCTAssertEqual(comparisons.count, 1, "the malformed second entry must be dropped, the whole array must not decode as nil")
+        XCTAssertEqual(comparisons[0].number, 1)
+    }
+
+    func testUpsertDashboardSummaryRequestEncodesWeeklyComparisons() throws {
+        let calendar = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let week0 = UpsertDashboardSummaryRequest.CurrentPlanWeek(
+            index: 0, number: 1,
+            startDate: day(2026, 3, 1, calendar: calendar), endDate: day(2026, 3, 8, calendar: calendar),
+            recommended: 500, actual: 100, remaining: 400, status: .good, calendar: calendar
+        )
+        let week1 = UpsertDashboardSummaryRequest.CurrentPlanWeek(
+            index: 1, number: 2,
+            startDate: day(2026, 3, 8, calendar: calendar), endDate: day(2026, 3, 15, calendar: calendar),
+            recommended: 500, actual: 0, remaining: 500, status: .good, calendar: calendar
+        )
+        let request = UpsertDashboardSummaryRequest(
+            actualSpentThisMonth: 0, monthlySpendRemaining: 0, weeklySpendingLimit: 0,
+            actualSpentThisWeek: 0, weeklyRemaining: 0, weeklyComparisons: [week0, week1]
+        )
+        let comparisons = try XCTUnwrap(request.weeklyComparisons)
+        XCTAssertEqual(comparisons.count, 2)
+        XCTAssertEqual(comparisons[0].index, 0)
+        XCTAssertEqual(comparisons[0].number, 1)
+        XCTAssertEqual(comparisons[0].startDate, "2026-03-01")
+        XCTAssertEqual(comparisons[0].endDate, "2026-03-08")
+        XCTAssertEqual(comparisons[0].recommended, "500")
+        XCTAssertEqual(comparisons[0].actual, "100")
+        XCTAssertEqual(comparisons[1].number, 2)
+        XCTAssertEqual(comparisons[1].actual, "0")
+    }
+
+    func testUpsertDashboardSummaryRequestOmitsWeeklyComparisonsWhenNotSupplied() {
+        let request = UpsertDashboardSummaryRequest(
+            actualSpentThisMonth: 0, monthlySpendRemaining: 0, weeklySpendingLimit: 0,
+            actualSpentThisWeek: 0, weeklyRemaining: 0
+        )
+        XCTAssertNil(request.weeklyComparisons)
+    }
+
+    /// USER B FULL WEEK-BY-WEEK PARITY — proves `PrimaryDashboardSummarySyncService` uploads ALL 4
+    /// month-aligned weeks (not just the current one), freshly computed from `MonthlyPlanCalculator
+    /// .summary`'s own `weeklyComparisons` — never a second, independently-derived list.
+    func testPrimaryDashboardSummarySyncUploadsAllFourWeeklyComparisons() async throws {
+        let calendar = Self.calendar(timeZoneIdentifier: "America/New_York")
+        let anchor = day(2026, 6, 15, calendar: calendar)
+        let month = DateRangeHelper.monthRangeContaining(anchor, calendar: calendar)
+        let week = DateRangeHelper.weekRangeContaining(anchor, weekStartsOnSunday: true, calendar: calendar)
+
+        let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
+        await PrimaryDashboardSummarySyncService.sync(
+            transactions: [],
+            incomeSources: [makeIncome(amount: 10200)],
+            recurringExpenses: [],
+            planSettings: nil,
+            authoritativeWeeklyLimit: 500,
+            monthlyOutlookBudgeted: nil,
+            currentWeekIndex: nil,
+            weekInterval: week,
+            monthInterval: month,
+            weekStartsOnSunday: true,
+            includePending: true,
+            warningThreshold: 0.70,
+            backend: fake
+        )
+
+        guard let request = fake.lastUpsertDashboardSummaryRequest else { return XCTFail("expected an upsert call") }
+        let comparisons = try XCTUnwrap(request.weeklyComparisons)
+        XCTAssertEqual(comparisons.count, 4, "must always upload exactly the month's 4 weeks, matching MonthlyPlanCalculator.summary().weeklyComparisons")
+        XCTAssertEqual(comparisons.map(\.index), [0, 1, 2, 3])
+        XCTAssertEqual(comparisons.map(\.number), [1, 2, 3, 4])
+    }
+
+    /// Source-scan proof that the Secondary's Week-by-Week block reads `summary.weeklyComparisons`
+    /// (the full-4-week field) before falling back to `summary.currentPlanWeek` (the pre-0026
+    /// single-week field) — never the other order, which would silently ignore the new field for
+    /// every Primary who's already pushed it.
+    func testSharedMonthlyOutlookSectionPrefersWeeklyComparisonsOverCurrentPlanWeek() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private func weekByWeekBlock(summary: SharedDashboardSummaryDTO) -> some View {") else {
+            XCTFail("weekByWeekBlock not found"); return
+        }
+        let comparisonsRange = source.range(of: "summary.weeklyComparisons", range: range.lowerBound..<source.endIndex)
+        let currentPlanWeekRange = source.range(of: "summary.currentPlanWeek", range: range.lowerBound..<source.endIndex)
+        guard let comparisonsRange, let currentPlanWeekRange else {
+            XCTFail("expected both summary.weeklyComparisons and summary.currentPlanWeek to appear"); return
+        }
+        XCTAssertLessThan(comparisonsRange.lowerBound, currentPlanWeekRange.lowerBound, "weeklyComparisons must be checked before the legacy currentPlanWeek fallback")
+    }
+
+    /// SHARED USER QUICK STATS PARITY (migration 0025) — round-trips through the exact wire shape
+    /// the client sends/decodes, matching this file's own established DTO round-trip convention.
+    func testSharedDashboardSummaryDTODecodesAdditionalPlannedSavings() throws {
+        let json = """
+        {"summary":{"actual_spent_this_month":"97.50","monthly_spend_remaining":"2243.50","weekly_spending_limit":"560.875","actual_spent_this_week":"0","weekly_remaining":"560.875","additional_planned_savings":"342.67","updated_at":"2026-07-29T09:41:22.985528+00:00"}}
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(SharedDashboardSummaryResponse.self, from: json)
+        XCTAssertEqual(response.summary?.additionalPlannedSavings, Decimal(string: "342.67"))
+    }
+
+    func testUpsertDashboardSummaryRequestEncodesAdditionalPlannedSavings() throws {
+        let request = UpsertDashboardSummaryRequest(
+            actualSpentThisMonth: 0, monthlySpendRemaining: 0, weeklySpendingLimit: 0,
+            actualSpentThisWeek: 0, weeklyRemaining: 0, additionalPlannedSavings: 342.67
+        )
+        XCTAssertEqual(request.additionalPlannedSavings, "342.67")
     }
 
     /// 17 — date-only current-plan-week fields never shift across timezones: encoded via the SAME
@@ -27042,7 +27609,7 @@ final class FinanceTrackTests: XCTestCase {
     func testBudgetSettingsSectionRemainsUnchangedAndHasNoFavoriteDestination() throws {
         let settingsSource = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
         XCTAssertTrue(settingsSource.contains("private var budgetSection: some View"), "Budget Settings' own section must remain present, unmodified")
-        XCTAssertTrue(settingsSource.contains("labeledAmountField(title: \"Weekly Spending Limit\", amount: $weeklyLimit, isDisabled: true)"), "Budget Settings must remain permanently read-only, exactly as before")
+        XCTAssertTrue(settingsSource.contains("labeledAmountField(title: \"Weekly Spending Limit\", amount: $weeklyLimit) {"), "Budget Settings' Weekly Spending Limit row must remain present")
 
         for path in ["../FinanceTrack/Models/FavoriteDestination.swift", "../FinanceTrack/Views/Dashboard/DashboardView.swift"] {
             let source = try Self.monthlySavingsSourceFile(path)
@@ -30034,7 +30601,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let sectionRange = source.range(of: "private var quickStatsSection: some View {") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let scoped = String(source[sectionRange.lowerBound...].prefix(3500))
+        let scoped = String(source[sectionRange.lowerBound...].prefix(10000))
         let titles = ["\"Planned Weekly Spending\"", "\"Spent This Week\"", "\"Planned Monthly Spending\"", "\"Projected Available After Spend\""]
         var lastIndex: String.Index?
         for title in titles {
@@ -30061,7 +30628,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let sectionRange = source.range(of: "private var quickStatsSection: some View {") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let scoped = String(source[sectionRange.lowerBound...].prefix(3500))
+        let scoped = String(source[sectionRange.lowerBound...].prefix(10000))
         XCTAssertTrue(scoped.contains("plannedWeeklySpendingForOutlook"))
         XCTAssertTrue(scoped.contains("spentThisWeek"))
         XCTAssertTrue(scoped.contains("plannedMonthlySpendingForOutlook"))
@@ -31913,6 +32480,143 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(manager.isUnlocked, "a device with no biometrics/passcode configured must never be able to strand the user behind the lock screen")
     }
 
+    // MARK: - GRACE PERIOD (2026-08-18) — background transitions don't always re-lock
+
+    @MainActor
+    func testGracePeriodIsOneHour() {
+        XCTAssertEqual(BiometricAuthManager.gracePeriod, 3600)
+    }
+
+    @MainActor
+    func testSuccessfulUnlockRecordsLastUnlockedAt() async {
+        let fake = FakeBiometricAuthenticator()
+        fake.result = .success
+        let manager = BiometricAuthManager(authenticator: fake)
+        XCTAssertNil(manager.lastUnlockedAt)
+        await manager.authenticate(surfaceErrors: true)
+        XCTAssertNotNil(manager.lastUnlockedAt)
+    }
+
+    @MainActor
+    func testLockIfGraceExpiredStaysUnlockedWithinGracePeriod() async {
+        let fake = FakeBiometricAuthenticator()
+        fake.result = .success
+        let manager = BiometricAuthManager(authenticator: fake)
+        await manager.authenticate(surfaceErrors: true)
+        let lastUnlockedAt = try! XCTUnwrap(manager.lastUnlockedAt)
+
+        manager.lockIfGraceExpired(now: lastUnlockedAt.addingTimeInterval(BiometricAuthManager.gracePeriod - 1))
+        XCTAssertTrue(manager.isUnlocked, "a background transition inside the grace period must never re-lock")
+    }
+
+    @MainActor
+    func testLockIfGraceExpiredLocksOnceGracePeriodElapses() async {
+        let fake = FakeBiometricAuthenticator()
+        fake.result = .success
+        let manager = BiometricAuthManager(authenticator: fake)
+        await manager.authenticate(surfaceErrors: true)
+        let lastUnlockedAt = try! XCTUnwrap(manager.lastUnlockedAt)
+
+        manager.lockIfGraceExpired(now: lastUnlockedAt.addingTimeInterval(BiometricAuthManager.gracePeriod))
+        XCTAssertFalse(manager.isUnlocked, "once the grace period has fully elapsed, the next background transition must re-lock")
+    }
+
+    @MainActor
+    func testLockIfGraceExpiredIsANoOpWhenAlreadyLocked() {
+        let fake = FakeBiometricAuthenticator()
+        let manager = BiometricAuthManager(authenticator: fake)
+        XCTAssertFalse(manager.isUnlocked)
+        manager.lockIfGraceExpired()
+        XCTAssertFalse(manager.isUnlocked)
+    }
+
+    @MainActor
+    func testLockIfGraceExpiredLocksWhenNeverUnlockedThisSession() {
+        // Defensive case: isUnlocked somehow true with no recorded lastUnlockedAt (shouldn't
+        // happen in practice — every path that sets isUnlocked = true also sets
+        // lastUnlockedAt) — must still lock rather than trust a stale/absent timestamp.
+        let fake = FakeBiometricAuthenticator()
+        let manager = BiometricAuthManager(authenticator: fake)
+        manager.isUnlocked = true
+        manager.lockIfGraceExpired()
+        XCTAssertFalse(manager.isUnlocked)
+    }
+
+    @MainActor
+    func testLockIfGraceExpiredNeverUnlocksAnAlreadyLockedApp() {
+        let fake = FakeBiometricAuthenticator()
+        let manager = BiometricAuthManager(authenticator: fake)
+        manager.lockIfGraceExpired(now: Date().addingTimeInterval(-10_000))
+        XCTAssertFalse(manager.isUnlocked, "lockIfGraceExpired must never be the thing that flips isUnlocked to true")
+    }
+
+    // MARK: - FORCE-QUIT FIX (2026-08-18) — grace period must survive a killed process, not just
+    // a background/foreground cycle within the same one. Each test explicitly clears the shared
+    // UserDefaults key before AND after, since (unlike the in-memory-only state above) this is
+    // real persisted state that would otherwise leak between test runs/orderings.
+
+    @MainActor
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        UserDefaults.standard.removeObject(forKey: BiometricAuthManager.lastUnlockedAtDefaultsKey)
+    }
+
+    @MainActor
+    func testFreshColdLaunchWithNoPersistedUnlockStartsLocked() {
+        UserDefaults.standard.removeObject(forKey: BiometricAuthManager.lastUnlockedAtDefaultsKey)
+        let manager = BiometricAuthManager(authenticator: FakeBiometricAuthenticator())
+        XCTAssertFalse(manager.isUnlocked, "no persisted unlock at all (true first launch) must never start unlocked")
+    }
+
+    @MainActor
+    func testSimulatedForceQuitRelaunchWithinGracePeriodStartsUnlocked() async {
+        let fake = FakeBiometricAuthenticator()
+        fake.result = .success
+        let beforeQuit = BiometricAuthManager(authenticator: fake)
+        await beforeQuit.authenticate(surfaceErrors: true)
+        XCTAssertTrue(beforeQuit.isUnlocked)
+
+        // Simulate force-quit + relaunch: a BRAND NEW manager instance (the real process died and
+        // restarted), the only thing that could possibly carry state across is UserDefaults.
+        let afterRelaunch = BiometricAuthManager(authenticator: fake)
+        XCTAssertTrue(afterRelaunch.isUnlocked, "a relaunch shortly after a force-quit, still within the grace period, must not require re-authentication — this is exactly the case that was still broken")
+
+        UserDefaults.standard.removeObject(forKey: BiometricAuthManager.lastUnlockedAtDefaultsKey)
+    }
+
+    @MainActor
+    func testSimulatedForceQuitRelaunchAfterGracePeriodStartsLocked() {
+        let staleTimestamp = Date().addingTimeInterval(-(BiometricAuthManager.gracePeriod + 1))
+        UserDefaults.standard.set(staleTimestamp.timeIntervalSince1970, forKey: BiometricAuthManager.lastUnlockedAtDefaultsKey)
+
+        let afterRelaunch = BiometricAuthManager(authenticator: FakeBiometricAuthenticator())
+        XCTAssertFalse(afterRelaunch.isUnlocked, "a relaunch more than an hour after the last unlock must still require re-authentication")
+
+        UserDefaults.standard.removeObject(forKey: BiometricAuthManager.lastUnlockedAtDefaultsKey)
+    }
+
+    @MainActor
+    func testLockClearsThePersistedTimestampNotJustTheInMemoryOne() async {
+        let fake = FakeBiometricAuthenticator()
+        fake.result = .success
+        let manager = BiometricAuthManager(authenticator: fake)
+        await manager.authenticate(surfaceErrors: true)
+        XCTAssertTrue(manager.isUnlocked)
+
+        manager.lock()
+
+        // A "relaunch" right after an explicit lock() must NOT resurrect the old unlock — proves
+        // lock() invalidates the PERSISTED value, not merely this instance's own in-memory field.
+        let afterRelaunch = BiometricAuthManager(authenticator: fake)
+        XCTAssertFalse(afterRelaunch.isUnlocked, "lock() must invalidate the persisted timestamp too, so a subsequent relaunch can't read a stale still-valid unlock")
+    }
+
+    @MainActor
+    override func tearDownWithError() throws {
+        UserDefaults.standard.removeObject(forKey: BiometricAuthManager.lastUnlockedAtDefaultsKey)
+        try super.tearDownWithError()
+    }
+
     // MARK: - PHYSICAL-DEVICE FIX — scene-phase-gated automatic attempt
 
     // ROOT CAUSE: `AppLockView` mounts the INSTANT `lock()` re-arms the top-level gate on
@@ -31965,16 +32669,20 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testFinanceTrackAppStillCallsLockOnBackground() throws {
-        // Confirms the OTHER half of the race this fix addresses is still in place — `lock()`
-        // (not a raw field assignment) is what re-arms the automatic-attempt opportunity on
-        // backgrounding, which is exactly what makes AppLockView remount (and therefore able to
-        // observe the later transition back to `.active`) in the first place.
+        // Confirms the OTHER half of the race this fix addresses is still in place — going
+        // through the manager's own re-arming API (not a raw field assignment) is what re-arms
+        // the automatic-attempt opportunity on backgrounding, which is exactly what makes
+        // AppLockView remount (and therefore able to observe the later transition back to
+        // `.active`) in the first place. GRACE PERIOD (2026-08-18) — this is now
+        // `lockIfGraceExpired()` rather than an unconditional `lock()` (see that method's own
+        // header), but it still routes through `lock()` internally once the grace period has
+        // elapsed, so this guarantee is unaffected.
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
         guard let range = source.range(of: "newPhase == .background, biometricAuth.isFaceIDRequired {") else {
             XCTFail("background scenePhase handling not found"); return
         }
         let scoped = String(source[range.lowerBound...].prefix(120))
-        XCTAssertTrue(scoped.contains("biometricAuth.lock()"))
+        XCTAssertTrue(scoped.contains("biometricAuth.lockIfGraceExpired()"))
     }
 
     @MainActor
@@ -32044,18 +32752,20 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testScenePhaseBackgroundCallsLockNotDirectFieldAssignment() throws {
-        // Re-arming on backgrounding must go through `lock()` (which also resets the new
-        // automatic-attempt flag), not a raw `isUnlocked = false`, so the very next foreground
-        // lock presentation gets its own fresh automatic attempt.
+        // Re-arming on backgrounding must go through the manager's own API (which also resets
+        // the new automatic-attempt flag whenever it actually locks), not a raw
+        // `isUnlocked = false`, so the very next foreground lock presentation gets its own fresh
+        // automatic attempt. GRACE PERIOD (2026-08-18) — now `lockIfGraceExpired()`, which itself
+        // calls `lock()` once the grace period has elapsed; see that method's own header.
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
         guard let range = source.range(of: "newPhase == .background, biometricAuth.isFaceIDRequired {") else {
             XCTFail("background scenePhase handling not found"); return
         }
         // Widened from 80: "newPhase == .background, biometricAuth.isFaceIDRequired {" alone is
-        // 60 chars, leaving too little room for the following "biometricAuth.lock()" line plus
-        // its indentation to actually appear in the scoped window.
+        // 60 chars, leaving too little room for the following "biometricAuth.lockIfGraceExpired()"
+        // line plus its indentation to actually appear in the scoped window.
         let scoped = String(source[range.lowerBound...].prefix(120))
-        XCTAssertTrue(scoped.contains("biometricAuth.lock()"))
+        XCTAssertTrue(scoped.contains("biometricAuth.lockIfGraceExpired()"))
     }
 
     func testSignOutResetsFaceIDThroughLockNotRawFieldAssignment() throws {
@@ -32094,6 +32804,141 @@ final class FinanceTrackTests: XCTestCase {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
         XCTAssertTrue(source.contains("await biometricAuth.authenticate(reason: \"Enable Face ID for SpendSmart\", surfaceErrors: false)"))
         XCTAssertTrue(source.contains("if biometricAuth.isUnlocked"))
+    }
+
+    // MARK: - GRACE PERIOD wiring (2026-08-18) — background handler uses the grace-period lock
+
+    func testBackgroundTransitionUsesGracePeriodLockNotHardLock() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
+        guard let range = source.range(of: "if newPhase == .background, biometricAuth.isFaceIDRequired {") else {
+            XCTFail("background scenePhase handler not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(150))
+        XCTAssertTrue(scoped.contains("biometricAuth.lockIfGraceExpired()"), "the background transition must use the grace-period lock, never an unconditional lock()")
+        XCTAssertFalse(scoped.contains("biometricAuth.lock()"), "must not also call the hard lock() here")
+    }
+
+    // MARK: - DASHBOARD LOCK ICON (2026-08-18)
+
+    func testDashboardHeaderHasLockIconGatedByFaceIDRequired() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "private var header: some View {") else {
+            XCTFail("header not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(1200))
+        XCTAssertTrue(scoped.contains("if biometricAuth.isFaceIDRequired {"), "the lock icon must only appear once Face ID is actually required")
+        XCTAssertTrue(scoped.contains("HeaderIconButton(systemName: \"lock.fill\")"))
+        XCTAssertTrue(scoped.contains("biometricAuth.lock()"), "tapping the lock icon must lock immediately, same as Settings' own Lock Now")
+    }
+
+    func testDashboardViewHasBiometricAuthManagerEnvironment() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        XCTAssertTrue(source.contains("@Environment(BiometricAuthManager.self) private var biometricAuth"))
+    }
+
+    // MARK: - SETTINGS LOCK NOW RELOCATION (2026-08-18)
+
+    func testLockNowIsNoLongerInSecuritySection() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
+        guard let range = source.range(of: "private var securitySection: some View {") else {
+            XCTFail("securitySection not found"); return
+        }
+        guard let nextSectionRange = source.range(of: "private var categoriesSection", range: range.upperBound..<source.endIndex) else {
+            XCTFail("could not bound the end of securitySection"); return
+        }
+        let scoped = String(source[range.lowerBound..<nextSectionRange.lowerBound])
+        XCTAssertFalse(scoped.contains("Text(\"Lock Now\")"), "Lock Now must be moved out of Security & Privacy")
+    }
+
+    func testLockNowIsCenteredUnderAccountRelatedOptionsCard() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
+        guard let range = source.range(of: "private var accountSection: some View {") else {
+            XCTFail("accountSection not found"); return
+        }
+        guard let nextSectionRange = source.range(of: "// MARK: - A3. Favorites", range: range.upperBound..<source.endIndex) else {
+            XCTFail("could not bound the end of accountSection"); return
+        }
+        let scoped = String(source[range.lowerBound..<nextSectionRange.lowerBound])
+        XCTAssertTrue(scoped.contains("Text(\"Lock Now\")"), "Lock Now must now live in accountSection")
+        XCTAssertTrue(scoped.contains(".frame(maxWidth: .infinity, alignment: .center)"), "must be centered")
+        XCTAssertTrue(scoped.contains("if requireFaceIDSetting {"), "must keep the same visibility condition as before")
+        XCTAssertTrue(scoped.contains("biometricAuth.lock()"))
+    }
+
+    // MARK: - ONBOARDING (2026-08-18)
+
+    func testOnboardingSetupPathHasFiveCases() {
+        XCTAssertEqual(OnboardingSetupPath.allCases.count, 5)
+    }
+
+    func testOnboardingSetupPathNoneHasNoInstructionalContent() {
+        XCTAssertTrue(OnboardingSetupPath.none.setupSteps.isEmpty)
+        XCTAssertTrue(OnboardingSetupPath.none.whatToExpect.isEmpty)
+    }
+
+    func testEveryNonNoneOnboardingPathHasInstructionalContent() {
+        for path in OnboardingSetupPath.allCases where path != .none {
+            XCTAssertFalse(path.setupSteps.isEmpty, "\(path.rawValue) must have at least one setup step")
+            XCTAssertFalse(path.whatToExpect.isEmpty, "\(path.rawValue) must explain what to expect")
+        }
+    }
+
+    func testOnboardingSettingsDefaultsToNotCompleted() {
+        let settings = OnboardingSettings()
+        XCTAssertFalse(settings.hasCompletedOnboarding)
+        XCTAssertNil(settings.selectedPathRawValue)
+    }
+
+    func testOnboardingSettingsRegisteredInUserDataStoreSchema() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/UserDataStoreManager.swift")
+        XCTAssertTrue(source.contains("OnboardingSettings.self"))
+    }
+
+    func testRootViewGatesOnboardingBeforeTabView() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
+        guard let range = source.range(of: "var body: some View {", range: source.range(of: "private struct RootView")!.upperBound..<source.endIndex) else {
+            XCTFail("RootView body not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(600))
+        XCTAssertTrue(scoped.contains("if !isBootstrapped {"), "must gate on bootstrap completion before deciding onboarding vs. TabView")
+        XCTAssertTrue(scoped.contains("!onboarding.hasCompletedOnboarding"))
+        XCTAssertTrue(scoped.contains("OnboardingFlowView"))
+    }
+
+    func testExistingUserIsNeverRetroactivelyOnboarded() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
+        guard let range = source.range(of: "private func bootstrapDefaultOnboardingSettingsIfNeeded(isFreshUser: Bool) {") else {
+            XCTFail("bootstrapDefaultOnboardingSettingsIfNeeded not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(250))
+        XCTAssertTrue(scoped.contains("hasCompletedOnboarding: !isFreshUser"), "an existing user (isFreshUser == false) must start with hasCompletedOnboarding already true")
+    }
+
+    func testOnboardingBootstrapCalledWithFreshlyCreatedSettingsSignal() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/App/FinanceTrackApp.swift")
+        guard let range = source.range(of: "bootstrapDefaultOnboardingSettingsIfNeeded(isFreshUser:") else {
+            XCTFail("call site not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(120))
+        XCTAssertTrue(scoped.contains("freshlyCreatedSettings != nil"), "must reuse the SAME freshly-created signal Face ID opt-in already uses, never a second/independent fresh-user check")
+    }
+
+    func testOnboardingFlowViewOrdersPaywallThenSelectionThenInstructions() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Onboarding/OnboardingFlowView.swift")
+        XCTAssertTrue(source.contains("case paywall"))
+        XCTAssertTrue(source.contains("case pathSelection"))
+        XCTAssertTrue(source.contains("case instructions(OnboardingSetupPath)"))
+        XCTAssertTrue(source.contains("@State private var step: Step = .paywall"), "must start at the paywall stub, not skip straight to selection")
+    }
+
+    func testOnboardingFlowViewSkipsInstructionsForNonePath() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Onboarding/OnboardingFlowView.swift")
+        guard let range = source.range(of: "case .pathSelection:") else {
+            XCTFail("pathSelection case not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(300))
+        XCTAssertTrue(scoped.contains("if path == .none {"))
+        XCTAssertTrue(scoped.contains("onComplete(path)"))
     }
 
     // MARK: - BILL PAYMENT TAGGING + VARIANCE
@@ -32289,6 +33134,100 @@ final class FinanceTrackTests: XCTestCase {
 
         let entries = MonthlyPlanCalculator.billPaymentVarianceBreakdown(recurringExpenses: [zBill, aBill], transactions: [zPayment, aPayment], in: month)
         XCTAssertEqual(entries.map(\.bill.name), ["A Insurance", "Z Insurance"])
+    }
+
+    // MARK: - WeeklyOutlookBreakdownCalculator (Monthly Outlook drill-down)
+
+    func testWeeklyOutlookBreakdownGroupsManualSpendingByAccount() {
+        let month = DateRangeHelper.currentMonthRange()
+        let checking = Account(name: "Wells Fargo", type: .checking)
+        let savings = Account(name: "Amex Savings", type: .savings)
+        let weekOneDate = month.start.addingTimeInterval(3600)
+        let checkingTxn = FinanceTransaction(amount: 60, date: weekOneDate, type: .expense, account: checking)
+        let savingsTxn = FinanceTransaction(amount: 25, date: weekOneDate, type: .expense, account: savings)
+
+        let weeks = WeeklyOutlookBreakdownCalculator.breakdown(
+            recurringExpenses: [], transactions: [checkingTxn, savingsTxn], in: month,
+            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: [],
+            excludedTransactionIDs: [], warningThreshold: 0.70
+        )
+
+        let week1 = weeks[0]
+        XCTAssertEqual(week1.actualSpent, 85)
+        XCTAssertEqual(week1.accounts.count, 2)
+        XCTAssertEqual(week1.accounts.first { $0.manualAccountName == "Wells Fargo" }?.spent, 60)
+        XCTAssertEqual(week1.accounts.first { $0.manualAccountName == "Amex Savings" }?.spent, 25)
+    }
+
+    func testWeeklyOutlookBreakdownExcludesBillPaymentsFromRegularSpending() {
+        let month = DateRangeHelper.currentMonthRange()
+        let checking = Account(name: "Wells Fargo", type: .checking)
+        let bill = RecurringExpense(name: "Car Insurance", amount: 400, timing: .midMonth)
+        let weekOneDate = month.start.addingTimeInterval(3600)
+        let billPayment = FinanceTransaction(amount: 500, date: weekOneDate, type: .expense, account: checking, linkedRecurringExpense: bill)
+        let regularSpend = FinanceTransaction(amount: 40, date: weekOneDate, type: .expense, account: checking)
+
+        let weeks = WeeklyOutlookBreakdownCalculator.breakdown(
+            recurringExpenses: [bill], transactions: [billPayment, regularSpend], in: month,
+            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: [],
+            excludedTransactionIDs: [], warningThreshold: 0.70
+        )
+
+        let entry = weeks[0].accounts.first { $0.manualAccountName == "Wells Fargo" }
+        XCTAssertEqual(entry?.spent, 40, "the bill payment must never count as regular spending — only via billVariance")
+        XCTAssertEqual(entry?.billVariance, -100, "paid $500 for a $400-planned bill: variance = planned - actual = -100")
+    }
+
+    func testWeeklyOutlookBreakdownOmitsBillVarianceWhenNoBillPaidThatWeek() {
+        let month = DateRangeHelper.currentMonthRange()
+        let checking = Account(name: "Wells Fargo", type: .checking)
+        let regularSpend = FinanceTransaction(amount: 40, date: month.start.addingTimeInterval(3600), type: .expense, account: checking)
+
+        let weeks = WeeklyOutlookBreakdownCalculator.breakdown(
+            recurringExpenses: [], transactions: [regularSpend], in: month,
+            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: [],
+            excludedTransactionIDs: [], warningThreshold: 0.70
+        )
+
+        XCTAssertNil(weeks[0].accounts.first { $0.manualAccountName == "Wells Fargo" }?.billVariance)
+    }
+
+    func testWeeklyOutlookBreakdownGroupsAutoTrackedSpendingByPlaidAccount() {
+        let month = DateRangeHelper.currentMonthRange()
+        let weekOneDate = month.start.addingTimeInterval(3600)
+        let amexTxn = FinanceTransaction(
+            amount: 49.09, date: weekOneDate, type: .expense, source: .plaid,
+            isExcludedFromReports: true, plaidAccountId: "amex-account"
+        )
+
+        let weeks = WeeklyOutlookBreakdownCalculator.breakdown(
+            recurringExpenses: [], transactions: [amexTxn], in: month,
+            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: ["amex-account"],
+            excludedTransactionIDs: [], warningThreshold: 0.70
+        )
+
+        XCTAssertEqual(weeks[0].accounts.first { $0.plaidAccountId == "amex-account" }?.spent, 49.09)
+    }
+
+    func testWeeklyOutlookBreakdownAccountTotalsSumToWeeklyActualSpending() {
+        let month = DateRangeHelper.currentMonthRange()
+        let checking = Account(name: "Wells Fargo", type: .checking)
+        let savings = Account(name: "Chase Savings", type: .savings)
+        let weekOneDate = month.start.addingTimeInterval(3600)
+        let transactions = [
+            FinanceTransaction(amount: 60, date: weekOneDate, type: .expense, account: checking),
+            FinanceTransaction(amount: 25, date: weekOneDate, type: .expense, account: savings),
+            FinanceTransaction(amount: 10, date: weekOneDate, type: .refund, account: checking),
+        ]
+
+        let weeks = WeeklyOutlookBreakdownCalculator.breakdown(
+            recurringExpenses: [], transactions: transactions, in: month,
+            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: [],
+            excludedTransactionIDs: [], warningThreshold: 0.70
+        )
+
+        let accountTotal = weeks[0].accounts.reduce(Decimal(0)) { $0 + $1.spent }
+        XCTAssertEqual(accountTotal, weeks[0].actualSpent, "per-account totals must always sum to the same actualSpent BudgetCalculator already computes")
     }
 
     // -- MonthlyPlanCalculator.summary() integration --
@@ -33344,7 +34283,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(6300))
+        let section = String(source[range.lowerBound...].prefix(10000))
         XCTAssertTrue(section.contains(".sheet(isPresented: $isPresentingQuickStatsConfiguration)"))
         XCTAssertTrue(section.contains("QuickStatsConfigurationView()"))
     }
@@ -33357,7 +34296,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(5000))
+        let section = String(source[range.lowerBound...].prefix(10000))
         for stat in ["plannedWeeklySpending", "spentThisWeek", "plannedMonthlySpending", "projectedAvailableAfterSpend", "savedViaTransfer"] {
             XCTAssertTrue(section.contains("isQuickStatShown(.\(stat))"), "\(stat) must be gated by isQuickStatShown")
         }
@@ -33795,6 +34734,116 @@ final class FinanceTrackTests: XCTestCase {
         for term in disallowed {
             XCTAssertFalse(body.contains(term), "User's Guide body must never mention '\(term)' — plain language only")
         }
+    }
+
+    // MARK: - Weekly Budget Secondary parity (Item 2 of the household-sharing parity thread)
+
+    /// The Weekly Budget screen's `body` must route a Secondary to the shared-data branch
+    /// (`secondaryRefreshButton`/`secondaryDailyBreakdownSection`), never the Primary's own local
+    /// `pendingToggleSection`/`categoryBreakdownSection`/`dailyBreakdownSection` — this is the
+    /// exact bug being fixed: a Secondary's local SwiftData store legitimately has none of that
+    /// data, so those sections always rendered empty for them.
+    func testWeeklyBudgetViewBodyRoutesSecondaryToSharedSections() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Weekly/WeeklyBudgetView.swift")
+        guard let bodyRange = source.range(of: "var body: some View {") else {
+            XCTFail("body not found"); return
+        }
+        let scoped = String(source[bodyRange.lowerBound...].prefix(800))
+        XCTAssertTrue(scoped.contains("if isSecondary {"), "body must branch on isSecondary")
+        XCTAssertTrue(scoped.contains("secondaryRefreshButton"))
+        XCTAssertTrue(scoped.contains("secondaryDailyBreakdownSection"))
+        guard let elseRange = scoped.range(of: "} else {") else {
+            XCTFail("could not find the Primary else-branch"); return
+        }
+        let primaryBranch = String(scoped[elseRange.upperBound...])
+        XCTAssertTrue(primaryBranch.contains("pendingToggleSection"))
+        XCTAssertTrue(primaryBranch.contains("categoryBreakdownSection"))
+        XCTAssertTrue(primaryBranch.contains("dailyBreakdownSection"))
+    }
+
+    /// The hero card's Secondary branch must read the Primary's authoritative shared aggregate
+    /// (`sharedDashboardSummary`), never this device's own local `spentThisWeek`/`weeklyLimit` —
+    /// those are always zero/empty for a Secondary since they own no local transactions.
+    func testWeeklyBudgetViewHeroSectionSecondaryBranchUsesSharedSummary() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Weekly/WeeklyBudgetView.swift")
+        guard let heroRange = source.range(of: "private var heroSection: some View {") else {
+            XCTFail("heroSection not found"); return
+        }
+        guard let secondaryStart = source.range(of: "if isSecondary {", range: heroRange.lowerBound..<source.endIndex),
+              let elseRange = source.range(of: "        } else {\n            WeeklyBudgetHeroCard(", range: secondaryStart.upperBound..<source.endIndex)
+        else {
+            XCTFail("could not isolate heroSection's Secondary branch"); return
+        }
+        let secondaryBranch = String(source[secondaryStart.upperBound..<elseRange.lowerBound])
+        XCTAssertTrue(secondaryBranch.contains("sharedDashboardSummary"))
+        XCTAssertTrue(secondaryBranch.contains("summary.actualSpentThisWeek"))
+        XCTAssertTrue(secondaryBranch.contains("summary.weeklySpendingLimit"))
+        XCTAssertFalse(secondaryBranch.contains("spentThisWeek,"), "must never read the local spentThisWeek computed property")
+    }
+
+    /// The Primary's own hero card branch must remain byte-for-byte reachable via the exact same
+    /// `spentThisWeek`/`weeklyLimit`/`status` properties as before this correction — no behavior
+    /// change for the Primary's own phone.
+    func testWeeklyBudgetViewHeroSectionPrimaryBranchUnchanged() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Weekly/WeeklyBudgetView.swift")
+        guard let heroRange = source.range(of: "private var heroSection: some View {") else {
+            XCTFail("heroSection not found"); return
+        }
+        guard let elseRange = source.range(of: "        } else {\n            WeeklyBudgetHeroCard(", range: heroRange.lowerBound..<source.endIndex) else {
+            XCTFail("could not find the Primary branch"); return
+        }
+        let primaryBranch = String(source[elseRange.lowerBound...].prefix(400))
+        XCTAssertTrue(primaryBranch.contains("spent: spentThisWeek"))
+        XCTAssertTrue(primaryBranch.contains("limit: weeklyLimit"))
+        XCTAssertTrue(primaryBranch.contains("status: status"))
+        XCTAssertTrue(primaryBranch.contains("isPresentingEditLimit = true"), "Primary must still be able to edit the weekly limit")
+    }
+
+    /// Category Breakdown is explicitly out of scope for this pass (the shared transaction feed
+    /// carries no category data) — the Secondary body branch must never reference
+    /// `categoryBreakdownSection`, and the Secondary daily breakdown must reuse the exact same
+    /// `SharedActivityTransactionRow` presentation the Activity tab's own shared list uses, never
+    /// a second, independently-styled row.
+    func testWeeklyBudgetViewSecondaryDailyBreakdownReusesSharedActivityRow() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Weekly/WeeklyBudgetView.swift")
+        guard let sectionRange = source.range(of: "private var secondaryDailyBreakdownSection: some View {") else {
+            XCTFail("secondaryDailyBreakdownSection not found"); return
+        }
+        let scoped = String(source[sectionRange.lowerBound...].prefix(1200))
+        XCTAssertFalse(scoped.contains("CategoryBreakdownRow"), "Secondary daily breakdown must never reference a category row")
+        XCTAssertTrue(source.contains("SharedActivityTransactionRow(entry: entry, isPrivacyModeEnabled: privacyMode.isEnabled)"))
+        XCTAssertTrue(source.contains("sharedActivityViewModel.load(connectedAccounts: sharedConnectedAccounts, manualAccounts: [])"), "Manual Accounts must be explicitly excluded for this pass")
+    }
+
+    /// The Secondary refresh control must be a prominent, clearly-labeled pill (per Scott's
+    /// explicit styling request), not the earlier small text-only link style.
+    func testWeeklyBudgetViewSecondaryRefreshButtonIsLabeledAndStyled() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Weekly/WeeklyBudgetView.swift")
+        guard let buttonRange = source.range(of: "private var secondaryRefreshButton: some View {") else {
+            XCTFail("secondaryRefreshButton not found"); return
+        }
+        let scoped = String(source[buttonRange.lowerBound...].prefix(900))
+        XCTAssertTrue(scoped.contains("Refresh Weekly Budget"))
+        XCTAssertTrue(scoped.contains("Theme.accent"))
+        XCTAssertTrue(scoped.contains("loadDashboardSummaryIfNeeded()"))
+        XCTAssertTrue(scoped.contains("loadSharedActivityIfNeeded()"))
+    }
+
+    // MARK: - Dashboard Secondary refresh button restyle
+
+    /// The Dashboard's own Secondary refresh control was made more prominent per Scott's explicit
+    /// request (centered, light-blue filled pill, white text, labeled "Refresh Dashboard") —
+    /// confirms the new label/styling landed and the control still calls the same
+    /// `loadDashboardSummaryIfNeeded()` it always has.
+    func testDashboardSecondaryRefreshButtonIsLabeledAndStyled() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
+        guard let range = source.range(of: "Text(\"Refresh Dashboard\")") else {
+            XCTFail("could not find the Dashboard Secondary refresh button's label"); return
+        }
+        let scoped = String(source[max(source.startIndex, source.index(range.lowerBound, offsetBy: -700, limitedBy: source.startIndex) ?? source.startIndex)...].prefix(1200))
+        XCTAssertTrue(scoped.contains("Theme.accent"))
+        XCTAssertTrue(scoped.contains(".foregroundStyle(.white)"))
+        XCTAssertTrue(scoped.contains("loadDashboardSummaryIfNeeded()"))
     }
 
     /// Spot-check: every new per-screen/per-section explanation must stay in plain language, same

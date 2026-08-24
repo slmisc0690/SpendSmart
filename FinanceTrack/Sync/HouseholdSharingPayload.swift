@@ -1117,6 +1117,15 @@ struct UpsertDashboardSummaryRequest: Encodable {
     let currentPlanWeekActual: String?
     let currentPlanWeekRemaining: String?
     let currentPlanWeekStatus: String?
+    /// SHARED USER QUICK STATS PARITY (migration 0025) — feeds the Secondary's "Projected Available
+    /// After Spend" Quick Stat tile. Nil when the Primary has no Monthly Plan settings yet, same as
+    /// the other planning-derived fields above.
+    let additionalPlannedSavings: String?
+    /// USER B FULL WEEK-BY-WEEK PARITY (migration 0026) — ALL 4 of the Primary's current
+    /// month-aligned weeks, freshly recomputed every push (never an incrementally-cached/appended
+    /// value — see `PrimaryDashboardSummarySyncService`'s own header). Nil when the Primary has no
+    /// valid `weeklyComparisons` to upload at all (mirrors `currentPlanWeek*`'s own nil semantics).
+    let weeklyComparisons: [WireWeek]?
 
     enum CodingKeys: String, CodingKey {
         case actualSpentThisMonth = "actual_spent_this_month"
@@ -1137,6 +1146,31 @@ struct UpsertDashboardSummaryRequest: Encodable {
         case currentPlanWeekActual = "current_plan_week_actual"
         case currentPlanWeekRemaining = "current_plan_week_remaining"
         case currentPlanWeekStatus = "current_plan_week_status"
+        case additionalPlannedSavings = "additional_planned_savings"
+        case weeklyComparisons = "weekly_comparisons"
+    }
+
+    /// One entry of the `weekly_comparisons` array — same shape as `CurrentPlanWeek` (index/
+    /// number/dates/recommended/actual/remaining/status) but Encodable and money-as-string, since
+    /// this is the wire-request side. Deliberately a separate type from `CurrentPlanWeek` (which
+    /// carries `Date`/`Calendar`, not wire strings) rather than overloading one type for both
+    /// in-memory and wire representations.
+    struct WireWeek: Encodable {
+        let index: Int
+        let number: Int
+        let startDate: String
+        let endDate: String
+        let recommended: String
+        let actual: String
+        let remaining: String
+        let status: String
+
+        enum CodingKeys: String, CodingKey {
+            case index, number
+            case startDate = "start_date"
+            case endDate = "end_date"
+            case recommended, actual, remaining, status
+        }
     }
 
     init(
@@ -1150,7 +1184,9 @@ struct UpsertDashboardSummaryRequest: Encodable {
         monthlyOutlookActual: Decimal? = nil,
         monthlyOutlookProjectedSavings: Decimal? = nil,
         monthlyOutlookStatus: SpendingStatus? = nil,
-        currentPlanWeek: CurrentPlanWeek? = nil
+        currentPlanWeek: CurrentPlanWeek? = nil,
+        additionalPlannedSavings: Decimal? = nil,
+        weeklyComparisons: [CurrentPlanWeek]? = nil
     ) {
         self.actualSpentThisMonth = "\(actualSpentThisMonth)"
         self.monthlySpendRemaining = "\(monthlySpendRemaining)"
@@ -1170,6 +1206,19 @@ struct UpsertDashboardSummaryRequest: Encodable {
         self.currentPlanWeekActual = currentPlanWeek.map { "\($0.actual)" }
         self.currentPlanWeekRemaining = currentPlanWeek.map { "\($0.remaining)" }
         self.currentPlanWeekStatus = currentPlanWeek.map { SpendingStatusWireCoding.wireValue($0.status) }
+        self.additionalPlannedSavings = additionalPlannedSavings.map { "\($0)" }
+        self.weeklyComparisons = weeklyComparisons?.map { week in
+            WireWeek(
+                index: week.index,
+                number: week.number,
+                startDate: ManualDataSyncPayloadBuilder.bareDateString(from: week.startDate, calendar: week.calendar),
+                endDate: ManualDataSyncPayloadBuilder.bareDateString(from: week.endDate, calendar: week.calendar),
+                recommended: "\(week.recommended)",
+                actual: "\(week.actual)",
+                remaining: "\(week.remaining)",
+                status: SpendingStatusWireCoding.wireValue(week.status)
+            )
+        }
     }
 
     /// The Primary's own single effective/current `WeeklyPlanComparison`, plus the 1-based week
@@ -1238,6 +1287,18 @@ struct SharedDashboardSummaryDTO: Decodable, Equatable {
     let monthlyOutlookProjectedSavings: Decimal?
     let monthlyOutlookStatus: SpendingStatus?
     let currentPlanWeek: CurrentPlanWeek?
+    /// SHARED USER QUICK STATS PARITY (migration 0025) — feeds the Secondary's "Projected Available
+    /// After Spend" Quick Stat tile. Nil for a row written before this migration, or when the
+    /// Primary has no Monthly Plan settings yet.
+    let additionalPlannedSavings: Decimal?
+    /// USER B FULL WEEK-BY-WEEK PARITY (migration 0026) — ALL 4 of the Primary's current
+    /// month-aligned weeks, reusing the SAME `CurrentPlanWeek` shape as the single-week field
+    /// above (never a second, duplicated per-week type). Nil for a row written before this
+    /// migration, or when the Primary had nothing valid to upload. An individual malformed entry
+    /// within an otherwise-valid array is simply dropped (never surfaces the whole array as nil),
+    /// matching this DTO's general "an unusable field reads as unavailable, never a hard failure"
+    /// posture.
+    let weeklyComparisons: [CurrentPlanWeek]?
     let updatedAt: Date
 
     /// The Primary's single effective/current week only — never a full month's list. `weekInterval`
@@ -1273,7 +1334,30 @@ struct SharedDashboardSummaryDTO: Decodable, Equatable {
         case currentPlanWeekActual = "current_plan_week_actual"
         case currentPlanWeekRemaining = "current_plan_week_remaining"
         case currentPlanWeekStatus = "current_plan_week_status"
+        case additionalPlannedSavings = "additional_planned_savings"
+        case weeklyComparisons = "weekly_comparisons"
         case updatedAt = "updated_at"
+    }
+
+    /// Raw wire shape of one `weekly_comparisons` array entry — every field optional/untyped-safe
+    /// so a single malformed entry can be detected and dropped rather than failing the whole
+    /// array's decode.
+    private struct RawWeekEntry: Decodable {
+        let index: Int?
+        let number: Int?
+        let startDate: String?
+        let endDate: String?
+        let recommended: String?
+        let actual: String?
+        let remaining: String?
+        let status: String?
+
+        enum CodingKeys: String, CodingKey {
+            case index, number
+            case startDate = "start_date"
+            case endDate = "end_date"
+            case recommended, actual, remaining, status
+        }
     }
 
     private static func decodeAmount(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Decimal {
@@ -1340,6 +1424,32 @@ struct SharedDashboardSummaryDTO: Decodable, Equatable {
             currentPlanWeek = nil
         }
 
+        additionalPlannedSavings = try Self.decodeOptionalAmount(container, forKey: .additionalPlannedSavings)
+
+        if let rawEntries = try container.decodeIfPresent([RawWeekEntry].self, forKey: .weeklyComparisons) {
+            weeklyComparisons = rawEntries.compactMap { raw -> CurrentPlanWeek? in
+                guard let index = raw.index, let number = raw.number,
+                      let startString = raw.startDate, let start = BackendTransactionDTO.parseBareDate(startString),
+                      let endString = raw.endDate, let end = BackendTransactionDTO.parseBareDate(endString),
+                      let recommendedString = raw.recommended, let recommended = Decimal(string: recommendedString),
+                      let actualString = raw.actual, let actual = Decimal(string: actualString),
+                      let remainingString = raw.remaining, let remaining = Decimal(string: remainingString),
+                      let statusString = raw.status, let status = SpendingStatusWireCoding.status(fromWireValue: statusString)
+                else { return nil }
+                return CurrentPlanWeek(
+                    index: index,
+                    number: number,
+                    weekInterval: DateInterval(start: start, end: end),
+                    recommended: recommended,
+                    actual: actual,
+                    remaining: remaining,
+                    status: status
+                )
+            }
+        } else {
+            weeklyComparisons = nil
+        }
+
         updatedAt = try SharedTimestampDecoding.decode(container, forKey: .updatedAt)
     }
 
@@ -1364,6 +1474,8 @@ struct SharedDashboardSummaryDTO: Decodable, Equatable {
         monthlyOutlookProjectedSavings: Decimal? = nil,
         monthlyOutlookStatus: SpendingStatus? = nil,
         currentPlanWeek: CurrentPlanWeek? = nil,
+        additionalPlannedSavings: Decimal? = nil,
+        weeklyComparisons: [CurrentPlanWeek]? = nil,
         updatedAt: Date
     ) {
         self.actualSpentThisMonth = actualSpentThisMonth
@@ -1377,6 +1489,8 @@ struct SharedDashboardSummaryDTO: Decodable, Equatable {
         self.monthlyOutlookProjectedSavings = monthlyOutlookProjectedSavings
         self.monthlyOutlookStatus = monthlyOutlookStatus
         self.currentPlanWeek = currentPlanWeek
+        self.additionalPlannedSavings = additionalPlannedSavings
+        self.weeklyComparisons = weeklyComparisons
         self.updatedAt = updatedAt
     }
 }

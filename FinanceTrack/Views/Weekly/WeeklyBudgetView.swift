@@ -11,14 +11,99 @@ struct WeeklyBudgetView: View {
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Environment(\.modelContext) private var modelContext
     @Environment(PlaidConnectionManager.self) private var plaidConnection
+    /// SECONDARY PARITY — same already-refreshed instance every other Secondary-aware screen
+    /// reads (`DashboardView`/`ExpenseListView`), purely to determine role and the Primary-shared
+    /// account list. Never mutated from this view.
+    @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
     @State private var isPresentingEditLimit = false
     @State private var selectedFilter: WeeklyBreakdownFilter = .manualTransactions
     /// nil means "no explicit choice yet" — falls back to the first available connected account,
     /// same pattern `ExpenseListView`/`DashboardView` use for their own tab selection.
     @State private var selectedConnectedAccountId: String?
+    /// SECONDARY PARITY — the Primary's authoritative shared Dashboard aggregate, reused here
+    /// verbatim for the hero card (Spent/Limit/Remaining) rather than a second reconstruction —
+    /// same instance-management pattern as `DashboardView.dashboardSummaryViewModel`.
+    @State private var dashboardSummaryViewModel: SharedDashboardSummaryViewModel?
+    /// SECONDARY PARITY — every Primary-shared Connected Account's transaction feed, loaded once
+    /// per discovered account list, filtered client-side to this week for the daily breakdown.
+    /// Manual Accounts are deliberately excluded from this screen's `load()` call for now (no
+    /// shared Manual Account daily/category feed exists yet) — see this screen's own Secondary
+    /// daily breakdown section for the explicit "not yet available" messaging that follows from
+    /// that omission.
+    @State private var sharedActivityViewModel = SharedActivityViewModel()
 
     private var settings: BudgetSettings? { settingsList.first }
+
+    private var isSecondary: Bool {
+        accountRelatedOptionsViewModel.response?.role == .secondary
+    }
+
+    private var accountRelatedOptionsLoaded: Bool {
+        if case .loaded = accountRelatedOptionsViewModel.state { return true }
+        return false
+    }
+
+    /// Mirrors `DashboardView.secondaryOutlookAuthorized` exactly — the same single gate this
+    /// screen's hero card and Account-sourced daily breakdown are both authorized by.
+    private var secondaryOutlookAuthorized: Bool {
+        accountRelatedOptionsLoaded && isSecondary && accountRelatedOptionsViewModel.response?.primaryMonthlyPlanShared == true
+    }
+
+    private var secondaryOutlookPrimaryUserId: UUID? {
+        guard secondaryOutlookAuthorized else { return nil }
+        return accountRelatedOptionsViewModel.response?.primaryUserId
+    }
+
+    private var secondaryDashboardSummaryLoadKey: String {
+        guard let primaryUserId = secondaryOutlookPrimaryUserId else { return "unauthorized" }
+        return primaryUserId.uuidString
+    }
+
+    @MainActor
+    private func loadDashboardSummaryIfNeeded() async {
+        guard let primaryUserId = secondaryOutlookPrimaryUserId else {
+            dashboardSummaryViewModel = nil
+            return
+        }
+        let viewModel: SharedDashboardSummaryViewModel
+        if let existing = dashboardSummaryViewModel, existing.primaryUserId == primaryUserId {
+            viewModel = existing
+        } else {
+            viewModel = SharedDashboardSummaryViewModel(primaryUserId: primaryUserId)
+            dashboardSummaryViewModel = viewModel
+        }
+        await viewModel.load()
+    }
+
+    private var sharedDashboardSummary: SharedDashboardSummaryDTO? {
+        guard case .loaded(let summary?) = dashboardSummaryViewModel?.state else { return nil }
+        return summary
+    }
+
+    private var sharedConnectedAccounts: [SharedConnectedAccountDTO] {
+        accountRelatedOptionsViewModel.response?.primarySharedConnectedAccounts ?? []
+    }
+
+    private var sharedConnectedAccountsKey: [UUID] {
+        sharedConnectedAccounts.map(\.id)
+    }
+
+    @MainActor
+    private func loadSharedActivityIfNeeded() async {
+        guard secondaryOutlookAuthorized else { return }
+        await sharedActivityViewModel.load(connectedAccounts: sharedConnectedAccounts, manualAccounts: [])
+    }
+
+    /// This week's shared entries, day-grouped — same `genericGroups` bucketing
+    /// `ExpenseListView`'s own shared Activity list uses, scoped to this screen's `weekInterval`.
+    private var sharedDailyGroups: [DailyTransactionTotals.GenericDayGroup<SharedActivityViewModel.Entry>] {
+        let entries = sharedActivityViewModel.entries.filter { entry in
+            guard let date = entry.date else { return false }
+            return weekInterval.contains(date)
+        }
+        return DailyTransactionTotals.genericGroups(for: entries, date: { $0.date ?? .distantPast }, delta: { $0.amount })
+    }
 
     /// MONTH-ALIGNED FOUR-WEEK CORRECTION — matches `DashboardView`'s own identically-corrected
     /// `weekInterval` exactly, so Weekly Budget and Dashboard can never disagree about which days
@@ -162,9 +247,14 @@ struct WeeklyBudgetView: View {
                 VStack(spacing: Theme.Spacing.lg) {
                     header
                     heroSection
-                    pendingToggleSection
-                    categoryBreakdownSection
-                    dailyBreakdownSection
+                    if isSecondary {
+                        secondaryRefreshButton
+                        secondaryDailyBreakdownSection
+                    } else {
+                        pendingToggleSection
+                        categoryBreakdownSection
+                        dailyBreakdownSection
+                    }
                 }
                 .padding(.vertical, Theme.Spacing.lg)
             }
@@ -172,6 +262,12 @@ struct WeeklyBudgetView: View {
             .navigationBarHidden(true)
             .sheet(isPresented: $isPresentingEditLimit) {
                 WeeklyLimitEditView(limit: weeklyLimit)
+            }
+            .task(id: secondaryDashboardSummaryLoadKey) {
+                await loadDashboardSummaryIfNeeded()
+            }
+            .task(id: sharedConnectedAccountsKey) {
+                await loadSharedActivityIfNeeded()
             }
         }
         .preferredColorScheme(.dark)
@@ -221,16 +317,130 @@ struct WeeklyBudgetView: View {
     /// never something requiring setup first.
     @ViewBuilder
     private var heroSection: some View {
-        WeeklyBudgetHeroCard(
-            weekInterval: weekInterval,
-            spent: spentThisWeek,
-            limit: weeklyLimit,
-            status: status,
-            isPrivacyModeEnabled: privacyMode.isEnabled
-        ) {
-            isPresentingEditLimit = true
+        if isSecondary {
+            // SECONDARY PARITY — reads the Primary's own authoritative shared aggregate
+            // (`sharedDashboardSummary`), the exact same numbers `DashboardView`'s own This Week
+            // card shows for a Secondary — never a second independent reconstruction. Tapping
+            // does nothing (no `WeeklyLimitEditView` — a Secondary never edits the Primary's own
+            // weekly limit).
+            if secondaryOutlookAuthorized, let summary = sharedDashboardSummary {
+                WeeklyBudgetHeroCard(
+                    weekInterval: weekInterval,
+                    spent: summary.actualSpentThisWeek,
+                    limit: summary.weeklySpendingLimit,
+                    status: BudgetCalculator.status(spent: summary.actualSpentThisWeek, limit: summary.weeklySpendingLimit, warningThreshold: settings?.warningThreshold ?? 0.70),
+                    isPrivacyModeEnabled: privacyMode.isEnabled
+                ) {}
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
+            // else: not authorized, or shared data not yet loaded — nothing, never a fake local
+            // "set a budget" prompt for a Secondary.
+        } else {
+            WeeklyBudgetHeroCard(
+                weekInterval: weekInterval,
+                spent: spentThisWeek,
+                limit: weeklyLimit,
+                status: status,
+                isPrivacyModeEnabled: privacyMode.isEnabled
+            ) {
+                isPresentingEditLimit = true
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
         }
+    }
+
+    /// SECONDARY PARITY — explicit, on-demand re-pull of the Primary's shared Dashboard aggregate
+    /// AND shared Connected Account activity, matching the styling Scott requested for the
+    /// Dashboard's own equivalent control.
+    private var secondaryRefreshButton: some View {
+        Button {
+            Task {
+                await loadDashboardSummaryIfNeeded()
+                await loadSharedActivityIfNeeded()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if dashboardSummaryViewModel?.isRefreshing == true || sharedActivityViewModel.isLoading {
+                    ProgressView().controlSize(.mini).tint(.white)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                Text("Refresh Weekly Budget")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, Theme.Spacing.md)
+            .padding(.vertical, 10)
+            .background(Theme.accent, in: Capsule())
+        }
+        .disabled(dashboardSummaryViewModel?.isRefreshing == true || sharedActivityViewModel.isLoading)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, Theme.Spacing.lg)
+    }
+
+    // MARK: - Secondary daily breakdown
+
+    /// SECONDARY PARITY — day-grouped shared Connected Account activity for the week, reusing the
+    /// same `SharedActivityTransactionRow` presentation `ExpenseListView`'s own shared Activity
+    /// list already uses. No filter chips (Manual Transactions/Account Pending/Account All have
+    /// no shared equivalent to switch between yet) and no category breakdown — the shared feed
+    /// carries no category data (see `plaid_transactions`'s own by-design omission).
+    private var secondaryDailyBreakdownSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Daily Breakdown")
+
+            if !secondaryOutlookAuthorized {
+                Text("Not shared yet")
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.horizontal, Theme.Spacing.lg)
+            } else if sharedActivityViewModel.isLoading && sharedDailyGroups.isEmpty {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, Theme.Spacing.md)
+            } else if sharedDailyGroups.isEmpty {
+                Text("No transactions this week yet")
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.horizontal, Theme.Spacing.lg)
+            } else {
+                VStack(spacing: Theme.Spacing.lg) {
+                    ForEach(sharedDailyGroups) { group in
+                        secondaryDaySection(group)
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.lg)
+            }
+        }
+    }
+
+    private func secondaryDaySection(_ group: DailyTransactionTotals.GenericDayGroup<SharedActivityViewModel.Entry>) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack {
+                Text(group.day.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)))
+                    .font(Theme.headlineFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                PrivacyAmountView(
+                    amount: group.total,
+                    isPrivacyModeEnabled: privacyMode.isEnabled,
+                    font: Theme.bodyFont,
+                    color: Theme.textSecondary
+                )
+            }
+
+            CardBackground {
+                VStack(spacing: Theme.Spacing.md) {
+                    ForEach(Array(group.items.enumerated()), id: \.element.id) { index, entry in
+                        SharedActivityTransactionRow(entry: entry, isPrivacyModeEnabled: privacyMode.isEnabled)
+                        if index < group.items.count - 1 {
+                            Divider().overlay(Theme.cardStroke)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Include pending toggle

@@ -13,18 +13,23 @@ struct AccountView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: Theme.Spacing.lg) {
-                    accountSection
-                    if let errorMessage {
-                        inlineMessage(icon: "exclamationmark.circle.fill", text: errorMessage, color: Theme.statusOver)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: Theme.Spacing.lg) {
+                        accountSection
+                        if let errorMessage {
+                            inlineMessage(icon: "exclamationmark.circle.fill", text: errorMessage, color: Theme.statusOver)
+                        }
+                        signOutSection
                     }
-                    signOutSection
-                    // Phase 8D — deliberately the LAST thing on this screen, nothing rendered
-                    // after it, so the most destructive action is always the bottom-most control.
-                    deleteAccountSection
+                    .padding(.vertical, Theme.Spacing.lg)
                 }
-                .padding(.vertical, Theme.Spacing.lg)
+                Spacer(minLength: 0)
+                // Deliberately pinned OUTSIDE the ScrollView via the Spacer above, so it always
+                // sits at the very bottom of the screen — not just the bottom of the scrollable
+                // content — regardless of how much other content is above it.
+                deleteAccountSection
+                    .padding(.bottom, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationTitle("Account")
@@ -98,50 +103,59 @@ struct AccountView: View {
 
     // MARK: - Sign out
 
-    /// Phase 8D — full-width red background / white text per the locked styling requirement,
-    /// matching the same destructive-button visual language `DeleteAccountConfirmationView`'s own
-    /// confirm button already used.
+    /// CORRECTION (2026-08-18, Scott's explicit request) — sized down from the original full-width
+    /// headline-styled pill: smaller font, smaller padding, intrinsic (not full-width) size,
+    /// still centered. Red background/white text destructive styling unchanged.
     private var signOutSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Manage")
 
-            Button {
-                isPresentingSignOutConfirmation = true
-            } label: {
-                Text(isSigningOut ? "Signing Out…" : "Sign Out")
-                    .font(Theme.headlineFont)
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Theme.Spacing.sm + 2)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.statusOver))
+            HStack {
+                Spacer()
+                Button {
+                    isPresentingSignOutConfirmation = true
+                } label: {
+                    Text(isSigningOut ? "Signing Out…" : "Sign Out")
+                        .font(Theme.bodyFont)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, Theme.Spacing.lg)
+                        .padding(.vertical, Theme.Spacing.xs + 2)
+                        .background(Capsule().fill(Theme.statusOver))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSigningOut)
+                .opacity(isSigningOut ? 0.6 : 1)
+                Spacer()
             }
-            .buttonStyle(.plain)
-            .disabled(isSigningOut)
-            .opacity(isSigningOut ? 0.6 : 1)
             .padding(.horizontal, Theme.Spacing.lg)
         }
     }
 
     // MARK: - Delete account
 
-    /// Phase 8D — same red-background/white-text styling as Sign Out, and deliberately the
-    /// LAST section rendered on this screen (see `body`'s own comment) per the locked
-    /// "move Delete Account all the way to the bottom" requirement. Only the placement/styling
-    /// changed here — tapping still opens the same `DeleteAccountConfirmationView`
+    /// CORRECTION (2026-08-18, Scott's explicit request) — sized down the same way as Sign Out
+    /// (smaller font/padding, intrinsic width, centered). Still deliberately the LAST section
+    /// rendered on this screen (see `body`'s own comment) per the locked "move Delete Account all
+    /// the way to the bottom" requirement — only the size changed here, not the placement, which
+    /// was already correct. Tapping still opens the same `DeleteAccountConfirmationView`
     /// type-DELETE-to-confirm sheet, unchanged.
     private var deleteAccountSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Button {
-                isPresentingDeleteSheet = true
-            } label: {
-                Text("Delete Account")
-                    .font(Theme.headlineFont)
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Theme.Spacing.sm + 2)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.statusOver))
+        VStack(spacing: Theme.Spacing.sm) {
+            HStack {
+                Spacer()
+                Button {
+                    isPresentingDeleteSheet = true
+                } label: {
+                    Text("Delete Account")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, Theme.Spacing.md)
+                        .padding(.vertical, Theme.Spacing.xs)
+                        .background(Capsule().fill(Theme.statusOver))
+                }
+                .buttonStyle(.plain)
+                Spacer()
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, Theme.Spacing.lg)
 
             Text("Permanently deletes your SpendSmart account")

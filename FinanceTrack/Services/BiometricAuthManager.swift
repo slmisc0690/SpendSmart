@@ -93,6 +93,28 @@ final class BiometricAuthManager {
     /// Mirrors `BudgetSettings.requireFaceID`; `SettingsView` keeps this in sync.
     var isFaceIDRequired: Bool = false
 
+    /// GRACE PERIOD (2026-08-18, Scott's explicit request for local testing convenience) — the
+    /// timestamp of the most recent successful unlock, `nil` before the first one this session.
+    /// Backing value for `lockIfGraceExpired()`'s "don't re-prompt for an hour" behavior below.
+    private(set) var lastUnlockedAt: Date?
+
+    /// How long an unlock stays valid across a background/foreground cycle before
+    /// `lockIfGraceExpired()` will actually re-lock. A hard `lock()` (sign-out, "Lock Now", the
+    /// new Dashboard lock icon) always bypasses this and locks immediately regardless.
+    static let gracePeriod: TimeInterval = 3600
+
+    /// FORCE-QUIT FIX (2026-08-18) — `lastUnlockedAt`/`isUnlocked` are plain in-memory properties;
+    /// a force-quit terminates the whole process, so a purely in-memory grace period was
+    /// worthless the moment the app was actually killed (as opposed to merely backgrounded) —
+    /// exactly the scenario Scott reported still re-prompting. Persisting the unlock timestamp
+    /// (never a credential, never anything more sensitive than a bare epoch-seconds `Double` —
+    /// same risk class as `PendingFaceIDOptIn`'s own plain-`UserDefaults` boolean above) lets a
+    /// fresh process reconstruct "was this unlocked within the last hour?" at `init` time, before
+    /// `AppLockView` ever gets a chance to mount and prompt. Not `private` so tests (`@testable
+    /// import`) can seed/clear a specific timestamp directly to exercise the fresh-vs-stale
+    /// cold-launch paths without needing to actually wait an hour.
+    static let lastUnlockedAtDefaultsKey = "BiometricAuthManager.lastUnlockedAt"
+
     /// Guards against overlapping `authenticate()` calls (e.g. SwiftUI re-running `.task` while a
     /// prior evaluation is still pending) — without this, two concurrent Face ID prompts can
     /// stack, and the OS cancelling one mid-flight can spuriously clear/set the other's result.
@@ -117,6 +139,26 @@ final class BiometricAuthManager {
 
     init(authenticator: BiometricAuthenticating = LAContextBiometricAuthenticator()) {
         self.authenticator = authenticator
+
+        // FORCE-QUIT FIX — reconstruct "still within the grace period" from the PERSISTED
+        // timestamp before this instance has ever run authenticate() itself, so a cold
+        // launch/relaunch shortly after a force-quit starts already-unlocked instead of
+        // re-prompting. A stale (or absent) persisted value leaves isUnlocked at its normal
+        // `false` default, same as if this were the very first launch ever.
+        if let stored = UserDefaults.standard.object(forKey: Self.lastUnlockedAtDefaultsKey) as? Double {
+            let storedDate = Date(timeIntervalSince1970: stored)
+            lastUnlockedAt = storedDate
+            if Date().timeIntervalSince(storedDate) < Self.gracePeriod {
+                isUnlocked = true
+            }
+        }
+    }
+
+    /// Records a successful unlock both in-memory and persisted (see `lastUnlockedAtDefaultsKey`'s
+    /// own header for why this must survive a force-quit, not just live in `lastUnlockedAt`).
+    private func recordUnlock(at date: Date) {
+        lastUnlockedAt = date
+        UserDefaults.standard.set(date.timeIntervalSince1970, forKey: Self.lastUnlockedAtDefaultsKey)
     }
 
     /// Whether this device can evaluate Face ID/Touch ID/passcode at all right now, and if not, why.
@@ -154,12 +196,14 @@ final class BiometricAuthManager {
             // No biometrics/passcode configured on this device — there's no way to secure the
             // lock screen, so don't strand the user behind it.
             isUnlocked = true
+            recordUnlock(at: .now)
             return
         }
 
         do {
             let success = try await authenticator.evaluateDeviceOwnerAuthentication(reason: reason)
             isUnlocked = success
+            if success { recordUnlock(at: .now) }
         } catch let authError as LAError {
             isUnlocked = false
             lastErrorMessage = surfaceErrors ? Self.friendlyMessage(for: authError) : nil
@@ -189,6 +233,25 @@ final class BiometricAuthManager {
         isUnlocked = false
         lastErrorMessage = nil
         hasAttemptedAutomaticUnlock = false
+        // FORCE-QUIT FIX — clears the persisted timestamp too, not just the in-memory one, so an
+        // explicit lock (or a grace period that has genuinely expired) actually forces
+        // re-authentication on the very next cold launch, not just the next foreground return.
+        lastUnlockedAt = nil
+        UserDefaults.standard.removeObject(forKey: Self.lastUnlockedAtDefaultsKey)
+    }
+
+    /// GRACE PERIOD — the app's background-transition handler calls this instead of `lock()`, so
+    /// a brief app-switch (checking another app, answering a text) doesn't force Face ID again:
+    /// only re-locks if it's been at least `gracePeriod` since the last successful unlock. Never
+    /// unlocks anything itself — it can only leave `isUnlocked` as it already was, or flip it to
+    /// `false`. A `nil` `lastUnlockedAt` (never yet unlocked this session) locks unconditionally,
+    /// the same as if the grace period had already elapsed.
+    func lockIfGraceExpired(now: Date = .now) {
+        guard isUnlocked else { return }
+        guard let lastUnlockedAt, now.timeIntervalSince(lastUnlockedAt) < Self.gracePeriod else {
+            lock()
+            return
+        }
     }
 
     /// Maps an `LAError` from a failed `evaluatePolicy` attempt to plain-English text. Returns

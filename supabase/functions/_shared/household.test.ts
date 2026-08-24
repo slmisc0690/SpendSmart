@@ -52,11 +52,12 @@ Deno.test("isValidEmail rejects overlong address", () => {
   assertEquals(isValidEmail(`${local}@example.com`), false);
 });
 
-Deno.test("isValidSharingCategory accepts all four categories", () => {
+Deno.test("isValidSharingCategory accepts all five categories", () => {
   assertEquals(isValidSharingCategory("connectedAccounts"), true);
   assertEquals(isValidSharingCategory("manualAccounts"), true);
   assertEquals(isValidSharingCategory("monthlyPlan"), true);
   assertEquals(isValidSharingCategory("monthlySavings"), true);
+  assertEquals(isValidSharingCategory("savedViaTransfer"), true);
 });
 
 Deno.test("isValidSharingCategory rejects unknown category", () => {
@@ -82,6 +83,23 @@ Deno.test("isValidSharingPermissionRequest treats monthlySavings and monthlyPlan
   assertEquals(savings, { valid: true, category: "monthlySavings", itemId: null });
   assertEquals(plan, { valid: true, category: "monthlyPlan", itemId: null });
   assertNotEquals(savings, plan);
+});
+
+// DRIFT BUG FIX — savedViaTransfer (migration 0023) was missing from this Edge-Function-side
+// allowlist even though the database itself always accepted it; these tests lock in the fix.
+
+Deno.test("isValidSharingCategory accepts savedViaTransfer", () => {
+  assertEquals(isValidSharingCategory("savedViaTransfer"), true);
+});
+
+Deno.test("isValidSharingPermissionRequest accepts null item_id for savedViaTransfer", () => {
+  const result = isValidSharingPermissionRequest("savedViaTransfer", null);
+  assertEquals(result, { valid: true, category: "savedViaTransfer", itemId: null });
+});
+
+Deno.test("isValidSharingPermissionRequest rejects non-null item_id for savedViaTransfer (global-only)", () => {
+  const result = isValidSharingPermissionRequest("savedViaTransfer", "11111111-1111-1111-1111-111111111111");
+  assertEquals(result.valid, false);
 });
 
 Deno.test("isValidSharingPermissionRequest accepts global connectedAccounts row", () => {

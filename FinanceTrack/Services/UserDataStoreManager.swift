@@ -46,6 +46,13 @@ final class UserDataStoreManager {
     /// ONE user on a device), every authenticated user who resolves on this device needs their
     /// OWN Plaid transactions swept exactly once, so each user's UUID is recorded independently.
     private static let localPlaidDateRepairCompletedUserIDsKey = "localPlaidDateRepair.completedUserIDs"
+    /// One-time-per-user marker for the local (network-free) misclassified-credit-card-payment
+    /// repair sweep — see `repairLocalPlaidCreditCardPaymentsIfNeeded`. Same per-user `Set<String>`
+    /// shape as `localPlaidDateRepairCompletedUserIDsKey` above, and deliberately a SEPARATE key:
+    /// reusing the date-repair marker would silently skip this repair for any user whose date
+    /// repair already completed (effectively everyone, since that bug predates this one), which is
+    /// exactly the user this repair most needs to reach.
+    private static let localPlaidCreditCardPaymentRepairCompletedUserIDsKey = "localPlaidCreditCardPaymentRepair.completedUserIDs"
     /// One-time-per-user marker for the retroactive bill-payment backfill — see
     /// `BillPaymentBackfillService`'s own header. Same per-user `Set<String>` shape as
     /// `localPlaidDateRepairCompletedUserIDsKey` above, for the same reason: every user needs their
@@ -84,6 +91,7 @@ final class UserDataStoreManager {
             try claimLegacyDataIfUnclaimed(userId: userId, destinationContext: context)
             try OwnerUserIDBackfill.run(in: context, ownerUserID: userId)
             try repairLocalPlaidDatesIfNeeded(userId: userId, context: context)
+            try repairLocalPlaidCreditCardPaymentsIfNeeded(userId: userId, context: context)
             try backfillBillPaymentsIfNeeded(userId: userId, context: context)
 
             let plaid = PlaidConnectionManager(defaults: defaults, userId: userId)
@@ -142,6 +150,7 @@ final class UserDataStoreManager {
             SavingsEntry.self,
             FavoritesSettings.self,
             QuickStatsSettings.self,
+            OnboardingSettings.self,
         ])
     }
 
@@ -220,6 +229,23 @@ final class UserDataStoreManager {
 
         completedUserIDs.insert(userId.uuidString)
         defaults.set(Array(completedUserIDs), forKey: Self.localPlaidDateRepairCompletedUserIDsKey)
+    }
+
+    /// Runs `PlaidTransactionImportService.repairMisclassifiedCreditCardPaymentsLocally` for
+    /// `userId` at most once, purely from this device's own local marker — same rationale and
+    /// shape as `repairLocalPlaidDatesIfNeeded` above: without this, a user whose Plaid
+    /// transactions were persisted before `classifyPlaidAmount` existed, and who never triggers an
+    /// actual transaction sync (Settings ▸ Connected Accounts ▸ Manual Refresh only refreshes
+    /// balances, never calls `applySync`), would keep seeing a payment/credit netted against their
+    /// real spending indefinitely.
+    private func repairLocalPlaidCreditCardPaymentsIfNeeded(userId: UUID, context: ModelContext) throws {
+        var completedUserIDs = Set(defaults.stringArray(forKey: Self.localPlaidCreditCardPaymentRepairCompletedUserIDsKey) ?? [])
+        guard !completedUserIDs.contains(userId.uuidString) else { return }
+
+        try PlaidTransactionImportService.repairMisclassifiedCreditCardPaymentsLocally(in: context)
+
+        completedUserIDs.insert(userId.uuidString)
+        defaults.set(Array(completedUserIDs), forKey: Self.localPlaidCreditCardPaymentRepairCompletedUserIDsKey)
     }
 
     // MARK: - Retroactive bill-payment backfill

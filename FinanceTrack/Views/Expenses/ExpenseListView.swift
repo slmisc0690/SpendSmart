@@ -584,7 +584,9 @@ struct ExpenseListView: View {
 /// pending badge, "-" prefix, privacy-mode support) — Part B's "same normal account-selection UI"
 /// requirement extends to row styling, not just the tab bar. No context menu/options menu, same as
 /// `ConnectedTransactionRow` — shared activity is read-only reference data.
-private struct SharedActivityTransactionRow: View {
+/// Not `private` — reused by `WeeklyBudgetView`'s Secondary daily breakdown for the exact same
+/// row presentation, rather than a second copy of this markup.
+struct SharedActivityTransactionRow: View {
     let entry: SharedActivityViewModel.Entry
     var isPrivacyModeEnabled: Bool = false
 

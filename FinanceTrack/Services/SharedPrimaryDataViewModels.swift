@@ -25,6 +25,9 @@ final class SharedConnectedAccountViewModel {
 
     let account: SharedConnectedAccountDTO
     private(set) var state: LoadState = .loading
+    /// SHARED USER REFRESH PARITY — see `SharedManualAccountViewModel.isRefreshing`'s own header
+    /// for the full rationale this mirrors exactly.
+    private(set) var isRefreshing = false
 
     private let backend: HouseholdSharingService
 
@@ -35,12 +38,29 @@ final class SharedConnectedAccountViewModel {
 
     @MainActor
     func load() async {
-        state = .loading
+        let isInitialLoad: Bool
+        if case .loaded = state {
+            isInitialLoad = false
+        } else if case .failed = state {
+            isInitialLoad = false
+        } else {
+            isInitialLoad = true
+        }
+
+        if isInitialLoad {
+            state = .loading
+        } else {
+            isRefreshing = true
+        }
+        defer { isRefreshing = false }
+
         do {
             let response = try await backend.getSharedConnectedAccountTransactions(plaidAccountId: account.plaidAccountId)
             state = .loaded(response.transactions)
         } catch {
-            state = .failed(Self.describe(error))
+            if isInitialLoad {
+                state = .failed(Self.describe(error))
+            }
         }
     }
 
@@ -325,21 +345,40 @@ final class SharedMonthlySavingsViewModel {
         self.backend = backend
     }
 
+    /// RELIABILITY CORRECTION (2026-08-18, Scott's explicit request — "should always work and not
+    /// be iffy") — one automatic, immediate retry before surfacing `.failed`: a single transient
+    /// network blip right after switching accounts previously required leaving and re-entering
+    /// the screen to recover; now it's retried in place, invisibly, before the user can even
+    /// notice. Still exactly one retry (never a loop/backoff/timer — this file's own established
+    /// "no new scheduling mechanism" posture, matching `BiometricAuthManager`'s identical rule) —
+    /// a second consecutive failure is a real problem worth surfacing, not silently swallowed.
     @MainActor
     func load() async {
         state = .loading
         do {
-            let response = try await backend.getMonthlySavingsSummary(ownerUserId: primaryUserId)
+            let response = try await fetch()
             state = .loaded(response.summary)
             #if DEBUG
             print("[SharedMonthlySavingsViewModel] load succeeded — summary: \(response.summary != nil ? "present" : "null")")
             #endif
         } catch {
-            state = .failed(Self.describe(error))
-            #if DEBUG
-            print("[SharedMonthlySavingsViewModel] load failed — \(Self.describe(error))")
-            #endif
+            do {
+                let response = try await fetch()
+                state = .loaded(response.summary)
+                #if DEBUG
+                print("[SharedMonthlySavingsViewModel] load succeeded on retry — summary: \(response.summary != nil ? "present" : "null")")
+                #endif
+            } catch {
+                state = .failed(Self.describe(error))
+                #if DEBUG
+                print("[SharedMonthlySavingsViewModel] load failed after retry — \(Self.describe(error))")
+                #endif
+            }
         }
+    }
+
+    private func fetch() async throws -> SharedMonthlySavingsSummaryResponse {
+        try await backend.getMonthlySavingsSummary(ownerUserId: primaryUserId)
     }
 
     private static func describe(_ error: Error) -> String {
@@ -377,21 +416,35 @@ final class SharedSavedViaTransferViewModel {
         self.backend = backend
     }
 
+    /// RELIABILITY CORRECTION — one automatic, immediate retry before surfacing `.failed`; see
+    /// `SharedMonthlySavingsViewModel.load()`'s own identical header for the full rationale.
     @MainActor
     func load() async {
         state = .loading
         do {
-            let response = try await backend.getSavedViaTransferSummary(ownerUserId: primaryUserId)
+            let response = try await fetch()
             state = .loaded(response.summary)
             #if DEBUG
             print("[SharedSavedViaTransferViewModel] load succeeded — summary: \(response.summary != nil ? "present" : "null")")
             #endif
         } catch {
-            state = .failed(Self.describe(error))
-            #if DEBUG
-            print("[SharedSavedViaTransferViewModel] load failed — \(Self.describe(error))")
-            #endif
+            do {
+                let response = try await fetch()
+                state = .loaded(response.summary)
+                #if DEBUG
+                print("[SharedSavedViaTransferViewModel] load succeeded on retry — summary: \(response.summary != nil ? "present" : "null")")
+                #endif
+            } catch {
+                state = .failed(Self.describe(error))
+                #if DEBUG
+                print("[SharedSavedViaTransferViewModel] load failed after retry — \(Self.describe(error))")
+                #endif
+            }
         }
+    }
+
+    private func fetch() async throws -> SharedSavedViaTransferSummaryResponse {
+        try await backend.getSavedViaTransferSummary(ownerUserId: primaryUserId)
     }
 
     private static func describe(_ error: Error) -> String {
@@ -426,6 +479,12 @@ final class SharedDashboardSummaryViewModel {
 
     let primaryUserId: UUID
     private(set) var state: LoadState = .loading
+    /// SHARED USER REFRESH PARITY — true only while an explicit user-triggered `load()` re-fetch is
+    /// in flight AFTER the screen already has data, matching `SharedManualAccountViewModel`'s own
+    /// established "no full-screen flash after initial load" convention (see that type's own
+    /// `load()` header for the full rationale). Drives a manual Refresh control's busy state and
+    /// backs the Dashboard's pull-to-refresh / `onChange(of: scenePhase)` re-pull.
+    private(set) var isRefreshing = false
 
     private let backend: HouseholdSharingService
 
@@ -436,12 +495,31 @@ final class SharedDashboardSummaryViewModel {
 
     @MainActor
     func load() async {
-        state = .loading
+        let isInitialLoad: Bool
+        if case .loaded = state {
+            isInitialLoad = false
+        } else if case .failed = state {
+            isInitialLoad = false
+        } else {
+            isInitialLoad = true
+        }
+
+        if isInitialLoad {
+            state = .loading
+        } else {
+            isRefreshing = true
+        }
+        defer { isRefreshing = false }
+
         do {
             let response = try await backend.getDashboardSummary(ownerUserId: primaryUserId)
             state = .loaded(response.summary)
         } catch {
-            state = .failed(Self.describe(error))
+            if isInitialLoad {
+                state = .failed(Self.describe(error))
+            }
+            // A silent refresh failure leaves `state` untouched — the last-known-good data stays
+            // on screen, matching `SharedManualAccountViewModel`'s own convention.
         }
     }
 

@@ -40,6 +40,27 @@ import {
   UnauthorizedError,
 } from "../_shared/plaid.ts";
 
+// USER B FULL WEEK-BY-WEEK PARITY (migration 0026) — re-stringifies each entry's amount fields to
+// match this project's universal money-as-string wire convention, even though they're stored as
+// jsonb numbers server-side (see migration 0026's own column comment for why jsonb numbers, not
+// jsonb strings, were chosen for storage).
+function formatWeeklyComparisons(value: unknown): unknown {
+  if (!Array.isArray(value)) return null;
+  return value.map((entry) => {
+    const e = entry as Record<string, unknown>;
+    return {
+      index: e.index,
+      number: e.number,
+      start_date: e.start_date,
+      end_date: e.end_date,
+      recommended: e.recommended != null ? String(e.recommended) : null,
+      actual: e.actual != null ? String(e.actual) : null,
+      remaining: e.remaining != null ? String(e.remaining) : null,
+      status: e.status ?? null,
+    };
+  });
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
@@ -105,6 +126,8 @@ Deno.serve(async (req) => {
         current_plan_week_actual: row.current_plan_week_actual != null ? String(row.current_plan_week_actual) : null,
         current_plan_week_remaining: row.current_plan_week_remaining != null ? String(row.current_plan_week_remaining) : null,
         current_plan_week_status: row.current_plan_week_status ?? null,
+        additional_planned_savings: row.additional_planned_savings != null ? String(row.additional_planned_savings) : null,
+        weekly_comparisons: row.weekly_comparisons != null ? formatWeeklyComparisons(row.weekly_comparisons) : null,
         updated_at: row.updated_at,
       },
     });

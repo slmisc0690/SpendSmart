@@ -24,19 +24,27 @@ export function isValidEmail(value: unknown): value is string {
   return EMAIL_PATTERN.test(trimmed);
 }
 
-export type SharingCategory = "connectedAccounts" | "manualAccounts" | "monthlyPlan" | "monthlySavings";
+export type SharingCategory = "connectedAccounts" | "manualAccounts" | "monthlyPlan" | "monthlySavings" | "savedViaTransfer";
 
 const VALID_CATEGORIES: readonly SharingCategory[] = [
   "connectedAccounts",
   "manualAccounts",
   "monthlyPlan",
   "monthlySavings",
+  "savedViaTransfer",
 ];
 
 /** PHASE A — global-only categories (no per-item override concept); a Primary shares the whole
  * category via a single toggle. Kept as its own list (rather than an inline `===` check) so a
- * future global-only category needs only one addition here. */
-const GLOBAL_ONLY_CATEGORIES: readonly SharingCategory[] = ["monthlyPlan", "monthlySavings"];
+ * future global-only category needs only one addition here.
+ *
+ * DRIFT BUG FIX — `savedViaTransfer` (migration 0023) was added to the database CHECK constraint
+ * and `set_sharing_permission` SQL function's own allowlist, but never to this Edge-Function-side
+ * shim, so every attempt to toggle "Share Saved (Transfers)" was rejected here with a 400 before
+ * the request ever reached the (already-correct) database layer. Same class of allowlist-drift bug
+ * as the `manual_transactions.transaction_type` fix (migration 0022) — a category/case added in
+ * one layer but not propagated to every layer that independently re-validates it. */
+const GLOBAL_ONLY_CATEGORIES: readonly SharingCategory[] = ["monthlyPlan", "monthlySavings", "savedViaTransfer"];
 
 export function isValidSharingCategory(value: unknown): value is SharingCategory {
   return typeof value === "string" && (VALID_CATEGORIES as readonly string[]).includes(value);
@@ -52,7 +60,7 @@ export function isValidSharingPermissionRequest(
   if (!isValidSharingCategory(category)) {
     return {
       valid: false,
-      reason: "category must be one of connectedAccounts, manualAccounts, monthlyPlan, monthlySavings",
+      reason: "category must be one of connectedAccounts, manualAccounts, monthlyPlan, monthlySavings, savedViaTransfer",
     };
   }
   if (itemId === null || itemId === undefined) {

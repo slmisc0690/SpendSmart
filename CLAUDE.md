@@ -5,42 +5,53 @@ name) with a Supabase backend for Plaid bank-linking and household sharing. Sing
 (Scott), long-running iterative sessions — this file exists so a fresh session doesn't have to
 re-derive architecture/conventions from scratch.
 
-## Current Status (as of 2026-08-16)
+## Current Status (as of 2026-08-21)
 
-Migrations `0001`–`0023` and their Edge Functions are live on **Production**. Household sharing is
-complete end-to-end (Primary invites/manages; Secondary auto-discovers/accepts/declines/shares
-back), and three further sharing categories have landed since Phase 8F: `monthlySavings`, the
-dashboard-summary mirror, and `savedViaTransfer`. The last feature session (2026-08-15) also fixed a
-**silent data-loss bug** — the backend's `manual_transactions.transaction_type` allowlist had never
-been widened for `transferWithdrawal`/`transferDeposit`/`transferToSavings`, so every such
-transaction was rejected server-side and would have been lost on a cloud restore (migration 0022).
+Migrations `0001`–`0027` and their Edge Functions are live on **Production** (confirmed via
+`supabase migration list --linked` — every migration's `remote` matches `local`, and
+`get-dashboard-summary`/`upsert-dashboard-summary`/`update-sharing-permission` all confirmed at
+their latest deployed `version` via `supabase functions list`). Household sharing is complete
+end-to-end (Primary invites/manages; Secondary auto-discovers/accepts/declines/shares back), with
+five sharing categories live: `connectedAccounts`, `manualAccounts`, `monthlyPlan`,
+`monthlySavings`, `savedViaTransfer`. Week-by-Week now shares all 4 month-aligned weeks (not just
+the current one) between Primary and Secondary (migration 0026), and `user_profiles` has been
+backfilled for pre-existing accounts that predated the sharing feature (migration 0027).
 
-Swift test suite: **2719/2719 passing** as of 2026-08-15, zero new warnings.
+Swift test suite: **2779/2779 passing** as of 2026-08-21, zero new warnings.
 
-There is **no in-progress code task.** Everything described above is committed and pushed to
-`origin/main` (verified live against GitHub on 2026-08-16 — an earlier handoff wrongly claimed the
-2026-08-15 commits were unpushed; they were pushed on 2026-08-15 at 11:09, apparently via Xcode's
-own Source Control integration).
+There is **no in-progress code task**, but **the working tree is uncommitted** as of 2026-08-21 —
+a large session's worth of client-side UX work (onboarding flow skeleton, Face ID grace period,
+Dashboard/Settings polish — see Session Log below and `SESSION_HANDOFF.md` for full detail) has not
+yet been committed or pushed. Do not commit without Scott explicitly asking, per the standing rule
+below — but be aware `git status --short` will show real, intentional, tested work, not stray
+cruft.
 
 ## Next Step
 
 No follow-up phase has been requested — await Scott's next task brief. Genuinely open items, none
 of which are unfinished code:
 
-1. **Production spot-check owed**: `manual_transactions` on Production had 0 rows at the time of the
-   migration 0022 fix (expected — nothing could ever land there before). Nobody has yet created a
-   real Transfer-to-Savings entry on-device and confirmed it now reaches the cloud. This is the only
-   open item carrying real risk.
-2. **Unconfirmed**: Xcode showed "Cannot find … in scope" errors (`QuickStatsSettings`,
+1. **Describe the "glitchy" account-switching symptom.** Scott reported sign-out/sign-in between
+   household members feels glitchy but hasn't described exactly what he sees. Investigation (see
+   Session Log, 2026-08-21) found theoretical risk windows but nothing was changed — this code sits
+   close to previously-fixed real crash bugs, so get a concrete symptom before touching it.
+2. **On-device onboarding testing not yet done.** Scott said he'd create test Primary/Secondary
+   accounts and walk through each of the 5 onboarding paths. No bugs reported back yet.
+3. **Production spot-check still owed** (carried over from 2026-08-15): has anyone confirmed a real
+   Transfer-to-Savings entry now reaches `manual_transactions` on Production under the fixed
+   allowlist (migration 0022)? Lower urgency than 1–2 above but still unconfirmed.
+4. **Unconfirmed**: Xcode showed "Cannot find … in scope" errors (`QuickStatsSettings`,
    `SavedViaTransferCalculator`, `QuickStatID`, `SavedViaTransferSummarySyncService`,
    `QuickStatsConfigurationView`) after `xcodegen generate` regenerated the project file while Xcode
    was open. CLI `xcodebuild` built and tested clean *after* those errors appeared, so this is very
    likely a stale Xcode editor index, not a code problem. Fix is quit+reopen Xcode, fallback
-   `DerivedData/Index.noindex`. Never confirmed resolved by Scott.
-3. **Unanswered question**: the `S&L_Development_Information_Security_Policy…docx` / `SLD-*.docx`
+   `DerivedData/Index.noindex`. Never confirmed resolved by Scott, and hasn't recurred/come up since.
+5. **Unanswered question**: the `S&L_Development_Information_Security_Policy…docx` / `SLD-*.docx`
    files and `Calculator_App_Icon.png`/`Calculator_Icon.png` in the repo root are unrelated to this
    app by name and undocumented. Flagged to Scott, no answer yet. Do not touch until he clarifies.
-4. Not started, explicitly out of scope until requested: Secondary-side Monthly Plan sharing.
+6. Not started, explicitly out of scope until requested: Secondary-side Monthly Plan sharing.
+7. Not started: a real onboarding paywall. `OnboardingPaywallStubView` (2026-08-18) only occupies
+   that step in the new onboarding flow — Scott explicitly flagged the real paywall as still needed.
 
 ## Repository / environment facts
 
@@ -80,31 +91,33 @@ of which are unfinished code:
   `.git`, `build/` (Xcode's local index cache — huge file count, not real source, rsync will stall
   copying it), and `*.xcuserstate`. Verify with `diff -rq` (same excludes) before editing.
 - **Full Swift build + full test suite, zero new warnings**, before any "done" report. Report the
-  *actual* test total from that run, never assume a remembered number. As of **2026-08-15** the
-  suite is at **2719 tests** (it was 1020 on 2026-07-21 — it has roughly tripled across two
-  undocumented sessions, so treat any remembered figure as stale and re-run).
+  *actual* test total from that run, never assume a remembered number. As of **2026-08-21** the
+  suite is at **2779 tests** (it was 2719 on 2026-08-15 and 1020 on 2026-07-21 — treat any
+  remembered figure as stale and re-run).
 - **Some tests are raw source-string scans with a hardcoded `prefix(N)` window** over
-  `DashboardView.swift` (e.g. `testDashboardEveryQuickStatTileIsGatedByVisibility`). Adding code to
-  a scanned property pushes the searched-for strings past the window and fails the test for a
-  non-real reason. The correct fix is to **widen the `prefix()` argument, never to change what is
-  asserted** — this happened and was fixed that way on 2026-08-15 (4 call sites).
+  `DashboardView.swift`/`SettingsView.swift` (e.g. `testDashboardEveryQuickStatTileIsGatedByVisibility`).
+  Adding code to a scanned property pushes the searched-for strings past the window and fails the
+  test for a non-real reason. The correct fix is to **widen the `prefix()` argument, never to change
+  what is asserted** — happened on 2026-08-15 (4 call sites) and again on 2026-08-21 (3 more sites,
+  plus 1 test whose asserted literal string legitimately changed and was updated to match).
 - **Final reports** follow a consistent numbered-section format (safety baseline → root
   cause/design → security → files → tests → validation → git summary → exclusions confirmed →
   deployment status with explicit YES/NO lines → RESULT: PASS/BLOCKED). Keep using that shape —
   it's what the user expects and cross-references against.
-- **Never edit an already-shipped migration.** `0001`–`0023` have all been applied to at least one
+- **Never edit an already-shipped migration.** `0001`–`0027` have all been applied to at least one
   environment. Migration numbering is sequential and must never be reused or reordered — the next
-  new migration is `0024_….sql`. Any further schema change is a new file, following the established
+  new migration is `0028_….sql`. Any further schema change is a new file, following the established
   dynamic-constraint-name-lookup pattern (`pg_constraint`/`pg_get_constraintdef` matching — never
   hardcode an auto-generated constraint name).
 - **Never commit or push** unless explicitly asked. Historically the working tree was kept
   deliberately dirty across sessions with many completed-but-uncommitted features; the first commit
   landed 2026-07-21 (explicitly requested — see Session Log). This rule remains in force going
   forward: don't commit/push proactively just because a task finished.
-- **Working-tree baseline as of 2026-08-16: clean**, apart from one intentionally-untracked file.
-  The long-standing "keep the tree dirty for months" era ended on 2026-07-21; since then work has
-  been committed per session. Always check `git status --short` fresh rather than trusting any
-  stored list.
+- **Working-tree baseline as of 2026-08-21: dirty**, with a full session's worth of tested,
+  intentional client-side UX work (onboarding flow, Face ID grace period, Dashboard/Settings
+  polish — see Session Log) plus 4 already-Production-deployed migrations (`0024`–`0027`), none of
+  it committed yet. This is expected, not a red flag — but always check `git status --short` fresh
+  rather than trusting any stored list, and don't assume a clean-vs-dirty state from an old handoff.
   - `SESSION_HANDOFF.md` is **untracked and deliberately left untracked** — it is a per-session
     working document, not project content. It is *not* in `.gitignore` (unlike the sibling
     StreamDrop repo, which does ignore its own), so take care never to sweep it in with a blanket
@@ -153,7 +166,8 @@ of which are unfinished code:
       deep link (migration 0014)
 - [x] Optimistic sharing-toggle UI (eliminates visible write latency via
       `optimisticSharingOverrides`)
-- [x] Sign Out / Delete Account styling + repositioning (red pill buttons, Delete Account last)
+- [x] Sign Out / Delete Account styling + repositioning — superseded 2026-08-18/2026-08-21, see
+      below (small centered capsules, Delete Account pinned to the true bottom of the screen)
 - [x] Secondary automatic pending-invitation discovery (no link/token needed) + Accept/Decline +
       foreground-return re-check (migration 0015, `PendingInvitationPopupViewModel`)
 - [x] Secondary → Primary share-back for the Secondary's own Connected accounts and own Manual
@@ -179,10 +193,39 @@ of which are unfinished code:
       `QuickStatsConfigurationView`, replacing a static inert info card (2026-08-15)
 - [x] **All of the above deployed and verified on both Preview and Production** (migrations
       0016–0023) — 2026-08-15
+- [x] Week-by-Week full 4-week parity for Secondary — `weekly_comparisons jsonb` on
+      `dashboard_summary` (migration 0026, 2026-08-21)
+- [x] Secondary Connected Account balance restore + Quick Stats field parity (migrations 0024, 0025)
+- [x] `user_profiles` backfill for pre-existing accounts (migration 0027, 2026-08-21)
+- [x] `savedViaTransfer` Edge-Function-side allowlist drift fix (`_shared/household.ts`) — deployed
+      2026-08-21
+- [x] `sharedSavingsQuickStatVisible` now respects the Quick Stats picker, matching its
+      `sharedSavedViaTransferQuickStatVisible` sibling (2026-08-21)
+- [x] **All backend work above deployed and verified on both Preview and Production** (migrations
+      0024–0027) — 2026-08-21
+- [x] Onboarding flow skeleton — `OnboardingSetupPath` (5 cases)/`OnboardingSettings`/
+      `OnboardingFlowView`/`OnboardingPathSelectionView`/`OnboardingInstructionsView` +
+      `OnboardingPaywallStubView` (stub only — see Not yet built, below) (2026-08-18)
+- [x] Face ID 1-hour grace period, survives force-quit — `BiometricAuthManager.gracePeriod`,
+      UserDefaults-persisted `lastUnlockedAt` (2026-08-18)
+- [x] Dashboard lock icon beside the Eye (hide-balances) icon (2026-08-18)
+- [x] Settings "Lock Now" relocated under Account Related Options, centered (2026-08-18)
+- [x] Shared Quick Stat loading placeholder + automatic retry-once (`SharedQuickStatLoadingPlaceholder`,
+      `SharedMonthlySavingsViewModel`/`SharedSavedViaTransferViewModel`) (2026-08-18)
+- [x] Sign Out / Delete Account resized to small centered capsules; Delete Account pinned to the true
+      bottom of the screen (not just last in scroll order); sign-out sheet self-dismisses on success
+      (2026-08-18 / 2026-08-21)
+- [x] Dashboard "This Week" card tap gesture removed entirely (dead-ended at a read-only sheet)
+      (2026-08-21)
+- [x] Budget Settings' Weekly Spending Limit / Monthly Savings Goal rows now open the real Monthly
+      Plan edit sheets on tap (`PlannedWeeklySpendingEditView`/`MonthlyPlanSettingsEditView`, same
+      ones `MonthlyPlanView` itself uses) — values still always derived from Monthly Plan, never
+      directly typable inline (2026-08-21)
 
 Not yet built (explicitly out of scope until requested):
 - [ ] Secondary-side Monthly Plan sharing/control — Secondary remains read-only via the Primary's
       global toggle; no Secondary Monthly Plan UI exists
+- [ ] Real onboarding paywall — `OnboardingPaywallStubView` only occupies that step in the flow
 
 ## Architecture landmarks
 
@@ -282,6 +325,50 @@ Not yet built (explicitly out of scope until requested):
 - **Anti-enumeration**: every sharing/invitation-facing response is designed so a caller can never
   distinguish "doesn't exist" from "exists but not authorized/shared" (generic error messages,
   parameterless self-lookup functions where possible).
+- **The category allowlist also lives, separately, in `supabase/functions/_shared/household.ts`**
+  (`SharingCategory` type / `VALID_CATEGORIES` / `GLOBAL_ONLY_CATEGORIES`) — a 4th place a new
+  sharing category must be added, beyond the 3 already documented above. `savedViaTransfer` was
+  missing from this one specifically until 2026-08-21 (found by audit, not user-reported), even
+  though the DB constraint and `set_sharing_permission` already allowed it. Check this file
+  explicitly whenever adding a category, don't assume the DB layer being correct means every layer
+  is.
+- **`weekly_comparisons jsonb`** on `dashboard_summary` (migration 0026, 2026-08-21) carries all 4
+  month-aligned weeks as one array — chosen over 32 flat columns since it's always read/written as
+  one atomic unit, never SQL-filtered. `DashboardView.weekByWeekBlock(summary:)` prefers this field,
+  falling back to the legacy single-week `currentPlanWeek` field only for stale cached rows that
+  predate the migration. Extended additively via the established drop-old-overload-then-recreate
+  pattern on `set_dashboard_summary`/`get_shared_dashboard_summary`.
+- **`BiometricAuthManager`'s 1-hour grace period is UserDefaults-persisted, not just in-memory**
+  (`lastUnlockedAtDefaultsKey`, internal not private so `@testable import` tests can seed/clear it
+  directly) — this is what lets it survive a force-quit, not just app backgrounding.
+  `lockIfGraceExpired(now:)` (called from `FinanceTrackApp`'s background scenePhase handler) only
+  locks once the grace period has actually elapsed; `lock()` clears both the in-memory and
+  persisted state. Getting this wrong (in-memory only) was an actual bug caught by Scott mid-session
+  on 2026-08-18 — don't regress it back to in-memory-only.
+- **Onboarding gate**: `RootView` checks `!isBootstrapped` then `!onboarding.hasCompletedOnboarding`
+  before showing `OnboardingFlowView` instead of the normal `TabView`. `OnboardingSetupPath` has 5
+  cases (connected-only / connected+plan / plan+manual / plan-only / none); `.none` skips the
+  `.instructions` step and completes immediately. New `OnboardingSettings` rows default
+  `hasCompletedOnboarding: !isFreshUser`, reusing the same `freshlyCreatedSettings != nil` signal the
+  pre-existing Face ID opt-in bootstrap already used — existing users must never be retroactively
+  onboarded. `OnboardingPaywallStubView` is a placeholder step only; no real paywall exists yet.
+- **Shared Quick Stat cards' loading UX**: `.loading` now renders `SharedQuickStatLoadingPlaceholder`
+  (matches `StatCard`'s exact shape so the grid never jumps) instead of `EmptyView()`; `.loaded(nil)`
+  still deliberately renders nothing (anti-enumeration — see above — a Secondary must never be able
+  to tell "not shared" apart from "doesn't exist"). `SharedMonthlySavingsViewModel`/
+  `SharedSavedViaTransferViewModel.load()` both retry exactly once, immediately, on failure before
+  setting `.failed` — deliberately no timer/backoff, matching the project's "no new scheduling
+  mechanism" convention used elsewhere (e.g. the Face ID grace period reusing the existing
+  scenePhase hook rather than a new timer).
+- **Settings' Budget Settings rows are tap-to-edit, not inline-editable**: `SettingsView`'s Weekly
+  Spending Limit / Monthly Savings Goal rows open the SAME real Monthly Plan edit sheets
+  `MonthlyPlanView` itself presents (`PlannedWeeklySpendingEditView`/`MonthlyPlanSettingsEditView`)
+  rather than a second, competing edit surface — the displayed amount itself is still never directly
+  typable (`isDisabled: true`), only the row's tap target changed.
+  `SettingsView.syncBudgetSettingsFromMonthlyPlan()` re-reconciles `BudgetSettings`' derived display
+  values both on `onAppear` and whenever either edit sheet's `isPresented` flips back to `false`,
+  since `SettingsView` stays mounted underneath its own sheets and nothing else would trigger a
+  refresh.
 
 ## Testing conventions
 
@@ -304,6 +391,58 @@ Not yet built (explicitly out of scope until requested):
   manifest cannot be accessed" error (hit and fixed during Phase 8F, 2026-07-21).
 
 ## Session Log
+
+### 2026-08-18/21 — Week-by-Week parity, user_profiles backfill, onboarding flow, Face ID grace
+### period, Dashboard/Settings UX polish (large multi-topic session)
+- **Week-by-Week full 4-week parity for Secondary**: root-caused to `dashboard_summary` only ever
+  carrying the current week. Migration `0026_dashboard_summary_weekly_comparisons.sql` adds a
+  `weekly_comparisons jsonb` column; `PrimaryDashboardSummarySyncService` now pushes all 4 weeks;
+  `DashboardView.weekByWeekBlock` prefers the new field, falls back to the legacy single-week field
+  for stale cached data. Migrations `0024`/`0025` (Connected Account balance restore + Quick Stats
+  field parity) also landed and deployed this session. Deployed Preview → Production, verified live.
+- **`user_profiles` backfill**: Scott's own account (pre-dated household sharing) wasn't showing up
+  in `user_profiles` because the sync triggers only fire on INSERT/email-UPDATE, never
+  retroactively. Migration `0027_backfill_user_profiles.sql`, deployed and confirmed 2 of 3
+  Production accounts were missing a row and now have one.
+- **`savedViaTransfer` allowlist drift bug** (found by audit): `_shared/household.ts`'s
+  `SharingCategory`/`VALID_CATEGORIES`/`GLOBAL_ONLY_CATEGORIES` never got the category added, even
+  though the DB layer already allowed it correctly. Fixed, deployed.
+- **`sharedSavingsQuickStatVisible` picker-gating bug**: didn't check `isQuickStatShown`, unlike its
+  sibling flag. Confirmed with Scott via AskUserQuestion that the picker should always win. Fixed.
+- **Big multi-part feature request, all built**: onboarding flow skeleton (5-path picker + per-path
+  instructions + paywall stub — see Architecture landmarks), Face ID 1-hour grace period (persisted
+  to UserDefaults after Scott caught the first, in-memory-only implementation not surviving a
+  force-quit), Dashboard lock icon, Settings "Lock Now" relocated under Account Related Options.
+- **"Saved" Quick Stat flakiness on Secondary — investigated 3 times**: rebuild fixed it once
+  (stale cache), the picker-gating bug above was the real fix once, and a third report turned out to
+  be normal loading latency mistaken for a bug because a temporary debug overlay was visible during
+  it. Scott's framing ("should always work, not be iffy") was treated as valid UX feedback
+  regardless — led to `SharedQuickStatLoadingPlaceholder` + automatic retry-once on both shared
+  view models (see Architecture landmarks).
+- **Sign Out / Delete Account**: resized to small centered capsules; then, on a follow-up "should be
+  at the very bottom" report, restructured `AccountView.body` so Delete Account is pinned to the
+  true bottom of the screen (outside the `ScrollView`, via `Spacer(minLength: 0)`), not just last in
+  scroll order. Sign-out sheet now also self-dismisses on success.
+- **Dashboard "This Week" card**: removed its tap gesture entirely (Scott: it unexpectedly opened a
+  read-only sheet) — also removed the now-dead `isPresentingSetBudget` state/sheet.
+- **Budget Settings "won't let me edit it"**: confirmed this was intentional pre-existing behavior,
+  not a regression. Scott's actual ask was to keep values derived from Monthly Plan but make the
+  rows tap-to-edit — wired both rows to open the real Monthly Plan edit sheets (see Architecture
+  landmarks for the exact mechanism).
+- Tests: **2779/2779 passing**, zero new warnings, confirmed via a clean `xcodebuild test` run after
+  every change in this session. Hit and fixed, per the standing convention: 3 `.prefix(N)`
+  source-scan windows widened, 1 test's asserted literal string updated to match an intentional code
+  change (never the assertion's underlying intent).
+- Backend deployment verified via `supabase migration list --linked` (all `0001`–`0027` show
+  `remote` = `local`) and `supabase functions list` (`get-dashboard-summary`/
+  `upsert-dashboard-summary`/`update-sharing-permission` all confirmed at their latest deployed
+  version, `status: ACTIVE`).
+- **End-of-session state**: working tree is uncommitted (client-side work + already-deployed
+  migrations, all real and tested — not a stray/incomplete state). Two open threads need Scott's
+  input before continuing: describe the "glitchy" account-switching symptom (investigated,
+  theoretical risk windows found, nothing changed without a concrete repro), and report back from
+  on-device onboarding-flow testing once he's done it. Full narrative detail in
+  `SESSION_HANDOFF.md`, generated fresh this session.
 
 ### 2026-08-16 — Handoff reconciliation + repo housekeeping (no app code)
 - Compared the repo against `SESSION_HANDOFF.md`. Feature work all verified present and correct;

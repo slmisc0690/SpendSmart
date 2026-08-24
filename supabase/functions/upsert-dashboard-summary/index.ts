@@ -65,6 +65,52 @@ function parseOptionalSpendingStatus(value: unknown): string | null | undefined 
   return isValidSpendingStatus(value) ? value : undefined;
 }
 
+// USER B FULL WEEK-BY-WEEK PARITY (migration 0026) — validates the full 4-entry array shape
+// before it's forwarded to Postgres as jsonb; returns `undefined` (→ 400) on any malformed entry
+// rather than silently dropping/truncating it, matching this function's own established
+// "undefined means reject" convention for every other optional field.
+function parseOptionalWeeklyComparisons(value: unknown): unknown[] | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) return undefined;
+
+  const parsed: unknown[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const e = entry as Record<string, unknown>;
+    const index = parseOptionalInteger(e.index);
+    const number = parseOptionalInteger(e.number);
+    const startDate = parseOptionalBareDate(e.start_date);
+    const endDate = parseOptionalBareDate(e.end_date);
+    const recommended = parseOptionalAmount(e.recommended);
+    const actual = parseOptionalAmount(e.actual);
+    const remaining = parseOptionalAmount(e.remaining);
+    const status = parseOptionalSpendingStatus(e.status);
+    if (
+      index === undefined || index === null ||
+      number === undefined || number === null ||
+      startDate === undefined || startDate === null ||
+      endDate === undefined || endDate === null ||
+      recommended === undefined || recommended === null ||
+      actual === undefined || actual === null ||
+      remaining === undefined || remaining === null ||
+      status === undefined || status === null
+    ) {
+      return undefined;
+    }
+    parsed.push({
+      index,
+      number,
+      start_date: startDate,
+      end_date: endDate,
+      recommended,
+      actual,
+      remaining,
+      status,
+    });
+  }
+  return parsed;
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
@@ -102,6 +148,12 @@ Deno.serve(async (req) => {
   const currentPlanWeekActual = parseOptionalAmount(body.current_plan_week_actual);
   const currentPlanWeekRemaining = parseOptionalAmount(body.current_plan_week_remaining);
   const currentPlanWeekStatus = parseOptionalSpendingStatus(body.current_plan_week_status);
+  // SHARED USER QUICK STATS PARITY (migration 0025) — feeds the Secondary's "Projected Available
+  // After Spend" Quick Stat tile.
+  const additionalPlannedSavings = parseOptionalAmount(body.additional_planned_savings);
+  // USER B FULL WEEK-BY-WEEK PARITY (migration 0026) — all 4 month-aligned weeks, not just the
+  // current one.
+  const weeklyComparisons = parseOptionalWeeklyComparisons(body.weekly_comparisons);
 
   if (actualSpentThisMonth === null) {
     return jsonResponse({ error: "actual_spent_this_month (a numeric string) is required" }, 400);
@@ -154,6 +206,12 @@ Deno.serve(async (req) => {
   if (currentPlanWeekStatus === undefined) {
     return jsonResponse({ error: "current_plan_week_status must be one of good/warning/over, or omitted" }, 400);
   }
+  if (additionalPlannedSavings === undefined) {
+    return jsonResponse({ error: "additional_planned_savings must be a numeric string, or omitted" }, 400);
+  }
+  if (weeklyComparisons === undefined) {
+    return jsonResponse({ error: "weekly_comparisons must be a valid array of week entries, or omitted" }, 400);
+  }
 
   try {
     const { error: rpcError } = await supabase.rpc("set_dashboard_summary", {
@@ -176,6 +234,8 @@ Deno.serve(async (req) => {
       p_current_plan_week_actual: currentPlanWeekActual ?? null,
       p_current_plan_week_remaining: currentPlanWeekRemaining ?? null,
       p_current_plan_week_status: currentPlanWeekStatus ?? null,
+      p_additional_planned_savings: additionalPlannedSavings ?? null,
+      p_weekly_comparisons: weeklyComparisons ?? null,
     });
     if (rpcError) throw rpcError;
 

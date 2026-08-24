@@ -54,6 +54,7 @@ struct SharedDataDiagnosticsView: View {
                         row(label: "Shared Connected Accounts", value: "\(accountRelatedOptionsViewModel.response?.primarySharedConnectedAccounts.count ?? 0)")
                         row(label: "Monthly Plan Shared", value: (accountRelatedOptionsViewModel.response?.primaryMonthlyPlanShared ?? false) ? "Yes" : "No")
                         row(label: "Monthly Savings Shared", value: (accountRelatedOptionsViewModel.response?.primaryMonthlySavingsShared ?? false) ? "Yes" : "No")
+                        row(label: "Saved (Transfers) Shared", value: (accountRelatedOptionsViewModel.response?.primarySavedViaTransferShared ?? false) ? "Yes" : "No")
                     } else {
                         Text("Shared-primary diagnostics are not applicable — this device is not currently an active Secondary.")
                             .font(Theme.captionFont)
