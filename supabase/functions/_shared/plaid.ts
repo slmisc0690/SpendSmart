@@ -324,6 +324,7 @@ const RECOGNIZED_WEBHOOK_KEYS: ReadonlySet<string> = new Set([
   "ITEM:LOGIN_REPAIRED",
   "ITEM:NEW_ACCOUNTS_AVAILABLE",
   "WEBHOOK:WEBHOOK_UPDATE_ACKNOWLEDGED",
+  "TRANSACTIONS:SYNC_UPDATES_AVAILABLE",
 ]);
 
 /** True for exactly the webhook type/code combinations `computePlaidWebhookUpdates` has a case
@@ -389,11 +390,18 @@ export function computePlaidWebhookUpdates(
       // change beyond the last_webhook_code/at bookkeeping the caller already applies.
       return {};
 
+    case "TRANSACTIONS:SYNC_UPDATES_AVAILABLE":
+      // No plaid_items FLAG changes here — this webhook's actual effect is triggering
+      // syncItemTransactionsForItem (see ../_shared/itemTransactionSync.ts), which plaid-webhook
+      // itself calls directly (via EdgeRuntime.waitUntil) once it sees this exact type/code, NOT
+      // through this generic flag-mapping function. Recognized here only so
+      // isRecognizedPlaidWebhook logs it as handled rather than "unhandled, logged only".
+      return {};
+
     default:
-      // Every other webhook type/code (including the pre-existing SYNC_UPDATES_AVAILABLE, which
-      // the app currently discovers via its own polling/pull-to-refresh instead) is left
-      // unrecognized — intentionally conservative: only flip a flag for webhook codes this
-      // project has an actual, tested response to.
+      // Every other webhook type/code is left unrecognized — intentionally conservative: only
+      // flip a flag (or trigger an action, for TRANSACTIONS:SYNC_UPDATES_AVAILABLE above) for
+      // webhook codes this project has an actual, tested response to.
       return {};
   }
 }

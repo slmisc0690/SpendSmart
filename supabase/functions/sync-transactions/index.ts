@@ -1,9 +1,42 @@
 // Supabase Edge Function: sync-transactions
 //
-// Called by the iOS app to fetch new/updated transactions for ONE linked institution. Looks up
-// the stored access_token server-side (never from the request), calls Plaid's
-// /transactions/sync, and returns a normalized, read-only transaction list shaped to match the
-// iOS app's `PlaidTransactionDTO`. The access_token itself never leaves this function.
+// Called by the iOS app to fetch new/updated/removed transactions for ONE linked institution,
+// shaped to match the iOS app's `PlaidTransactionDTO`. As of the Plaid webhook-driven background
+// sync phase, this function NO LONGER calls Plaid at all — it reads the already-reconciled
+// plaid_transactions / plaid_transaction_removals mirror (kept current by the webhook-triggered and
+// manual-refresh-triggered Item-level sync engine, ../_shared/itemTransactionSync.ts) and returns
+// whatever has changed since this Item's `plaid_items.last_transactions_ack_at` watermark.
+//
+// WHY THE PLAID CALL MOVED OUT OF THIS FUNCTION: Plaid's /transactions/sync cursor is a single,
+// stateful, per-Item stream — only one caller can ever "consume" a given diff without the other
+// missing it. Once a webhook-triggered background sync needed to become a second, independent
+// trigger source for the same Item, the project's own "one authoritative cursor per Item"
+// requirement meant exactly one thing could still call Plaid for that Item going forward. The
+// webhook-triggered/manual-refresh-triggered syncItemTransactionsForItem is that one thing (see its
+// own file header); this function became a pure read of what it has already persisted. The iOS
+// app's OWN behavior is unaffected: `PlaidConnectionManager.syncAndImportTransactions` calls
+// sync-item-transactions FIRST (forcing a real attempt, exactly preserving today's manual-refresh
+// Plaid-call volume) and THEN this function (to actually receive the result) — see that method's
+// own updated doc comment.
+//
+// WATERMARK, NOT CURSOR: `last_transactions_ack_at` tracks what has already been DELIVERED to the
+// owning iPhone client, entirely distinct from `plaid_items.cursor` (Plaid's own opaque bookmark,
+// used only by the Item-sync engine). A null watermark means "nothing yet acknowledged" — every
+// currently-mirrored row for this Item's accounts is returned, matching a fresh Item's fully
+// backfilled history. The watermark advances to the exact instant the query for this response was
+// issued (captured before any query, so nothing that arrives DURING this handler's own execution
+// can be silently skipped by a race between "read" and "mark as delivered").
+//
+// REQUIRES_REAUTH GUARD RETAINED, ENVIRONMENT GUARD REMOVED: requires_reauth is kept, in the exact
+// same condition and response shape as before this phase, since it is a genuine user-facing signal
+// (the iOS client's "needs to be reconnected" prompt) unrelated to whether THIS function happens to
+// call Plaid. The environment-mismatch guard, by contrast, existed solely to avoid wasting a Plaid
+// round-trip with a token issued under the wrong environment — since this function no longer calls
+// Plaid at all, re-implementing that check here would mean coupling a pure DB read to
+// PLAID_CLIENT_ID/PLAID_SECRET being configured for no behavioral benefit (it was never a
+// user-facing invariant this function exists to enforce; assertItemEnvironmentMatches is still
+// called, unchanged, everywhere Plaid is actually reached — sync-item-transactions and the Item-sync
+// engine). Removed here rather than duplicated with different semantics.
 //
 // MULTI-INSTITUTION: `connection_id` is the intended long-term contract — a household account
 // can link more than one institution (or Plaid Item), so there is no longer a single
@@ -11,7 +44,7 @@
 // behavior would silently sync whichever row happened to sort first, which is wrong the moment
 // a second connection exists). The iOS app is responsible for calling this once per connection
 // it wants refreshed (see PlaidConnectionManager) — this function still does exactly one
-// connection's sync per call, kept deliberately simple/atomic rather than trying to fan out to
+// connection's pull per call, kept deliberately simple/atomic rather than trying to fan out to
 // every connection server-side.
 //
 // TEMPORARY BACKWARD COMPATIBILITY — DELETE AFTER THE OLD iOS CLIENT IS NO LONGER IN THE FIELD:
@@ -26,21 +59,30 @@
 // is a distinct, harder error (a malformed request from a client that knows about the field)
 // and still 400s immediately, before any lookup. Remove this whole fallback block (and go back
 // to requiring `connection_id` unconditionally) once telemetry shows the old client is no
-// longer calling this function — see the deployment plan for the exact removal criteria.
+// longer calling this function — see the deployment plan for the exact removal criteria. This
+// fallback block is unchanged by this phase.
 import {
-  assertItemEnvironmentMatches,
-  buildNormalizedTransactionRows,
   createPrivilegedClient,
-  EnvironmentMismatchError,
   isValidUuid,
   jsonResponse,
   logPlaidOperation,
   logSafeError,
-  plaidFetch,
   requireAuthenticatedUserId,
   SafeError,
   UnauthorizedError,
 } from "../_shared/plaid.ts";
+
+interface NormalizedTransactionRow {
+  plaid_account_id: string;
+  transaction_id: string;
+  pending_transaction_id: string | null;
+  original_description: string;
+  merchant_name: string | null;
+  amount: number;
+  authorized_date: string | null;
+  posted_date: string | null;
+  is_pending: boolean;
+}
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
@@ -69,7 +111,13 @@ Deno.serve(async (req) => {
   let connectionIdForLogging: string | undefined;
 
   try {
-    let item: { id: string; access_token: string; cursor: string | null; requires_reauth: boolean; environment: string | null } | null;
+    let item: {
+      id: string;
+      requires_reauth: boolean;
+      last_transactions_ack_at: string | null;
+    } | null;
+
+    const selectColumns = "id, requires_reauth, last_transactions_ack_at";
 
     if (connection_id !== undefined) {
       // Scoped by the specific row id AND user_id — never a bare "first row for this user"
@@ -77,7 +125,7 @@ Deno.serve(async (req) => {
       // more than one connection).
       const { data, error: lookupError } = await supabase
         .from("plaid_items")
-        .select("id, access_token, cursor, requires_reauth, environment")
+        .select(selectColumns)
         .eq("id", connection_id)
         .eq("user_id", userId)
         .maybeSingle();
@@ -90,7 +138,7 @@ Deno.serve(async (req) => {
       console.warn("[sync-transactions] DEPRECATED: request omitted connection_id — falling back to single-item lookup. Remove this path once the old client is fully retired.");
       const { data: candidates, error: lookupError } = await supabase
         .from("plaid_items")
-        .select("id, access_token, cursor, requires_reauth, environment")
+        .select(selectColumns)
         .eq("user_id", userId)
         .limit(2);
       if (lookupError) throw lookupError;
@@ -108,177 +156,127 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: "No such connection for this account" }, 404);
     }
     connectionIdForLogging = item.id;
-    // Must be checked BEFORE calling Plaid — see assertItemEnvironmentMatches's doc comment.
-    assertItemEnvironmentMatches(item.environment);
+    // See this file's own header ("REQUIRES_REAUTH GUARD RETAINED, ENVIRONMENT GUARD REMOVED").
     if (item.requires_reauth) {
-      // Plaid will reject /transactions/sync for an Item in this state anyway (ITEM_LOGIN_REQUIRED
-      // webhooks fire precisely because the access_token can no longer be used) — failing fast
-      // here avoids a wasted round-trip and gives the app a distinct, actionable error code
-      // instead of a generic Plaid failure to parse.
       return jsonResponse({ error: "This connection needs to be reconnected", requires_reauth: true }, 409);
     }
-    console.log("[sync-transactions] stored cursor present:", item.cursor != null);
 
-    // Plaid paginates /transactions/sync — a single call only returns up to one page (has_more
-    // indicates whether more exist for this diff). Loop until has_more is false so the app always
-    // gets the FULL diff in one round-trip, not just the first ~100 transactions. next_cursor is
-    // only persisted to Postgres once the entire loop finishes without error, so a failure
-    // partway through never leaves the stored cursor pointing past data we never actually
-    // returned to the app.
-    let cursor: string | undefined = item.cursor ?? undefined;
-    let hasMore = true;
-    let pageCount = 0;
-    let lastRequestId: string | undefined;
-    const added: Record<string, unknown>[] = [];
-    const modified: Record<string, unknown>[] = [];
-    const removed: Record<string, unknown>[] = [];
+    // Captured BEFORE any query — this instant becomes the new watermark, so nothing persisted
+    // DURING this handler's own execution (a race with a concurrent Item-sync engine run) can be
+    // silently skipped: only rows/removals with a timestamp strictly at-or-before this instant are
+    // ever returned or acknowledged.
+    const queryStartedAt = new Date();
+    const queryStartedAtIso = queryStartedAt.toISOString();
+    const lastAck = item.last_transactions_ack_at;
 
-    while (hasMore) {
-      const data = await plaidFetch("/transactions/sync", { access_token: item.access_token, cursor });
-      pageCount += 1;
-      lastRequestId = typeof data.request_id === "string" ? data.request_id : lastRequestId;
-      added.push(...((data.added as Record<string, unknown>[] | undefined) ?? []));
-      modified.push(...((data.modified as Record<string, unknown>[] | undefined) ?? []));
-      removed.push(...((data.removed as Record<string, unknown>[] | undefined) ?? []));
-      hasMore = data.has_more === true;
-      cursor = data.next_cursor as string;
+    const { data: accountRows, error: accountsError } = await supabase
+      .from("plaid_accounts")
+      .select("id, account_id")
+      .eq("plaid_item_id", item.id);
+    if (accountsError) throw accountsError;
+
+    const internalAccountIdToExternal: Record<string, string> = {};
+    const itemAccountInternalIds: string[] = [];
+    for (const row of accountRows ?? []) {
+      internalAccountIdToExternal[row.id as string] = row.account_id as string;
+      itemAccountInternalIds.push(row.id as string);
     }
-    console.log("[sync-transactions] plaid /transactions/sync request completed, pages:", pageCount);
-    console.log("[sync-transactions] added count:", added.length);
-    console.log("[sync-transactions] modified count:", modified.length);
-    console.log("[sync-transactions] removed count:", removed.length);
-    console.log("[sync-transactions] has_more (final):", hasMore);
 
-    // Shared shape for both `added` and `modified` — iOS decodes both through the same DTO.
-    const toWireTransaction = (t: Record<string, unknown>) => ({
-      external_transaction_id: t.transaction_id,
-      pending_transaction_id: t.pending_transaction_id ?? null,
-      plaid_account_id: t.account_id,
-      // Sent as a STRING, not a JSON number. The iOS app decodes this into a `Decimal` from the
-      // string directly — a JSON number would round-trip through Double first and can silently
-      // corrupt exact cent values (e.g. 19.99 -> 19.98999999999999488).
-      amount: String(t.amount),
-      merchant_name: t.merchant_name ?? null,
-      original_description: t.name,
-      authorized_date: t.authorized_date ?? null,
-      posted_date: t.date ?? null,
-      is_pending: t.pending === true,
-      category_guess: Array.isArray(t.category) ? t.category[0] : null,
-    });
+    let changedRows: NormalizedTransactionRow[] = [];
+    let removedTransactionIds: string[] = [];
 
-    const transactions = added.map(toWireTransaction);
-    const modifiedTransactions = modified.map(toWireTransaction);
-    // Plaid's `removed` entries only ever carry `transaction_id` (no other fields) — forward just
-    // the ids so the app can delete/reconcile its matching local records.
-    const removedTransactionIds = removed
-      .map((r) => r.transaction_id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (itemAccountInternalIds.length > 0) {
+      let changedQuery = supabase
+        .from("plaid_transactions")
+        .select(
+          "plaid_account_id, transaction_id, pending_transaction_id, original_description, merchant_name, amount, authorized_date, posted_date, is_pending",
+        )
+        .in("plaid_account_id", itemAccountInternalIds)
+        .lte("updated_at", queryStartedAtIso);
+      if (lastAck !== null) {
+        changedQuery = changedQuery.gt("updated_at", lastAck);
+      }
+      const { data: changedData, error: changedError } = await changedQuery;
+      if (changedError) throw changedError;
+      changedRows = (changedData ?? []) as NormalizedTransactionRow[];
 
-    // Persist the new cursor so the next sync only fetches what's changed since this one. Only
-    // reached after the pagination loop above has fully succeeded — cursor here is the LAST
-    // page's next_cursor, i.e. the correct resume point for the next call. Scoped by primary key +
-    // user_id (never by access_token, so the token never has to appear in a query predicate that
-    // could end up in a Postgres error/log line).
-    const { error: cursorUpdateError } = await supabase
+      let removedQuery = supabase
+        .from("plaid_transaction_removals")
+        .select("transaction_id")
+        .in("plaid_account_id", itemAccountInternalIds)
+        .lte("removed_at", queryStartedAtIso);
+      if (lastAck !== null) {
+        removedQuery = removedQuery.gt("removed_at", lastAck);
+      }
+      const { data: removedData, error: removedError } = await removedQuery;
+      if (removedError) throw removedError;
+      removedTransactionIds = (removedData ?? [])
+        .map((row) => row.transaction_id as string)
+        .filter((id) => typeof id === "string" && id.length > 0);
+    }
+
+    console.log("[sync-transactions] changed rows:", changedRows.length, "removed:", removedTransactionIds.length);
+
+    // Every changed row (new OR updated) is emitted as an "added" entry — the iOS client's own
+    // import logic (PlaidTransactionImportService.upsert) already treats `added` and `modified`
+    // identically (both look up by external_transaction_id and upsert), so this project's own
+    // Phase 0 architecture audit confirmed splitting them here would be pure ceremony, not a
+    // behavior difference. `modified_transactions` is always empty; kept in the response purely
+    // for wire-shape parity (the iOS decoder already treats it as optional/defaulting to empty).
+    const transactions = changedRows.map((row) => ({
+      external_transaction_id: row.transaction_id,
+      pending_transaction_id: row.pending_transaction_id,
+      plaid_account_id: internalAccountIdToExternal[row.plaid_account_id] ?? row.plaid_account_id,
+      // Sent as a STRING, not a JSON number — same reasoning as before this phase: a JSON number
+      // would round-trip through Double and can silently corrupt exact cent values.
+      amount: String(row.amount),
+      merchant_name: row.merchant_name,
+      original_description: row.original_description,
+      authorized_date: row.authorized_date,
+      posted_date: row.posted_date,
+      is_pending: row.is_pending,
+      // plaid_transactions does not store Plaid's category guess (a deliberate, documented
+      // exclusion from migration 0010 — nothing consumes it: PlaidTransactionImportService decodes
+      // this field but never actually applies it anywhere, confirmed by this phase's own
+      // architecture audit) — always null, matching what was already effectively unused before
+      // this phase, not a new capability loss.
+      category_guess: null as string | null,
+    }));
+
+    // Best-effort — matches this endpoint's own pre-existing tolerance for a failed bookkeeping
+    // write (the previous implementation similarly never hard-failed the response over a failed
+    // cursor update). A failure here only means the SAME batch may be redelivered on the next
+    // pull, which the iOS client's own upsert-by-external-id import already handles idempotently —
+    // never data loss, never a duplicate.
+    const { error: watermarkUpdateError } = await supabase
       .from("plaid_items")
-      .update({ cursor, updated_at: new Date().toISOString() })
+      .update({ last_transactions_ack_at: queryStartedAtIso, updated_at: queryStartedAtIso })
       .eq("id", item.id)
       .eq("user_id", userId);
-    console.log("[sync-transactions] final cursor saved:", !cursorUpdateError);
-    console.log("[sync-transactions] response transaction count:", transactions.length);
-
-    // PHASE 4 — server-side normalized persistence (migration
-    // 0010_plaid_transactions_normalized.sql), additive to everything above. Deliberately
-    // best-effort: caught and logged, never allowed to throw past this point — a bug in this NEW
-    // normalized-mirror code path must never prevent the iOS client from receiving the
-    // already-fetched transactions it came here for (see this project's Phase 4 instruction that
-    // existing Production iOS import behavior must remain unchanged). This is genuinely additive,
-    // not a replacement for anything: the iOS-facing response below is built entirely from
-    // `transactions`/`modifiedTransactions`/`removedTransactionIds` above, computed BEFORE this
-    // block runs and completely unaffected by whatever happens in it.
-    try {
-      const { data: accountRows, error: accountsError } = await supabase
-        .from("plaid_accounts")
-        .select("id, account_id")
-        .eq("plaid_item_id", item.id);
-      if (accountsError) throw accountsError;
-
-      const accountIdToPlaidAccountId: Record<string, string> = {};
-      for (const row of accountRows ?? []) {
-        accountIdToPlaidAccountId[row.account_id as string] = row.id as string;
-      }
-
-      const nowIso = new Date().toISOString();
-      const { rows: normalizedRows, skippedUnknownAccountCount } = buildNormalizedTransactionRows(
-        [...added, ...modified],
-        accountIdToPlaidAccountId,
-        userId,
-        nowIso,
-      );
-
-      // Upsert first, THEN process removals — mirrors the iOS local import's own documented
-      // ordering rationale (PlaidTransactionImportService.applySync): a pending transaction's
-      // `removed` entry is the other half of a pending-to-posted transition delivered alongside
-      // the NEW posted transaction's `added`/`modified` entry, so the posted row must already
-      // exist before the old pending row's removal is processed, not the other way around. Unlike
-      // the iOS local import, this table has no user-entered state to preserve across that
-      // transition (no category/note/approval flags exist on plaid_transactions at all — see
-      // migration 0010's own comment), so a plain insert-then-delete-by-transaction_id is
-      // sufficient here; no re-keying of the pending row is needed or attempted.
-      if (normalizedRows.length > 0) {
-        const { error: upsertError } = await supabase
-          .from("plaid_transactions")
-          .upsert(normalizedRows, { onConflict: "plaid_account_id,transaction_id" });
-        if (upsertError) throw upsertError;
-      }
-
-      if (removedTransactionIds.length > 0) {
-        const { error: deleteError } = await supabase
-          .from("plaid_transactions")
-          .delete()
-          .in("transaction_id", removedTransactionIds);
-        if (deleteError) throw deleteError;
-      }
-
-      console.log(
-        "[sync-transactions] normalized rows upserted:", normalizedRows.length,
-        "skipped (unknown account):", skippedUnknownAccountCount,
-        "normalized rows removed:", removedTransactionIds.length,
-      );
-    } catch (normalizedPersistenceError) {
-      logSafeError(
-        "sync-transactions: normalized transaction persistence failed (iOS-facing response unaffected)",
-        normalizedPersistenceError,
-      );
-    }
+    console.log("[sync-transactions] watermark advanced:", !watermarkUpdateError);
 
     logPlaidOperation({
       operation: "sync-transactions",
       outcome: "success",
       connectionId: item.id,
-      requestId: lastRequestId,
-      addedCount: added.length,
-      modifiedCount: modified.length,
-      removedCount: removed.length,
+      addedCount: transactions.length,
+      removedCount: removedTransactionIds.length,
     });
 
     return jsonResponse({
       connection_id: item.id,
       transactions,
-      modified_transactions: modifiedTransactions,
+      modified_transactions: [],
       removed_transaction_ids: removedTransactionIds,
-      next_cursor: cursor,
-      modified_count: modified.length,
-      removed_count: removed.length,
+      next_cursor: null,
+      modified_count: 0,
+      removed_count: removedTransactionIds.length,
     });
   } catch (error) {
     logSafeError(`sync-transactions failed connection_id=${connectionIdForLogging ?? "unknown"}`, error);
 
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
-    }
-    if (error instanceof EnvironmentMismatchError) {
-      return jsonResponse({ error: error.message, environment_mismatch: true }, 409);
     }
     if (error instanceof SafeError) {
       return jsonResponse({ error: error.message }, 500);

@@ -441,6 +441,9 @@ verify_jwt = false
 [functions.sync-transactions]
 verify_jwt = false
 
+[functions.sync-item-transactions]
+verify_jwt = false
+
 [functions.sync-balances]
 verify_jwt = false
 

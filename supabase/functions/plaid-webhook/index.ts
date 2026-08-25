@@ -13,14 +13,23 @@
 // own `item_id` via the privileged client — never by trusting any `user_id` the request claims,
 // since there is no authenticated user attached to this call at all.
 //
-// WHAT THIS DOES NOT DO: it does not call sync-transactions or sync-balances itself. Webhooks
-// only flip STATE FLAGS on the affected plaid_items row (requires_reauth,
-// pending_expiration_at, new_accounts_available) — the iOS app reads those flags (via whatever
-// "list my connections" call it already makes) and decides when to actually prompt the user or
-// re-sync. Keeping this function state-only, not action-triggering, means a webhook replay or a
-// burst of duplicate webhooks (Plaid explicitly does not guarantee exactly-once delivery) can
-// never cause a duplicate sync or a race with a sync already in progress — every handler below is
-// a plain idempotent UPDATE.
+// STATE FLAGS vs. TRIGGERED WORK: most webhook types only flip STATE FLAGS on the affected
+// plaid_items row (requires_reauth, pending_expiration_at, new_accounts_available) — the iOS app
+// reads those flags (via whatever "list my connections" call it already makes) and decides when to
+// prompt the user. Exactly ONE webhook type/code actually triggers real work: TRANSACTIONS /
+// SYNC_UPDATES_AVAILABLE, which schedules syncItemTransactionsForItem (../_shared/
+// itemTransactionSync.ts) via EdgeRuntime.waitUntil — see the dedicated branch below. This function
+// still never calls the sync-transactions or sync-balances EDGE FUNCTIONS themselves (no HTTP
+// self-call, no shared secret needed for that), and still never awaits the sync engine before
+// responding — Plaid requires an ack within 10 seconds or treats delivery as failed and retries
+// with backoff (confirmed against Plaid's current webhook documentation), so this handler always
+// verifies, claims/schedules, and returns fast, exactly as before this phase.
+//
+// IDEMPOTENCY: Plaid does not guarantee exactly-once delivery. A duplicate/retried
+// SYNC_UPDATES_AVAILABLE for the same Item is always safe — syncItemTransactionsForItem's own
+// atomic claim (claim_item_transaction_sync) makes a second concurrent attempt for the same Item a
+// pure no-op, never a duplicate sync or a race. Every OTHER handler below remains a plain
+// idempotent UPDATE, unchanged from before this phase.
 
 import {
   computePlaidWebhookUpdates,
@@ -31,6 +40,14 @@ import {
   logSafeError,
   verifyPlaidWebhookSignature,
 } from "../_shared/plaid.ts";
+import { syncItemTransactionsForItem } from "../_shared/itemTransactionSync.ts";
+
+// Supabase's Edge Runtime injects this global (it is not part of standard Deno) — lets a request
+// handler schedule work that continues after the HTTP response has already been sent, which is
+// exactly what's needed here: Plaid requires an ack within 10 seconds (see this file's own header),
+// and the Item-level sync can legitimately take longer than that on a large backlog. Declared
+// ambiently since no `lib.deno.d.ts` shipped with this project's tooling declares it.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
 interface PlaidWebhookPayload {
   webhook_type?: string;
@@ -128,10 +145,9 @@ Deno.serve(async (req) => {
     };
 
     if (!isRecognizedPlaidWebhook(webhookType, webhookCode)) {
-      // Every other webhook type/code (including the pre-existing SYNC_UPDATES_AVAILABLE, which
-      // the app currently discovers via its own polling/pull-to-refresh instead) is logged but
-      // not acted on — intentionally conservative: only flip a flag for webhook codes this
-      // project has an actual, tested response to.
+      // Every other webhook type/code is logged but not acted on — intentionally conservative:
+      // only flip a flag (or trigger work, for TRANSACTIONS:SYNC_UPDATES_AVAILABLE below) for
+      // webhook codes this project has an actual, tested response to.
       console.log("[plaid-webhook] unhandled webhook type/code, logged only:", { webhook_type: webhookType, webhook_code: webhookCode });
     }
 
@@ -150,6 +166,25 @@ Deno.serve(async (req) => {
       webhookType: webhookType ?? undefined,
       webhookCode: webhookCode ?? undefined,
     });
+
+    if (webhookType === "TRANSACTIONS" && webhookCode === "SYNC_UPDATES_AVAILABLE") {
+      // Schedule the Item-level sync as a background task and respond immediately — Plaid requires
+      // an ack within 10 seconds or treats delivery as failed (see this file's own header comment).
+      // syncItemTransactionsForItem's own atomic claim makes this safe to schedule even if another
+      // delivery for the same Item is already running (or already scheduled a moment ago) — the
+      // second attempt observes `skipped: true` and does nothing further, never a duplicate sync.
+      // Errors inside the background task are already caught and logged INSIDE
+      // syncItemTransactionsForItem itself; this .catch is a last-resort backstop only, so an
+      // unexpected throw here can never surface as an "unhandled promise rejection" in the runtime
+      // logs.
+      console.log("[plaid-webhook] scheduling background Item transaction sync:", { connection_id: item.id });
+      EdgeRuntime.waitUntil(
+        syncItemTransactionsForItem(supabase, item.id).catch((error) => {
+          logSafeError(`plaid-webhook: background sync scheduling failed item_id=${itemId}`, error);
+        }),
+      );
+    }
+
     return jsonResponse({ received: true });
   } catch (error) {
     logSafeError(`plaid-webhook processing failed item_id=${itemId}`, error);
