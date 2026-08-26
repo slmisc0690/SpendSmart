@@ -652,10 +652,18 @@ final class FinanceTrackTests: XCTestCase {
         // CONNECTED ACCOUNTS REFRESH PARITY then moved the actual `applySync`/`syncTransactions`
         // call out of `refreshAccountBalanceAndTransactions` and into the shared
         // `syncAndImportTransactions` method (reused by every manual refresh entry point) — so
-        // this test now checks that the combined method DELEGATES to that shared method, and that
-        // the shared method itself is the one actually calling `applySync`/`syncTransactions`.
-        // The original `refreshAccountBalance` stays balance-only and unchanged. The date-repair
+        // this test now checks that the combined method DELEGATES to that shared method. The
+        // original `refreshAccountBalance` stays balance-only and unchanged. The date-repair
         // sweep remains untouched by any path.
+        //
+        // WEBHOOK-DRIVEN BACKGROUND SYNC PHASE — `syncAndImportTransactions` itself now delegates
+        // FURTHER, to `pullSyncedTransactions` (after a best-effort `triggerItemTransactionSync`
+        // force step — see that method's own doc comment), rather than calling
+        // `applySync`/`syncTransactions` directly in its own body. `pullSyncedTransactions` is the
+        // method actually reused by the new automatic, pull-only Dashboard-foreground path (see
+        // `DashboardView.pullSyncedTransactionsForConnectedAccountsIfNeeded`), so it — not
+        // `syncAndImportTransactions` — is now the one this test checks for the real
+        // `applySync`/`syncTransactions` calls.
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../FinanceTrack/Services/PlaidConnectionManager.swift")
@@ -672,9 +680,17 @@ final class FinanceTrackTests: XCTestCase {
         guard let sharedRange = source.range(of: "func syncAndImportTransactions") else {
             XCTFail("syncAndImportTransactions not found"); return
         }
-        let sharedSection = String(source[sharedRange.lowerBound...].prefix(500))
-        XCTAssertTrue(sharedSection.contains("applySync"), "the shared transaction-sync method must call applySync so transactions are actually imported, not just fetched")
-        XCTAssertTrue(sharedSection.contains("syncTransactions"), "the shared transaction-sync method must reuse the existing syncTransactions call, not a duplicate/new one")
+        let sharedSection = String(source[sharedRange.lowerBound...].prefix(1200))
+        XCTAssertTrue(sharedSection.contains("triggerItemTransactionSync"), "syncAndImportTransactions must force a real Item-level sync before pulling — see its own doc comment")
+        XCTAssertTrue(sharedSection.contains("pullSyncedTransactions"), "syncAndImportTransactions must delegate the actual pull to pullSyncedTransactions, not keep its own duplicate copy")
+
+        guard let pullOnlyRange = source.range(of: "func pullSyncedTransactions(") else {
+            XCTFail("pullSyncedTransactions not found"); return
+        }
+        let pullOnlySection = String(source[pullOnlyRange.lowerBound...].prefix(1000))
+        XCTAssertTrue(pullOnlySection.contains("applySync"), "pullSyncedTransactions must call applySync so transactions are actually imported, not just fetched")
+        XCTAssertTrue(pullOnlySection.contains("syncTransactions"), "pullSyncedTransactions must reuse the existing syncTransactions call, not a duplicate/new one")
+        XCTAssertFalse(pullOnlySection.contains("triggerItemTransactionSync"), "pullSyncedTransactions must stay pull-only — it must never force a real Plaid call itself (that's syncAndImportTransactions's job, never the automatic-foreground path's)")
 
         guard let balanceOnlyRange = source.range(of: "func refreshAccountBalance(") else {
             XCTFail("refreshAccountBalance not found"); return
@@ -12312,6 +12328,133 @@ final class FinanceTrackTests: XCTestCase {
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         XCTAssertTrue(source.contains("onRefresh: connectedAccountBalanceDisplays.contains(display) ? { refreshConnectedAccount(display) } : nil"), "onRefresh must remain gated to owned displays only — a shared display must never be given a refresh action of any kind")
+    }
+
+    // MARK: - Automatic webhook-triggered cached-balance refresh (Phase: AutoBalance). The server's
+    // post-sync `/accounts/get` step (itemTransactionSync.ts) is only reachable live/Preview-tested
+    // (see that file's own test header); what IS directly testable here is the iPhone-side half:
+    // `pullSyncedTransactions` correctly applies `PlaidSyncResult.accountBalances` (when the server
+    // included any) into the exact same `updateCachedBalances` cache every manual balance refresh
+    // already writes to — the same cache the Dashboard's "Last updated" text already reads from
+    // (`ConnectedAccountBalanceRow.subtitleText` → `display.updatedAt` →
+    // `CachedPlaidAccountBalance.updatedAt`, all unchanged by this phase).
+
+    @MainActor
+    func testPullSyncedTransactionsAppliesServerProvidedAccountBalances() async throws {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(added: [], modified: [], removedExternalIds: [], accountBalances: [makeBalance(accountId: "checking-1", current: 500)])
+        )
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["checking-1"]?.currentBalance, 500, "a balance the server included in the sync-transactions pull must reach the same cache manual refresh already writes to")
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsUpdatesMultipleAccountsUnderTheSameItem() async throws {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(
+                added: [], modified: [], removedExternalIds: [],
+                accountBalances: [
+                    makeBalance(accountId: "checking-1", current: 500),
+                    makeBalance(accountId: "savings-1", current: 12000),
+                ]
+            )
+        )
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["checking-1"]?.currentBalance, 500, "checking must update independently")
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["savings-1"]?.currentBalance, 12000, "savings under the SAME Item must also update, from the one combined response")
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsWithNoAccountBalancesNeverClobbersExistingCache() async throws {
+        // The common case: most pulls carry no fresh balance snapshot at all (nothing was refreshed
+        // server-side since the last pull). This must never be mistaken for "clear the cache."
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        manager.updateCachedBalances(connectionId: "conn-1", balances: [makeBalance(accountId: "checking-1", current: 500)])
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(PlaidSyncResult(added: [], modified: [], removedExternalIds: []))
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(manager.connections.first?.cachedBalances?["checking-1"]?.currentBalance, 500, "an empty accountBalances array must leave the existing cache completely untouched")
+    }
+
+    private final class FakeTriggerCountingPlaidBackendService: PlaidBackendService {
+        private(set) var triggerItemTransactionSyncCallCount = 0
+        var syncTransactionsResult: Result<PlaidSyncResult, Error> = .success(PlaidSyncResult(added: [], modified: [], removedExternalIds: []))
+
+        func createLinkToken(daysRequested: Int?) async throws -> String { fatalError("not used in this test") }
+        func createUpdateLinkToken(connectionId: String) async throws -> String { fatalError("not used in this test") }
+        func exchangePublicToken(_ publicToken: String, institutionId: String?, institutionName: String) async throws -> PlaidExchangeResult { fatalError("not used in this test") }
+        func syncTransactions(connectionId: String) async throws -> PlaidSyncResult { try syncTransactionsResult.get() }
+        func triggerItemTransactionSync(connectionId: String) async throws { triggerItemTransactionSyncCallCount += 1 }
+        func syncBalances(connectionId: String) async throws -> [PlaidAccountBalance] { fatalError("not used in this test") }
+        func refreshConnectedAccount(connectionId: String, accountId: String) async throws -> ConnectedAccountRefreshResult { fatalError("not used in this test") }
+        func refreshAccounts(connectionId: String) async throws -> [PlaidAccountSummary] { fatalError("not used in this test") }
+        func listConnections() async throws -> [PlaidConnectionStatus] { fatalError("not used in this test") }
+        func disconnectAccount(connectionId: String) async throws { fatalError("not used in this test") }
+        func debugResetCursor(connectionId: String) async throws { fatalError("not used in this test") }
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsNeverForcesARealPlaidCheck() async throws {
+        // The automatic foreground/app-open path (DashboardView's scenePhase handler) calls ONLY
+        // pullSyncedTransactions — this proves that path structurally cannot force a real Plaid
+        // round-trip, regardless of what balance data happens to come back.
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeTriggerCountingPlaidBackendService()
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(added: [], modified: [], removedExternalIds: [], accountBalances: [makeBalance(accountId: "checking-1", current: 500)])
+        )
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(fake.triggerItemTransactionSyncCallCount, 0, "pullSyncedTransactions must never force a real Item-level sync itself — even when it happens to receive fresh balance data")
+    }
+
+    func testPullSyncedTransactionsAppliesBalancesBeforeImportingTransactions() throws {
+        // Source-level ordering check: the balance-cache update must happen unconditionally, before
+        // the transaction-import step that can throw — mirrors
+        // refreshAccountBalanceAndTransactions's own already-approved balance-before-transactions
+        // ordering rationale, so a transaction-import failure can never prevent an already-received
+        // balance update from taking effect.
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Services/PlaidConnectionManager.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let range = source.range(of: "func pullSyncedTransactions(") else {
+            XCTFail("pullSyncedTransactions not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(1600))
+        guard let updateRange = scoped.range(of: "updateCachedBalances(connectionId: connectionId, balances: syncResult.accountBalances)") else {
+            XCTFail("updateCachedBalances call not found in pullSyncedTransactions"); return
+        }
+        guard let applyRange = scoped.range(of: "PlaidTransactionImportService.applySync") else {
+            XCTFail("applySync call not found in pullSyncedTransactions"); return
+        }
+        XCTAssertTrue(updateRange.lowerBound < applyRange.lowerBound, "updateCachedBalances must be called BEFORE applySync, so a transaction-import failure can never block an already-received balance update")
     }
 
     // MARK: - Plaid connection warnings (Plaid onboarding — "Follow Link UI best practices").

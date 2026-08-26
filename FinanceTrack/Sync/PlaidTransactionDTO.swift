@@ -30,4 +30,25 @@ struct PlaidSyncResult {
     /// Plaid's own `transaction_id` for each removed transaction — never a full transaction
     /// object, since Plaid's `removed` entries don't carry one.
     let removedExternalIds: [String]
+    /// Present only when the server-side Item-sync engine's automatic post-sync `/accounts/get`
+    /// balance refresh (see `_shared/itemTransactionSync.ts`) refreshed this Item's accounts since
+    /// this device's last acknowledged pull — empty on most calls, exactly matching how rarely a
+    /// fresh balance snapshot is actually available. `PlaidConnectionManager.pullSyncedTransactions`
+    /// forwards this straight into the existing `updateCachedBalances`, the same cache every manual
+    /// balance refresh already writes to — never a second, competing balance store. Defaulted to
+    /// `[]` so every pre-existing call site (test or production) that predates this field keeps
+    /// compiling unchanged.
+    let accountBalances: [PlaidAccountBalance]
+
+    init(
+        added: [PlaidTransactionDTO],
+        modified: [PlaidTransactionDTO],
+        removedExternalIds: [String],
+        accountBalances: [PlaidAccountBalance] = []
+    ) {
+        self.added = added
+        self.modified = modified
+        self.removedExternalIds = removedExternalIds
+        self.accountBalances = accountBalances
+    }
 }

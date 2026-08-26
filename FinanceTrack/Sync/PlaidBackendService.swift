@@ -119,10 +119,27 @@ protocol PlaidBackendService {
     /// only non-secret identifiers.
     func exchangePublicToken(_ publicToken: String, institutionId: String?, institutionName: String) async throws -> PlaidExchangeResult
 
-    /// Asks the backend to fetch new/updated/removed transactions since the last sync for ONE
-    /// linked institution. `connectionId` is required — a household account may have more than
-    /// one linked institution, so there's no longer an implicit "the" connection to sync.
+    /// Asks the backend to fetch new/updated/removed transactions already reconciled server-side
+    /// for ONE linked institution (via the webhook-driven or manual-refresh-triggered Item sync
+    /// engine — see `triggerItemTransactionSync` below) since this Item's own delivery watermark.
+    /// This call itself never reaches Plaid — see `sync-transactions/index.ts`'s own header for why
+    /// a single stateful per-Item Plaid cursor can have only one caller, and that caller is no
+    /// longer the iPhone. `connectionId` is required — a household account may have more than one
+    /// linked institution, so there's no longer an implicit "the" connection to sync.
     func syncTransactions(connectionId: String) async throws -> PlaidSyncResult
+
+    /// Asks the backend to force a REAL, immediate Item-level `/transactions/sync` attempt against
+    /// Plaid for ONE linked institution, right now — the explicit-user-action counterpart to the
+    /// webhook-driven background sync that otherwise keeps the server-side mirror current. Callers
+    /// should call this BEFORE `syncTransactions(connectionId:)` when the user has explicitly asked
+    /// for a refresh (see `PlaidConnectionManager.syncAndImportTransactions`); never call it
+    /// automatically on app launch/foreground — that path must only ever pull already-synced state
+    /// via `syncTransactions(connectionId:)` alone (see `PlaidConnectionManager.pullSyncedTransactions`).
+    /// Intentionally best-effort at the call-site level: a failure here (network, Plaid error) is
+    /// never fatal to the follow-up pull, which may still have useful data from an earlier
+    /// webhook-triggered sync. Not rate-limited — this relocates, but does not change the volume
+    /// of, the same Plaid call `syncTransactions` itself used to make directly.
+    func triggerItemTransactionSync(connectionId: String) async throws
 
     /// Asks the backend to refresh account balances for ONE linked institution. Separate from
     /// `syncTransactions` since balance refresh and transaction sync have different natural
@@ -174,6 +191,12 @@ extension PlaidBackendService {
     func createLinkToken() async throws -> String {
         try await createLinkToken(daysRequested: nil)
     }
+
+    /// Default no-op so every existing test double that predates the webhook-driven background
+    /// sync phase (and doesn't care about the "force a real sync now" step) keeps compiling
+    /// unchanged. `SupabasePlaidBackendService` overrides this with the real network call; a test
+    /// double that DOES care (e.g. to assert it was called) can override it too.
+    func triggerItemTransactionSync(connectionId: String) async throws {}
 }
 
 enum PlaidBackendError: FriendlyError {
@@ -311,6 +334,17 @@ struct SupabasePlaidBackendService: PlaidBackendService {
         )
     }
 
+    func triggerItemTransactionSync(connectionId: String) async throws {
+        struct Body: Encodable { let connection_id: String }
+        let response: TriggerItemTransactionSyncResponse = try await post(
+            "sync-item-transactions",
+            body: Body(connection_id: connectionId)
+        )
+        #if DEBUG
+        print("[PlaidBackend] item transaction sync triggered, skipped: \(response.skipped)")
+        #endif
+    }
+
     func syncTransactions(connectionId: String) async throws -> PlaidSyncResult {
         struct Body: Encodable { let connection_id: String }
         let response: SyncTransactionsResponse = try await post("sync-transactions", body: Body(connection_id: connectionId))
@@ -319,11 +353,13 @@ struct SupabasePlaidBackendService: PlaidBackendService {
         print("[PlaidBackend] added count: \(response.transactions.count)")
         print("[PlaidBackend] modified count: \(response.modifiedTransactions.count)")
         print("[PlaidBackend] removed count: \(response.removedTransactionIds.count)")
+        print("[PlaidBackend] account balances count: \(response.accounts.count)")
         #endif
         return PlaidSyncResult(
             added: response.transactions.map(\.asPlaidTransactionDTO),
             modified: response.modifiedTransactions.map(\.asPlaidTransactionDTO),
-            removedExternalIds: response.removedTransactionIds
+            removedExternalIds: response.removedTransactionIds,
+            accountBalances: response.accounts.map { $0.asPlaidAccountBalance() }
         )
     }
 
@@ -541,6 +577,13 @@ private struct DisconnectedResponse: Decodable {
     let disconnected: Bool
 }
 
+/// `sync-item-transactions`'s response — only `skipped` is ever inspected (purely for a DEBUG log
+/// line); the actual synced data is retrieved by the immediately-following `syncTransactions` call,
+/// never decoded from this response.
+private struct TriggerItemTransactionSyncResponse: Decodable {
+    let skipped: Bool
+}
+
 private struct RefreshAccountsResponse: Decodable {
     let connectionId: String
     let accounts: [BackendAccountSummaryDTO]
@@ -680,10 +723,15 @@ private struct SyncTransactionsResponse: Decodable {
     /// don't carry a full transaction object, only the id.
     let removedTransactionIds: [String]
     let nextCursor: String?
+    /// Present (though usually empty) only since the automatic webhook-triggered balance-refresh
+    /// phase — reuses `BackendAccountBalanceDTO`, the exact same per-account shape `sync-balances`
+    /// already decodes, so no new decoding logic exists for this data.
+    let accounts: [BackendAccountBalanceDTO]
     enum CodingKeys: String, CodingKey {
         case transactions, nextCursor = "next_cursor"
         case modifiedTransactions = "modified_transactions"
         case removedTransactionIds = "removed_transaction_ids"
+        case accounts
     }
 
     init(from decoder: Decoder) throws {
@@ -694,6 +742,7 @@ private struct SyncTransactionsResponse: Decodable {
         modifiedTransactions = try container.decodeIfPresent([BackendTransactionDTO].self, forKey: .modifiedTransactions) ?? []
         removedTransactionIds = try container.decodeIfPresent([String].self, forKey: .removedTransactionIds) ?? []
         nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+        accounts = try container.decodeIfPresent([BackendAccountBalanceDTO].self, forKey: .accounts) ?? []
     }
 }
 

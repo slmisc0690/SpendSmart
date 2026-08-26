@@ -27,6 +27,19 @@
 // issued (captured before any query, so nothing that arrives DURING this handler's own execution
 // can be silently skipped by a race between "read" and "mark as delivered").
 //
+// AUTOMATIC CACHED-BALANCE REFRESH (Phase: webhook-triggered balance refresh): the SAME watermark
+// also gates whether this response includes an `accounts` array. syncItemTransactionsForItem now
+// calls the shared `refreshPlaidAccounts` helper once per successful Item-level sync (see that
+// file's own header), which stamps `plaid_accounts.updated_at` for every account under the Item —
+// exactly the same "authoritative account refresh timestamp" column `sync-balances`/
+// `refresh-connected-account` have always used. Reusing `last_transactions_ack_at` as the gate
+// (rather than inventing a second watermark) means a balance snapshot is delivered to the phone
+// exactly once, in the same response as the transaction batch it was refreshed alongside — never
+// on every subsequent poll where nothing changed, which would otherwise make the Dashboard's "Last
+// updated" text mean "last time the phone checked in" instead of "last time Plaid was actually
+// asked." `accounts` is present (though possibly empty) in every response for wire-shape
+// consistency; the iOS client only calls `updateCachedBalances` when it's non-empty.
+//
 // REQUIRES_REAUTH GUARD RETAINED, ENVIRONMENT GUARD REMOVED: requires_reauth is kept, in the exact
 // same condition and response shape as before this phase, since it is a genuine user-facing signal
 // (the iOS client's "needs to be reconnected" prompt) unrelated to whether THIS function happens to
@@ -171,7 +184,9 @@ Deno.serve(async (req) => {
 
     const { data: accountRows, error: accountsError } = await supabase
       .from("plaid_accounts")
-      .select("id, account_id")
+      .select(
+        "id, account_id, name, official_name, mask, type, subtype, current_balance, available_balance, credit_limit, iso_currency_code, unofficial_currency_code, updated_at",
+      )
       .eq("plaid_item_id", item.id);
     if (accountsError) throw accountsError;
 
@@ -181,6 +196,17 @@ Deno.serve(async (req) => {
       internalAccountIdToExternal[row.id as string] = row.account_id as string;
       itemAccountInternalIds.push(row.id as string);
     }
+
+    // Same watermark gate as the transaction/removal queries below — only accounts whose balance
+    // was refreshed since the client's last acknowledged pull (and no later than this request's own
+    // query boundary) are included. See this file's header for why this reuses last_transactions_ack_at
+    // rather than a second watermark.
+    const changedAccounts = (accountRows ?? []).filter((row) => {
+      const updatedAt = row.updated_at as string;
+      if (updatedAt > queryStartedAtIso) return false;
+      if (lastAck !== null && updatedAt <= lastAck) return false;
+      return true;
+    });
 
     let changedRows: NormalizedTransactionRow[] = [];
     let removedTransactionIds: string[] = [];
@@ -261,6 +287,7 @@ Deno.serve(async (req) => {
       connectionId: item.id,
       addedCount: transactions.length,
       removedCount: removedTransactionIds.length,
+      accountCount: changedAccounts.length,
     });
 
     return jsonResponse({
@@ -271,6 +298,22 @@ Deno.serve(async (req) => {
       next_cursor: null,
       modified_count: 0,
       removed_count: removedTransactionIds.length,
+      // Same sanitized per-account shape sync-balances/refresh-connected-account already send —
+      // never access_token, never other Items' data. Money-valued fields as STRINGS (same
+      // reasoning as `transactions[].amount` above).
+      accounts: changedAccounts.map((row) => ({
+        account_id: row.account_id,
+        name: row.name,
+        official_name: row.official_name,
+        mask: row.mask,
+        type: row.type,
+        subtype: row.subtype,
+        current_balance: row.current_balance != null ? String(row.current_balance) : null,
+        available_balance: row.available_balance != null ? String(row.available_balance) : null,
+        credit_limit: row.credit_limit != null ? String(row.credit_limit) : null,
+        iso_currency_code: row.iso_currency_code,
+        unofficial_currency_code: row.unofficial_currency_code,
+      })),
     });
   } catch (error) {
     logSafeError(`sync-transactions failed connection_id=${connectionIdForLogging ?? "unknown"}`, error);

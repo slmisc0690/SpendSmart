@@ -31,6 +31,7 @@ import {
   logSafeError,
   plaidFetch,
   PlaidRequestError,
+  refreshPlaidAccounts,
   SafeError,
 } from "./plaid.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
@@ -46,6 +47,15 @@ export interface ItemTransactionSyncOutcome {
   addedCount: number;
   modifiedCount: number;
   removedCount: number;
+  /** True only when the post-transaction-sync `/accounts/get` balance refresh (see
+   * runClaimedItemSync's own comment) also completed successfully. Deliberately NEVER causes
+   * `success` above to become false — a balance-refresh failure must never make an otherwise-valid,
+   * already-committed transaction sync look like it failed (see this file's own "BALANCE REFRESH"
+   * section). False whenever balance refresh was never attempted at all (skipped/failed
+   * transaction sync) as well as when it was attempted and genuinely failed — callers that need to
+   * distinguish "not attempted" from "attempted and failed" should rely on `success`/`skipped`
+   * first; this field only ever matters when `success` is true. */
+  balanceRefreshSucceeded: boolean;
 }
 
 const SKIPPED_OUTCOME: ItemTransactionSyncOutcome = {
@@ -54,6 +64,7 @@ const SKIPPED_OUTCOME: ItemTransactionSyncOutcome = {
   addedCount: 0,
   modifiedCount: 0,
   removedCount: 0,
+  balanceRefreshSucceeded: false,
 };
 
 const FAILED_OUTCOME: ItemTransactionSyncOutcome = {
@@ -62,6 +73,7 @@ const FAILED_OUTCOME: ItemTransactionSyncOutcome = {
   addedCount: 0,
   modifiedCount: 0,
   removedCount: 0,
+  balanceRefreshSucceeded: false,
 };
 
 /**
@@ -250,6 +262,9 @@ async function runClaimedItemSync(
   }
 
   // Only reached after every page fetched AND every row persisted — see this file's own header.
+  // Transaction sync is now FULLY COMMITTED — the claim is released and the cursor has advanced.
+  // Everything below (the balance refresh) is a separate, best-effort step that can never undo or
+  // invalidate what was just committed.
   const { error: releaseError } = await supabase.rpc("release_item_transaction_sync", {
     p_item_id: itemRowId,
     p_success: true,
@@ -267,11 +282,33 @@ async function runClaimedItemSync(
     removedCount: removed.length,
   });
 
+  // BALANCE REFRESH — automatic cached-balance refresh, added alongside the webhook-driven
+  // transaction sync. Deliberately its OWN try/catch, entirely after the transaction-sync commit
+  // above: a failure here must never roll back, corrupt, or even affect the return value's
+  // `success`/counts — the transaction sync already fully succeeded and that outcome stands
+  // regardless. `refreshPlaidAccounts` (../_shared/plaid.ts) is the SAME helper `sync-balances`/
+  // `refresh-connected-account` already use — it upserts every account under this Item by its
+  // stable Plaid `account_id` and stamps `plaid_accounts.updated_at`, which is already this
+  // project's existing "authoritative account refresh timestamp" (surfaced today via
+  // `SharedConnectedAccountDTO.updatedAt` for shared accounts). No new column, no new migration:
+  // sync-transactions/index.ts reads that same `updated_at` (gated by the existing
+  // `last_transactions_ack_at` watermark) to decide when to hand the iPhone a fresh balance
+  // snapshot. No retry bookkeeping is needed here — this Item's next successful transaction sync
+  // (whether webhook- or manual-refresh-triggered) will simply attempt this same step again.
+  let balanceRefreshSucceeded = false;
+  try {
+    await refreshPlaidAccounts(supabase, item.id, item.access_token);
+    balanceRefreshSucceeded = true;
+  } catch (balanceError) {
+    logSafeError(`sync-item-transactions: post-sync balance refresh failed item_row_id=${itemRowId}`, balanceError);
+  }
+
   return {
     skipped: false,
     success: true,
     addedCount: added.length,
     modifiedCount: modified.length,
     removedCount: removed.length,
+    balanceRefreshSucceeded,
   };
 }

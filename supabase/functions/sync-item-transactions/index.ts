@@ -90,6 +90,7 @@ Deno.serve(async (req) => {
       added_count: outcome.addedCount,
       modified_count: outcome.modifiedCount,
       removed_count: outcome.removedCount,
+      balance_refresh_succeeded: outcome.balanceRefreshSucceeded,
     });
   } catch (error) {
     logSafeError(`sync-item-transactions failed connection_id=${typeof connection_id === "string" ? connection_id : "unknown"}`, error);

@@ -235,6 +235,39 @@ struct DashboardView: View {
         await SavingsSummarySyncService.sync(entries: savingsEntries)
     }
 
+    /// WEBHOOK-DRIVEN BACKGROUND TRANSACTION SYNC — PULL-ONLY, PHASE 4: brings in whatever the
+    /// server-side Item-sync engine (webhook-triggered, or a prior manual refresh) has already
+    /// reconciled, on every Dashboard appear/foreground-return, WITHOUT ever asking Plaid to
+    /// contact an institution itself. This is the ONLY automatic trigger for
+    /// `PlaidConnectionManager.pullSyncedTransactions` in the entire app — deliberately calls that
+    /// method and NEVER `syncAndImportTransactions`/`triggerItemTransactionSync`, so opening or
+    /// foregrounding SpendSmart can never itself cause a real Plaid API call (confirmed by this
+    /// project's own Phase 0 cost audit as the specific behavior to avoid). Not gated on
+    /// `isSecondary` — Connected Accounts are per-owning-user, not a Primary-only shared aggregate
+    /// like the sibling `syncSavingsSummaryIfNeeded`/`syncDashboardSummaryIfNeeded` above, so a
+    /// Secondary's own Connected Accounts benefit from this exactly the same way a Primary's do.
+    /// A connection already flagged `requiresReauth` is skipped — pulling would only ever return a
+    /// 409 sync-transactions already treats as a no-op-worthy signal elsewhere, so skipping avoids
+    /// a wasted round-trip. Best-effort per connection: one connection's failure (network, a
+    /// transient decode error) never blocks any other connection's own pull, and none of this ever
+    /// surfaces a raw error to the user — the exact same "silent, retried next time" posture this
+    /// file's other `...IfNeeded` methods already use.
+    private func pullSyncedTransactionsForConnectedAccountsIfNeeded() async {
+        guard !Task.isCancelled else { return }
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        for connection in plaidConnection.connections where !connection.requiresReauth {
+            guard !Task.isCancelled else { return }
+            do {
+                try await plaidConnection.pullSyncedTransactions(connectionId: connection.id, context: modelContext)
+            } catch {
+                #if DEBUG
+                print("[DashboardView] pullSyncedTransactions failed for connection \(connection.id) (non-fatal): \(error)")
+                #endif
+            }
+        }
+    }
+
     /// SAVED VIA TRANSFER SHARING — reconciles the server's Saved-via-Transfer aggregate whenever
     /// this Primary's Dashboard loads/returns to the foreground, mirroring
     /// `syncSavingsSummaryIfNeeded`'s own trigger/no-op-for-Secondary/teardown-safety posture
@@ -532,11 +565,15 @@ struct DashboardView: View {
             .task {
                 await syncSavedViaTransferSummaryIfNeeded()
             }
+            .task {
+                await pullSyncedTransactionsForConnectedAccountsIfNeeded()
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     Task { await syncSavingsSummaryIfNeeded() }
                     Task { await syncDashboardSummaryIfNeeded() }
                     Task { await syncSavedViaTransferSummaryIfNeeded() }
+                    Task { await pullSyncedTransactionsForConnectedAccountsIfNeeded() }
                     // SHARED USER REFRESH PARITY — re-pulls the Secondary's own shared Dashboard
                     // aggregate on foreground-return, same trigger the Primary's own push above
                     // already uses. A no-op for a Primary (`secondaryOutlookPrimaryUserId` is nil,

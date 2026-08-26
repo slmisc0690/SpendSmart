@@ -474,6 +474,15 @@ final class PlaidConnectionManager {
     /// applied once above the TabView both Dashboard and Activity live in) for SwiftData's `@Query`
     /// change notification to reach Activity reliably. Every caller of this method inherits that
     /// guarantee automatically instead of having to re-derive it per call site.
+    ///
+    /// FORCE + PULL (webhook-driven background sync phase): internally now forces a real,
+    /// immediate Item-level Plaid check (`triggerItemTransactionSync`, best-effort — a failure
+    /// there is never fatal, see its own doc comment) and then pulls whatever is now reconciled
+    /// server-side (`pullSyncedTransactions`, below). This is the SAME two-call sequence, and
+    /// therefore the SAME Plaid call volume, every one of the call sites above already made before
+    /// this phase — only WHERE the Plaid call physically happens moved (server-side, inside the
+    /// shared Item-sync engine), never whether or how often it can be made. Never call this
+    /// automatically on app launch/foreground — see `pullSyncedTransactions` for that path.
     @MainActor
     @discardableResult
     func syncAndImportTransactions(
@@ -481,7 +490,47 @@ final class PlaidConnectionManager {
         context: ModelContext,
         backend: PlaidBackendService = SupabasePlaidBackendService()
     ) async throws -> PlaidTransactionImportService.SyncOutcome {
+        do {
+            try await backend.triggerItemTransactionSync(connectionId: connectionId)
+        } catch {
+            // Logged only, never propagated — see this method's own doc comment. A failure here
+            // (network, Plaid error, or the Item genuinely requiring reauth) still lets the
+            // following pull surface the correct signal on its own (sync-transactions' own
+            // requires_reauth check throws exactly the same PlaidBackendError.requiresReauth this
+            // method's callers already handle), so nothing is lost by not re-surfacing it here too.
+            #if DEBUG
+            print("[PlaidConnectionManager] triggerItemTransactionSync failed (non-fatal, proceeding to pull): \(error)")
+            #endif
+        }
+        return try await pullSyncedTransactions(connectionId: connectionId, context: context, backend: backend)
+    }
+
+    /// PULL-ONLY — reads whatever the webhook-driven background sync (or a prior manual refresh)
+    /// has already reconciled server-side, WITHOUT ever asking Plaid to contact the institution
+    /// again. This is the ONLY transaction-sync method safe to call automatically (e.g. on app
+    /// foreground) — see `DashboardView`'s `scenePhase` handling, the sole automatic call site.
+    /// Manual refresh and post-Link/reconnect flows must use `syncAndImportTransactions` above
+    /// instead, which forces a real check first.
+    @MainActor
+    @discardableResult
+    func pullSyncedTransactions(
+        connectionId: String,
+        context: ModelContext,
+        backend: PlaidBackendService = SupabasePlaidBackendService()
+    ) async throws -> PlaidTransactionImportService.SyncOutcome {
         let syncResult = try await backend.syncTransactions(connectionId: connectionId)
+        // AUTOMATIC CACHED-BALANCE REFRESH — present only when the server-side Item-sync engine's
+        // post-sync `/accounts/get` step (see itemTransactionSync.ts) refreshed this Item's balances
+        // since this device's last acknowledged pull; empty on most calls. Reuses the exact same
+        // `updateCachedBalances` every manual balance refresh already writes to, so the Dashboard's
+        // existing "Last updated" text (driven by `CachedPlaidAccountBalance.updatedAt`) picks this
+        // up automatically with no new display code. Applied BEFORE `applySync` purely so a
+        // transaction-import failure below can never prevent an already-received balance update
+        // from taking effect — mirrors `refreshAccountBalanceAndTransactions`'s own
+        // balance-before-transactions ordering rationale.
+        if !syncResult.accountBalances.isEmpty {
+            updateCachedBalances(connectionId: connectionId, balances: syncResult.accountBalances)
+        }
         let outcome = try PlaidTransactionImportService.applySync(syncResult, context: context)
         // AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — deliberately NO post-import step here. Newly
         // imported transactions are picked up automatically by the canonical, READ-ONLY
