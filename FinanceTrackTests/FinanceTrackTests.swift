@@ -31224,21 +31224,38 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(scoped.contains("modelContext.rollback()"), "rollback() was proven not to restore the balance mutation — it must not be used")
     }
 
-    /// PROOF (not assumption) that `ModelContext.rollback()` does NOT restore an in-place property
-    /// mutation on an already-tracked `@Model` object in this SwiftData environment — this is WHY
-    /// `submit()` uses explicit delete + balance-reset instead. `AccountBalanceManager.applyExpense`
-    /// mutates `account.currentBalance` directly; after `rollback()`, that mutation is confirmed to
-    /// remain in effect even though the newly-inserted `FinanceTransaction` objects ARE correctly
-    /// discarded. This is a genuine, empirically-verified finding from this task's own required
-    /// investigation, kept here as a permanent regression lock against ever reintroducing a
-    /// rollback()-only "fix."
+    /// SDK-DEPENDENT BEHAVIOR OBSERVATION, NOT A PRODUCTION DEPENDENCY — this test previously
+    /// asserted (as `testRollbackDoesNotRestoreAccountBalanceMutation`) that `ModelContext.rollback()`
+    /// does NOT restore an in-place property mutation on an already-tracked `@Model` object. Under
+    /// the current SDK/runtime (iOS 27 simulator, confirmed by 10 consecutive deterministic runs
+    /// during the Plaid webhook validation-blockers investigation, 2026-08-24) that is no longer
+    /// true: `rollback()` now DOES restore `account.currentBalance` to its last-saved checkpoint,
+    /// alongside correctly discarding the never-saved transaction inserts (which it already did
+    /// before). This is a genuine Apple-side behavior change, not a SpendSmart regression — verified
+    /// by direct git-diff inspection that no Plaid webhook work, and no Pay Bills production file,
+    /// changed in the same window this behavior shifted.
+    ///
+    /// RENAMED (from `testRollbackDoesNotRestoreAccountBalanceMutation`) rather than deleted, per
+    /// this project's own standing instruction to never silently drop a failing test to turn the
+    /// suite green — the prior name asserted a now-false claim, so keeping it unrenamed while
+    /// flipping its assertion would misrepresent what is actually being proven here.
+    ///
+    /// WHY THIS DOESN'T MATTER FOR PRODUCTION: `submit()` (PayBillsView.swift) was already changed,
+    /// independently of whatever `rollback()` happens to do on any given SDK, to use its own
+    /// explicit recovery (capture original balance, track only this attempt's created transactions,
+    /// on failure delete exactly those and reset the captured balance) — see
+    /// `testPayBillsSubmitUsesExplicitRecoveryNotRollback` (confirms `submit()` never calls
+    /// `rollback()`) and `testExplicitRecoveryRestoresTransactionsAndBalanceOnSaveFailure` (proves
+    /// the actual mechanism production uses). This test exists only to document current framework
+    /// behavior for future readers — it is deliberately NOT a regression lock in either direction,
+    /// since SpendSmart's own correctness has never depended on which way `rollback()` behaves.
     @MainActor
-    func testRollbackDoesNotRestoreAccountBalanceMutation() throws {
+    func testRollbackBehaviorOnCurrentSDKRestoresBalanceButProductionDoesNotDependOnIt() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let storeURL = tempDir.appendingPathComponent("pay-bills-rollback-proof-test.store")
+        let storeURL = tempDir.appendingPathComponent("pay-bills-rollback-observation-test.store")
         let schema = Schema([Account.self, FinanceTransaction.self, RecurringExpense.self, Category.self])
         let config = ModelConfiguration(schema: schema, url: storeURL, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: [config])
@@ -31256,8 +31273,50 @@ final class FinanceTrackTests: XCTestCase {
 
         context.rollback()
 
-        XCTAssertEqual(try context.fetch(FetchDescriptor<FinanceTransaction>()).count, 0, "rollback DOES correctly discard the never-saved transaction inserts")
-        XCTAssertEqual(account.currentBalance, 4104, "rollback does NOT restore the balance mutation — this is exactly the gap submit()'s explicit recovery closes")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<FinanceTransaction>()).count, 0, "rollback correctly discards the never-saved transaction inserts")
+        XCTAssertEqual(account.currentBalance, 5000, "current-SDK observation: rollback() now restores the in-place balance mutation back to the last-saved checkpoint — see this test's own doc comment for why production correctness never depended on this either way")
+    }
+
+    /// REQUIRED PAY BILLS RECOVERY PROOF (historical + unrelated data isolation): a failed batch's
+    /// explicit recovery must never touch anything outside what THIS attempt itself created —
+    /// neither a pre-existing ("historical") transaction on the SAME account, nor a completely
+    /// unrelated account and its own transaction/balance. Simulates submit()'s exact catch-block
+    /// recovery (delete only this attempt's own created transactions, reset only this attempt's own
+    /// captured balance) rather than re-deriving new recovery logic.
+    @MainActor
+    func testFailedPayBillsBatchLeavesHistoricalAndUnrelatedDataUntouched() throws {
+        let context = makePayBillsTestContext()
+
+        let account = makePayBillsAccount(balance: 5000)
+        context.insert(account)
+        let historical = FinanceTransaction(amount: 42, date: day(2026, 1, 1), type: .expense, source: .manual, note: "Old Entry", account: account)
+        context.insert(historical)
+
+        let unrelatedAccount = Account(name: "Vacation Savings", type: .savings, currentBalance: 1500)
+        context.insert(unrelatedAccount)
+        let unrelatedTransaction = ManualTransactionCreationService.createExpense(amount: 30, date: .now, note: "Unrelated withdrawal", account: unrelatedAccount, category: nil, context: context)
+        try context.save() // establish the checkpoint the failed batch below must never disturb
+
+        let originalBalance = account.currentBalance
+        let bills: [(String, Decimal)] = [("ADT", 25), ("Water & Sewer", 60), ("Car Payment", 811)]
+        var created: [FinanceTransaction] = []
+        for (name, amount) in bills {
+            created.append(ManualTransactionCreationService.createExpense(amount: amount, date: .now, note: name, account: account, category: nil, context: context))
+        }
+
+        // Simulate submit()'s catch block exactly — see PayBillsView.swift's own submit().
+        for transaction in created {
+            context.delete(transaction)
+        }
+        account.currentBalance = originalBalance
+
+        XCTAssertEqual(account.currentBalance, 5000, "the account this failed batch targeted must return to its exact pre-submit balance")
+        XCTAssertEqual(unrelatedAccount.currentBalance, 1470, "an unrelated account's balance (1500 minus its own already-saved, legitimate $30 withdrawal) must be completely untouched by another account's failed batch")
+
+        let remaining = try context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertEqual(remaining.count, 2, "only the pre-existing historical + unrelated transactions survive — every transaction the failed batch created must be gone")
+        XCTAssertTrue(remaining.contains { $0.note == "Old Entry" && $0.amount == 42 }, "the historical transaction on the SAME account must survive a failed batch completely unchanged")
+        XCTAssertTrue(remaining.contains { $0.id == unrelatedTransaction.id && $0.amount == 30 }, "an unrelated account's own transaction must survive a failed batch on a different account completely unchanged")
     }
 
     /// Proves the ACTUAL recovery mechanism `submit()` uses (delete created transactions + reset

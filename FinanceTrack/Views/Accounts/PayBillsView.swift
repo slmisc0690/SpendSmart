@@ -270,13 +270,15 @@ struct PayBillsView: View {
     /// Withdrawal produces), then a single explicit `context.save()` for the whole batch.
     ///
     /// FAILURE/RECOVERY CORRECTION — `ModelContext.rollback()` was investigated first (per this
-    /// task's own preferred narrow solution) and PROVEN, via
-    /// `testRollbackRevertsUncommittedInsertsAndBalanceMutation`, to NOT restore an in-place
-    /// property mutation on an already-tracked `@Model` object (`account.currentBalance` stayed at
-    /// its post-batch value after `rollback()`, even though newly-inserted objects were correctly
-    /// discarded) — so `rollback()` alone is unsafe here and is deliberately NOT used. Instead, the
-    /// original balance is captured before the loop and every transaction this attempt creates is
-    /// tracked; on a `save()` failure, exactly those transactions are deleted and the balance is
+    /// task's own preferred narrow solution). At the time, it was empirically found to NOT restore
+    /// an in-place property mutation on an already-tracked `@Model` object; on a later SDK this
+    /// behavior was found to have changed (see
+    /// `testRollbackBehaviorOnCurrentSDKRestoresBalanceButProductionDoesNotDependOnIt`'s own doc
+    /// comment for the full history) — but this code was never revised back to depend on it either
+    /// way, since relying on undocumented, SDK-version-dependent framework behavior for a money
+    /// balance would be fragile regardless of which direction it currently happens to go. Instead,
+    /// the original balance is captured before the loop and every transaction this attempt creates
+    /// is tracked; on a `save()` failure, exactly those transactions are deleted and the balance is
     /// reset to its captured original value — both directly on this same live context, so the
     /// register list and balance the user is looking at update immediately, without a second
     /// save() attempt (which could fail again for the same underlying reason). This is the
