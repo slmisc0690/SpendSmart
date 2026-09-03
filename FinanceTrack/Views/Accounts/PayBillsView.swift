@@ -168,6 +168,20 @@ struct PayBillsView: View {
                 }
                 .padding(.vertical, Theme.Spacing.lg)
             }
+            // PAY BILLS KEYBOARD-DISMISSAL FIX — the ONE screen in this app with live text entry
+            // inside a `ScrollView` that was missing this modifier (12 other screens —
+            // `AddExpenseView`, `AddAccountView`, `BalanceAdjustmentView`,
+            // `AddEditRecurringExpenseView`, `CreditCardPaymentView`, etc. — already set it).
+            // Without it, this `ScrollView` uses SwiftUI's default (non-`.interactively`) keyboard
+            // dismiss behavior, under which a mere CONTENT/LAYOUT change while the keyboard is up
+            // — exactly what happens every keystroke here, since `totalSection` re-renders a
+            // live-recalculated `selectedBillsTotal` string of a different width right below the
+            // row being edited — can be misinterpreted as a reason to dismiss the keyboard, even
+            // with no actual user drag gesture. `.interactively` ties dismissal strictly to the
+            // user's own scroll-drag gesture, matching the guarantee Part 6 of this fix requires:
+            // the keyboard must close ONLY because the user deliberately scrolls/taps away, never
+            // because an amount value changed.
+            .scrollDismissesKeyboard(.interactively)
         }
     }
 

@@ -8,6 +8,11 @@ struct DashboardView: View {
     @Query private var recurringExpenses: [RecurringExpense]
     @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
     @Query private var savingsEntries: [SavingsEntry]
+    /// TWO-LINE FAVORITES PHASE — resolves the `.checkingRegister` Favorite to a real `Account` (see
+    /// `handleFavoriteSelection(_:)`); never filtered to `.checking`-typed accounts only, since
+    /// Scott picks the specific account himself (Part 6 audit found no reliable way to infer "the"
+    /// checking account automatically, and no reason to assume he has only one).
+    @Query(sort: \Account.createdAt) private var manualAccounts: [Account]
     /// Sorted deterministically (`\.id`), matching `FavoritesConfigurationView`'s own identically-
     /// sorted `@Query` — a proven real-device bug had these two screens each resolving `.first`
     /// against an UNSORTED query, so if more than one `FavoritesSettings` row ever existed
@@ -24,10 +29,6 @@ struct DashboardView: View {
     @State private var isPresentingQuickStatsConfiguration = false
 
     @Environment(PrivacyModeManager.self) private var privacyMode
-    /// LOCK ICON (2026-08-18) — read-only here; only used to decide whether the header's lock
-    /// icon appears at all (mirrors `SettingsView`'s own `if requireFaceIDSetting` condition for
-    /// its "Lock Now" button) and to trigger an immediate `lock()` when tapped.
-    @Environment(BiometricAuthManager.self) private var biometricAuth
     @Environment(PlaidConnectionManager.self) private var plaidConnection
     @Environment(\.modelContext) private var modelContext
     #if DEBUG
@@ -49,7 +50,6 @@ struct DashboardView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isPresentingAddExpense = false
-    @State private var isPresentingSettings = false
     @State private var isPresentingActivity = false
     @State private var isPresentingMonthlyOutlookBreakdown = false
     @State private var isPresentingExcludeTransactionsPicker = false
@@ -57,6 +57,14 @@ struct DashboardView: View {
     /// `.sheet(item:)` below (`destinationView(for:)`), which routes to each destination's existing
     /// canonical view unmodified. Never a second copy of any of those screens' own logic.
     @State private var presentedFavoriteDestination: FavoriteDestinationID?
+    /// TWO-LINE FAVORITES PHASE — non-`nil` while the "Checking Register" Favorite's account picker
+    /// is presented, shown either because no target has been configured yet or because the
+    /// previously-configured account no longer exists (see `handleFavoriteSelection(_:)`).
+    @State private var isPresentingCheckingRegisterPicker = false
+    /// TWO-LINE FAVORITES PHASE — the resolved target for the "Checking Register" Favorite; drives
+    /// its own `.sheet(item:)` presenting `ManualAccountDetailView` directly — the exact same
+    /// canonical register screen `AccountListView` itself opens, never a duplicate.
+    @State private var checkingRegisterTargetAccount: Account?
     @State private var selectedWeekIndex: Int?
     /// nil means "no explicit choice yet" — `effectiveActivityTab` below falls back to
     /// `ActivityTabPresenter.defaultTab`, same pattern as `selectedWeekIndex`/`effectiveWeekIndex`.
@@ -98,6 +106,46 @@ struct DashboardView: View {
         return favorites.validDestinationIDs.filter {
             FavoriteDestinationID.isEligible($0, accountRelatedOptionsVisibility: accountRelatedOptionsViewModel.visibility)
         }
+    }
+
+    /// TWO-LINE FAVORITES PHASE — every non-archived Manual Account, the candidate list for the
+    /// "Checking Register" Favorite's account picker. Deliberately not filtered to `.checking`-typed
+    /// accounts (Part 6 audit: no reliable signal exists for "the" checking account, and Scott may
+    /// have more than one) — he picks the specific account himself.
+    private var checkingRegisterCandidateAccounts: [Account] {
+        manualAccounts.filter { !$0.isArchived }
+    }
+
+    /// TWO-LINE FAVORITES PHASE — the ONE place tapping a Favorite is handled, so `.checkingRegister`
+    /// (which needs a real `Account` resolved first, unlike every other stateless destination) can
+    /// be special-cased here rather than inside `FavoritesBarView`/`favoriteDestinationView(for:)`.
+    /// A missing/unconfigured/deleted target all safely fall through to the SAME picker — there is
+    /// no separate "broken favorite" error state, just a re-prompt.
+    private func handleFavoriteSelection(_ destination: FavoriteDestinationID) {
+        guard destination == .checkingRegister else {
+            presentedFavoriteDestination = destination
+            return
+        }
+        if let targetID = favoritesSettingsList.first?.checkingRegisterAccountID,
+           let account = checkingRegisterCandidateAccounts.first(where: { $0.id == targetID }) {
+            checkingRegisterTargetAccount = account
+        } else {
+            isPresentingCheckingRegisterPicker = true
+        }
+    }
+
+    /// TWO-LINE FAVORITES PHASE — the one explicit, user-visible-context mutation of
+    /// `FavoritesSettings` this screen ever performs (see `favoriteDestinations`'s own header for
+    /// why the Dashboard otherwise never writes to it): choosing an account from
+    /// `CheckingRegisterAccountPickerView` is a deliberate tap, not a passive render side effect,
+    /// exactly like `FavoritesConfigurationView`'s own mutation call sites — so it goes through the
+    /// same canonical `resolveCanonicalRecord`.
+    private func selectCheckingRegisterAccount(_ account: Account) {
+        let record = FavoritesSettings.resolveCanonicalRecord(existing: favoritesSettingsList, in: modelContext)
+        record.setCheckingRegisterAccount(account.id)
+        try? modelContext.save()
+        isPresentingCheckingRegisterPicker = false
+        checkingRegisterTargetAccount = account
     }
 
     /// MONTH-ALIGNED FOUR-WEEK CORRECTION — This Week is always one of exactly 4 month-aligned
@@ -534,9 +582,6 @@ struct DashboardView: View {
             .sheet(isPresented: $isPresentingAddExpense) {
                 AddExpenseView()
             }
-            .sheet(isPresented: $isPresentingSettings) {
-                SettingsView(isModal: true)
-            }
             .sheet(isPresented: $isPresentingActivity) {
                 // Reuses the existing full Activity screen (ExpenseListView) rather than building
                 // a second one — presented modally, matching every other Dashboard destination in
@@ -552,6 +597,16 @@ struct DashboardView: View {
             }
             .sheet(item: $presentedFavoriteDestination) { destination in
                 favoriteDestinationView(for: destination)
+            }
+            .sheet(isPresented: $isPresentingCheckingRegisterPicker) {
+                CheckingRegisterAccountPickerView(accounts: checkingRegisterCandidateAccounts) { account in
+                    selectCheckingRegisterAccount(account)
+                }
+            }
+            .sheet(item: $checkingRegisterTargetAccount) { account in
+                // TWO-LINE FAVORITES PHASE — the exact same canonical register destination
+                // `AccountListView` itself opens for this account, never a duplicate.
+                ManualAccountDetailView(account: account)
             }
             .sheet(isPresented: $isPresentingExcludeTransactionsPicker) {
                 ExcludeTransactionsView()
@@ -618,9 +673,27 @@ struct DashboardView: View {
                 Text(DateRangeHelper.monthDisplayText(for: monthInterval))
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
-                Text("SpendSmart")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.textPrimary)
+                // PHASE 2B VISUAL ASSETS — the rendered "SpendSmart" text title is replaced by
+                // Scott's supplied title.png artwork (`SpendSmartTitle` asset, byte-identical copy
+                // — see this asset's own Contents.json `template-rendering-intent: original`).
+                // `.scaledToFit()` preserves the source image's own aspect ratio, never stretched.
+                // `.accessibilityLabel` keeps VoiceOver announcing "SpendSmart", matching the exact
+                // spoken text before this change.
+                //
+                // PHASE 2B VISUAL FIX — raised from the initial 32pt (which read as too small/
+                // timid on a physical device) to 42pt so the title reads as the app's main title
+                // and is clearly, visually larger than the "Your spending at a glance" subtitle
+                // below it (`Theme.captionFont`, ~12pt) — confirmed via pixel-content-bounds
+                // analysis that `SpendSmartTitle`'s artwork already fills ~97% of its own canvas
+                // height (negligible internal padding), so this frame height maps almost directly
+                // to visible ink height, landing at the top of the requested "34–42pt text-title
+                // presence" target for maximum title dominance.
+                Image("SpendSmartTitle")
+                    .resizable()
+                    .renderingMode(.original)
+                    .scaledToFit()
+                    .frame(height: 42)
+                    .accessibilityLabel("SpendSmart")
                 Text("Your spending at a glance")
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textSecondary)
@@ -628,20 +701,8 @@ struct DashboardView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
                 HStack(spacing: Theme.Spacing.sm) {
-                    // LOCK ICON (2026-08-18) — only shown once Face ID is actually required,
-                    // same condition Settings' own "Lock Now" button already uses; tapping it
-                    // locks immediately, same as that button.
-                    if biometricAuth.isFaceIDRequired {
-                        HeaderIconButton(systemName: "lock.fill") {
-                            biometricAuth.lock()
-                        }
-                        .accessibilityLabel("Lock Now")
-                    }
                     HeaderIconButton(systemName: privacyMode.isEnabled ? "eye.slash.fill" : "eye.fill") {
                         privacyMode.toggle()
-                    }
-                    HeaderIconButton(systemName: "gearshape.fill") {
-                        isPresentingSettings = true
                     }
                 }
                 HStack(spacing: Theme.Spacing.xs) {
@@ -688,6 +749,19 @@ struct DashboardView: View {
     /// capsule's own center at every favorite count (1 through the 6-item maximum), since the
     /// capsule's content-driven width still centers within that same space regardless of how many
     /// buttons it holds.
+    ///
+    /// STABLE-CENTERING ARCHITECTURE — no more `GeometryReader`/`PreferenceKey`/`.onPreferenceChange`
+    /// round-trip here at all. That machinery existed only to feed `FavoritesBarView` a
+    /// device-measured width so it could decide, one layout pass LATE, between two mutually-
+    /// exclusive body branches (a manually-centered capsule vs. a plain leading-aligned
+    /// `ScrollView`) — and that one-pass delay was the actual, physically-confirmed root cause of
+    /// Scott's "pill loads centered, then jumps left" report: the branch could flip (or the
+    /// centering math could recompute against a now-stale width) AFTER the first, already-centered
+    /// frame had drawn. `FavoritesBarView` now measures its own available width directly, in the
+    /// SAME layout pass it renders in (see that type's own `STABLE-CENTERING ARCHITECTURE` header),
+    /// so there is nothing left for Dashboard to measure or hand down, and no second render to jump
+    /// during. `.frame(maxWidth: .infinity)` on the heading Text below is untouched — it's still
+    /// what makes the heading itself fill/center within the same content width the pill measures.
     @ViewBuilder
     private var favoritesBarSection: some View {
         if !favoriteDestinations.isEmpty {
@@ -698,10 +772,17 @@ struct DashboardView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, Theme.Spacing.lg)
 
+                // FAVORITES LAYOUT CORRECTION — leading/trailing inset reduced to
+                // `FavoritesBarLayout.dashboardHorizontalPadding` (16pt, down from the 24pt the
+                // "Favorites" heading above still uses) per Scott's explicit "content should
+                // start slightly farther left" instruction — the bar's own inset only, not every
+                // other Dashboard section's margin. Applied BEFORE `FavoritesBarView`'s own internal
+                // `GeometryReader` measures its available width, so that measurement already
+                // reflects this inset — never double-counted, never ignored.
                 FavoritesBarView(destinations: favoriteDestinations) { destination in
-                    presentedFavoriteDestination = destination
+                    handleFavoriteSelection(destination)
                 }
-                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.horizontal, FavoritesBarLayout.dashboardHorizontalPadding)
             }
             .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.92)))
         }
@@ -710,18 +791,42 @@ struct DashboardView: View {
     /// Routes to each destination's existing canonical view, completely unmodified — never a
     /// second copy of any of these screens' own logic/data ownership. Matches exactly what
     /// `SettingsView` itself already presents for the same five sheets (`MonthlyPlanEntryView`,
-    /// `ConnectedAccountsView`, `AccountRelatedOptionsView`, `DataBackupView`, `InsightsView`) plus
-    /// `AddSavingsEntryView` (canonically sheet-presented from `MonthlyPlanView`, and equally safe
-    /// to present standalone here since it takes no parameters and owns no external state).
+    /// `ConnectedAccountsView`, `AccountRelatedOptionsView`, `DataBackupView`, `AskSpendSmartView`)
+    /// plus `AddSavingsEntryView` (canonically sheet-presented from `MonthlyPlanView`, and equally
+    /// safe to present standalone here since it takes no parameters and owns no external state).
+    ///
+    /// ASK SPENDSMART PHASE — `.insights` now routes to `AskSpendSmartView`, the always-available
+    /// conversational assistant, replacing the old preset-question `InsightsView` (left in the
+    /// repository, unreferenced, per that phase's own decision — see its own header comment).
     @ViewBuilder
     private func favoriteDestinationView(for destination: FavoriteDestinationID) -> some View {
         switch destination {
         case .monthlyPlan: MonthlyPlanEntryView()
-        case .addToSavings: AddSavingsEntryView()
+        // PHASE 2B VISUAL FIX — `.addToSavings` is never reached via the canonical display path
+        // (`FavoritesSettings.validDestinationIDs` always maps it to `.monthlyPlan` first — see
+        // `FavoriteDestinationID.canonicalDisplayDestination`); this branch exists only for switch
+        // exhaustiveness and as a defensive fallback if ever called directly, routing to the same
+        // canonical Monthly Plan destination its favorite now collapses into.
+        case .addToSavings: MonthlyPlanEntryView()
         case .connectedAccounts: ConnectedAccountsView()
         case .accountSharing: AccountRelatedOptionsView()
         case .backup: DataBackupView()
-        case .insights: InsightsView()
+        case .insights: AskSpendSmartView(screenContext: .dashboard)
+        // SETTINGS ORGANIZATION PHASE — Profile/Account route to their own canonical destination
+        // screens (same views `Settings ▸ Profile`/`Settings ▸ Account` open — no duplicate
+        // implementation). Tools has no destination screen of its own, so it opens the canonical
+        // `SettingsView` itself, tagged to scroll straight to the Tools section — see
+        // `SettingsScrollTarget`'s own header.
+        case .profile: AccountView()
+        case .account: AccountSettingsView()
+        case .tools: SettingsView(isModal: true, scrollTarget: .tools)
+        // TWO-LINE FAVORITES PHASE — `.checkingRegister` is never reached via this path in
+        // practice: `handleFavoriteSelection(_:)` intercepts it before it ever reaches
+        // `presentedFavoriteDestination` (it needs a real, user-chosen `Account`, which this
+        // parameterless view builder has no way to supply). This branch exists only for switch
+        // exhaustiveness and as a defensive fallback — Manual Accounts is the closest parameterless
+        // equivalent if it were ever invoked directly.
+        case .checkingRegister: AccountListView()
         }
     }
 

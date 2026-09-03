@@ -5,6 +5,22 @@ import Foundation
 /// takes the resulting `DateInterval` as input rather than computing its own.
 enum DateRangeHelper {
 
+    /// The single calendar day containing `referenceDate` — midnight to the following midnight,
+    /// `end` exclusive. THE canonical half-open single-day boundary in this app — every existing
+    /// call site that needs "does this Date fall on day X" (`DailyTransactionTotals.genericGroups`,
+    /// `ExpenseListView`, `WeeklyBudgetView`, `MonthlySummaryView`) independently hand-rolls this
+    /// exact `startOfDay` + `byAdding: .day` shape; new code should call this instead of
+    /// reimplementing it a fifth time. Added for the Ask SpendSmart transaction-search reliability
+    /// fix, whose prior bug was comparing a transaction's full timestamp against a bare end-of-range
+    /// `Date` at literal midnight (`transaction.date > endDate`) — which incorrectly excluded any
+    /// transaction later than midnight on its own end day. Always use `dayRangeContaining(_:).end`
+    /// as an EXCLUSIVE upper bound, never the raw parsed end date itself.
+    static func dayRangeContaining(_ referenceDate: Date, calendar: Calendar = .current) -> DateInterval {
+        let start = calendar.startOfDay(for: referenceDate)
+        let end = calendar.date(byAdding: .day, value: 1, to: start) ?? referenceDate
+        return DateInterval(start: start, end: end)
+    }
+
     /// The 7-day range containing `referenceDate`, starting Sunday or Monday depending on
     /// `weekStartsOnSunday` (from `BudgetSettings.weekStartsOnSunday`). `end` is exclusive
     /// (the instant the following week begins).

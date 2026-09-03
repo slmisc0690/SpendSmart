@@ -17,6 +17,7 @@ struct WeeklyBudgetView: View {
     @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
     @State private var isPresentingEditLimit = false
+    @State private var isPresentingAskSpendSmart = false
     @State private var selectedFilter: WeeklyBreakdownFilter = .manualTransactions
     /// nil means "no explicit choice yet" — falls back to the first available connected account,
     /// same pattern `ExpenseListView`/`DashboardView` use for their own tab selection.
@@ -263,6 +264,9 @@ struct WeeklyBudgetView: View {
             .sheet(isPresented: $isPresentingEditLimit) {
                 WeeklyLimitEditView(limit: weeklyLimit)
             }
+            .sheet(isPresented: $isPresentingAskSpendSmart) {
+                AskSpendSmartView(screenContext: .weekly)
+            }
             .task(id: secondaryDashboardSummaryLoadKey) {
                 await loadDashboardSummaryIfNeeded()
             }
@@ -286,6 +290,14 @@ struct WeeklyBudgetView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             Spacer()
+            // SPENDAI UI PLACEMENT CORRECTION — top-right header control, artwork ABOVE the
+            // "SpendAI" label (never beside it), noticeably larger than the prior bare 18pt
+            // glyph while staying a compact header control. Uses the ONE shared
+            // `SpendAILauncherControl` (never a per-screen duplicate) — see that component's own
+            // header. The existing Info control immediately below is untouched.
+            SpendAILauncherControl(glyphSize: 32) {
+                isPresentingAskSpendSmart = true
+            }
             InfoButton(title: "About Weekly Budget", explanation: Self.infoExplanation)
                 .padding(.top, 6)
         }

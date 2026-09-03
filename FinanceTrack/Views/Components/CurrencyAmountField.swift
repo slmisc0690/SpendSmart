@@ -272,12 +272,26 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
             )
         }
 
-        // Only pull an externally-changed `amount` into the field when it genuinely differs from
-        // what the state machine already holds AND the user isn't actively editing — otherwise
-        // every SwiftUI re-render while typing would clobber in-progress input and fight the
-        // cursor. This is the one place external state (e.g. a caller resetting the binding to
-        // nil, or loading a different record) is allowed to override current text.
-        if !uiView.isFirstResponder, coordinator.state.amount != amount {
+        // PAY BILLS BACKSPACE-FREEZE FIX — Only pull an externally-changed `amount` into the
+        // field when it genuinely differs from what the state machine already holds AND the user
+        // isn't actively editing — otherwise every SwiftUI re-render while typing would clobber
+        // in-progress input and fight the cursor. This is the one place external state (e.g. a
+        // caller resetting the binding to nil, or loading a different record) is allowed to
+        // override current text.
+        //
+        // `uiView.isFirstResponder` ALONE isn't a reliable enough signal for this: Pay Bills is
+        // the one screen with SEVERAL of these fields live in a `ForEach` over a single shared
+        // `@State` array, so every keystroke in ANY row re-renders the WHOLE row list and calls
+        // `updateUIView` again for every field, including the one being edited. On a physical
+        // device this can catch `isFirstResponder` mid-flicker during that SwiftUI-driven
+        // re-layout, incorrectly treating an in-progress edit as "not editing" — the field then
+        // gets reloaded from the (already-correct, but now redundant) external binding on every
+        // subsequent keystroke, and each reload resets the cursor/selection, which is exactly the
+        // "one digit deletes, then the field won't respond" symptom Scott reported. `isEditing`
+        // below is driven by the delegate's own `textFieldDidBeginEditing`/`textFieldDidEndEditing`
+        // lifecycle callbacks instead — UIKit's own authoritative signal for "this field currently
+        // owns keyboard focus," unaffected by SwiftUI's own re-render timing.
+        if !uiView.isFirstResponder, !coordinator.isEditing, coordinator.state.amount != amount {
             coordinator.state.load(amount)
             coordinator.syncDisplay(animated: false)
         }
@@ -307,6 +321,11 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
         var amountBinding: Binding<Decimal?>?
         weak var textField: CurrencyUITextField?
         var hasAutoFocused = false
+        /// PAY BILLS BACKSPACE-FREEZE FIX — UIKit's own authoritative "this field currently owns
+        /// keyboard focus" signal, driven by the delegate lifecycle rather than
+        /// `uiView.isFirstResponder` (see `updateUIView`'s own comment for why the latter alone
+        /// isn't reliable enough when several of these fields exist on screen at once).
+        private(set) var isEditing = false
 
         init(state: CurrencyInputState, initialAmount: Decimal?) {
             var seeded = state
@@ -319,6 +338,14 @@ struct CurrencyTextFieldRepresentable: UIViewRepresentable {
         /// target exists only so `.editingChanged` is observed for VoiceOver/UIKit bookkeeping;
         /// it deliberately reads no state.
         @objc func editingChanged() {}
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            isEditing = true
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            isEditing = false
+        }
 
         func textField(
             _ textField: UITextField,

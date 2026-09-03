@@ -1,7 +1,14 @@
 import SwiftUI
 
-/// Shows the signed-in user's email and verification status, and lets them sign out or
-/// permanently delete their SpendSmart account. Reachable from Settings.
+/// SETTINGS ORGANIZATION PHASE — this is the canonical "Profile" destination (`Settings ▸
+/// Profile`, and the `.profile` Dashboard Favorite). The Swift type name `AccountView` is
+/// deliberately UNCHANGED (only its `navigationTitle` and Settings-facing row label became
+/// "Profile") — renaming the type itself would have touched ~15 pre-existing, still-accurate
+/// regression tests that scan this exact file/property names (sign-out crash-fix history, sticky-
+/// mirror display tests, etc.), for zero behavioral benefit. Shows the signed-in user's email and
+/// verification status, a future-Subscription placeholder, and lets them sign out or permanently
+/// delete their SpendSmart account. Reachable from Settings. Favorites lives on the main Settings
+/// screen, not here — see `SettingsView`.
 struct AccountView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AuthenticationService.self) private var authService
@@ -17,6 +24,7 @@ struct AccountView: View {
                 ScrollView {
                     VStack(spacing: Theme.Spacing.lg) {
                         accountSection
+                        subscriptionSection
                         if let errorMessage {
                             inlineMessage(icon: "exclamationmark.circle.fill", text: errorMessage, color: Theme.statusOver)
                         }
@@ -32,7 +40,7 @@ struct AccountView: View {
                     .padding(.bottom, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
-            .navigationTitle("Account")
+            .navigationTitle("Profile")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -62,7 +70,7 @@ struct AccountView: View {
 
     private var accountSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Account")
+            DashboardSectionHeader(title: "Profile")
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -85,6 +93,32 @@ struct AccountView: View {
                         Spacer()
                         verificationBadge
                     }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    // MARK: - Subscription (future placeholder — no StoreKit/billing yet)
+
+    /// Placeholder only — no purchase flow, no StoreKit, no fabricated subscription status. Exists
+    /// so a real subscription section has a stable, already-reviewed slot to land in later without
+    /// another Profile-layout change. Not tappable.
+    private var subscriptionSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(title: "Subscription")
+
+            CardBackground {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Subscription")
+                            .font(Theme.bodyFont)
+                            .foregroundStyle(Theme.textPrimary)
+                        Text("Coming soon")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    Spacer()
                 }
             }
             .padding(.horizontal, Theme.Spacing.lg)

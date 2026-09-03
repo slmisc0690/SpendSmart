@@ -26,6 +26,7 @@ struct AccountListView: View {
     @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
     @State private var isPresentingAdd = false
+    @State private var isPresentingAskSpendSmart = false
     @State private var accountPendingEdit: Account?
     @State private var accountPendingAdjustment: Account?
     @State private var selectedCreditCard: Account?
@@ -84,16 +85,44 @@ struct AccountListView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     InfoButton(title: "About Manual Accounts", explanation: Self.infoExplanation)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                // SPENDAI LAUNCHER VISUAL CORRECTION — "+" and the SpendAI launcher are one
+                // `ToolbarItemGroup` (Apple's documented way to combine related toolbar controls
+                // into a single shared Liquid Glass pill — see SwiftUI's own Landmarks Liquid Glass
+                // sample) rather than two separately-placed `ToolbarItem`s, which were letting the
+                // system's automatic shared-background sizing clip content off the pill's trailing
+                // edge on a physical device. Order was swapped per Scott's explicit instruction:
+                // SpendAI now sits FIRST/LEFT, "+" SECOND/RIGHT, inside the same pill — a
+                // `ToolbarItemGroup`'s items lay out left-to-right in declaration order even though
+                // the group as a whole is trailing-aligned. Leading padding on SpendAI and trailing
+                // padding on "+" guard both ends of the pill; each button keeps its own separate tap
+                // target and destination — this only changes layout, never merges their actions.
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    // SPENDAI UI PLACEMENT CORRECTION — app-wide access entry point for the primary
+                    // Manual Accounts area. Deliberately screen-level (`.manualAccounts`), not tied
+                    // to any single account — see this app's own Phase 2 decision to leave
+                    // per-account selected-account context as a future enhancement rather than
+                    // touching the separate account-detail screen. Artwork ABOVE the SpendAI
+                    // wordmark via the one shared `SpendAILauncherControl` (never a per-screen
+                    // duplicate). Explicit leading padding guards against the pill clipping its
+                    // leading edge now that this control is first.
+                    SpendAILauncherControl(glyphSize: 28) {
+                        isPresentingAskSpendSmart = true
+                    }
+                    .padding(.leading, Theme.Spacing.xs)
+
                     Button {
                         isPresentingAdd = true
                     } label: {
                         Image(systemName: "plus.circle.fill")
                     }
+                    .padding(.trailing, Theme.Spacing.xs)
                 }
             }
             .sheet(isPresented: $isPresentingAdd) {
                 AddAccountView()
+            }
+            .sheet(isPresented: $isPresentingAskSpendSmart) {
+                AskSpendSmartView(screenContext: .manualAccounts)
             }
             .sheet(item: $accountPendingEdit) { account in
                 AddAccountView(account: account)

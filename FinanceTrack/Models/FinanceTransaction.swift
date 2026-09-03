@@ -123,6 +123,41 @@ final class FinanceTransaction {
     /// design (see `UserDataStoreManager`/`LegacyDataMigrator`); not yet enforced or required.
     var ownerUserID: UUID?
 
+    /// ACTIVITY REGISTER IMPORT — for a manual register entry created via "Add to..." from a
+    /// connected (Plaid) Activity transaction, the SOURCE `FinanceTransaction.id` it was created
+    /// from. Deliberately this row's own stable local `id`, never `externalTransactionId` (Plaid's
+    /// own string id) — `PlaidTransactionImportService`'s pending-to-posted merge RE-KEYS an
+    /// existing pending row's `externalTransactionId` in place rather than replacing the row, so
+    /// the row's own `id` survives that transition unchanged while `externalTransactionId` does
+    /// not. Using `id` here means duplicate-prevention (`RegisterImportService`) stays correct
+    /// across a pending→posted transition with no special-case handling needed. `nil` for every
+    /// transaction not created by this import flow — the overwhelming majority of rows.
+    var importedFromTransactionId: UUID?
+
+    /// REGISTER PAID CHECKBOX — a purely local, user-facing "I actually sent/paid this" tracking
+    /// flag Scott can check off in a Manual Account register, independent of everything else this
+    /// transaction already represents. Deliberately NEVER read by any calculator (`BudgetCalculator`,
+    /// `MonthlyPlanCalculator`, `AccountBalanceManager`, bill-payment-variance tracking, etc.) —
+    /// toggling it must never change a balance, a budget total, or whether a Fixed Bill counts as
+    /// "paid this month" (that remains `linkedRecurringExpense`/`billPaymentVariance`'s own,
+    /// separate concern). `false` for every pre-existing row and every transaction created any
+    /// other way, matching this model's own established default-value convention for additive
+    /// flag properties (see `isOneTimeBillEntry`'s own declaration for the same pattern).
+    var isPaymentConfirmed: Bool = false
+
+    /// CHECK PAYMENT PHASE — the paper check number for a manually entered expense paid by check,
+    /// e.g. `"001284"`. Deliberately `String`, never `Int` — a check number's leading zeros are
+    /// significant and must never be silently stripped by numeric storage. This is PURELY a
+    /// register/provenance detail, never a distinct financial concept: a check transaction keeps
+    /// `type == .expense` and flows through the exact same `AccountBalanceManager.applyExpense`
+    /// path and every existing calculator (`BudgetCalculator`, `MonthlyPlanCalculator`, Quick
+    /// Stats, Activity) untouched — introducing a separate `TransactionType` case here would have
+    /// required updating roughly two dozen exhaustive `switch` sites across this codebase for zero
+    /// behavioral benefit. `nil` for every non-check transaction and every pre-existing row
+    /// (lightweight-migration-safe, matching `importedFromTransactionId`'s own established
+    /// optional-additive-field pattern).
+    var checkNumber: String?
+
     init(
         id: UUID = UUID(),
         amount: Decimal,
@@ -153,7 +188,10 @@ final class FinanceTransaction {
         billTiming: PlanTiming? = nil,
         transferCounterpartyAccount: Account? = nil,
         transferCounterpartyPlaidAccountId: String? = nil,
-        ownerUserID: UUID? = nil
+        ownerUserID: UUID? = nil,
+        importedFromTransactionId: UUID? = nil,
+        isPaymentConfirmed: Bool = false,
+        checkNumber: String? = nil
     ) {
         self.id = id
         self.amount = amount
@@ -185,6 +223,9 @@ final class FinanceTransaction {
         self.transferCounterpartyAccount = transferCounterpartyAccount
         self.transferCounterpartyPlaidAccountId = transferCounterpartyPlaidAccountId
         self.ownerUserID = ownerUserID
+        self.importedFromTransactionId = importedFromTransactionId
+        self.isPaymentConfirmed = isPaymentConfirmed
+        self.checkNumber = checkNumber
     }
 
     /// The best available display name: prefers the merchant name from a future sync, then the

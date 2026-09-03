@@ -143,6 +143,18 @@ enum SpendSmartBackupService {
         let accountId: UUID?
         let categoryId: UUID?
         let transferDestinationAccountId: UUID?
+        /// PROVENANCE BACKUP FIX — added after the initial backup format shipped. Decoded with
+        /// `decodeIfPresent` (no fallback needed, since `nil` IS the correct default) so a backup
+        /// file from before this field existed still decodes successfully; every transaction it
+        /// contains restores exactly like it always did, just without this optional provenance
+        /// link (which never existed for it in the first place — an old backup predates the
+        /// Activity Register Import feature this field supports).
+        let importedFromTransactionId: UUID?
+        /// CHECK PAYMENT PHASE — added after the initial backup format shipped, same
+        /// `decodeIfPresent`-with-no-fallback precedent as `importedFromTransactionId` above (`nil`
+        /// IS the correct default — an old backup predates this feature entirely, so every
+        /// transaction it contains simply has no check number, exactly as it always didn't).
+        let checkNumber: String?
 
         init(
             id: UUID, amount: DecimalValue, date: Date, type: String, source: String, note: String,
@@ -150,7 +162,8 @@ enum SpendSmartBackupService {
             isPending: Bool, createdAt: Date, updatedAt: Date, externalTransactionId: String?,
             pendingTransactionId: String?, merchantName: String?, originalDescription: String?,
             plaidAccountId: String?, authorizedDate: Date?, postedDate: Date?, isMatchedToManualExpense: Bool,
-            matchedTransactionId: UUID?, accountId: UUID?, categoryId: UUID?, transferDestinationAccountId: UUID?
+            matchedTransactionId: UUID?, accountId: UUID?, categoryId: UUID?, transferDestinationAccountId: UUID?,
+            importedFromTransactionId: UUID? = nil, checkNumber: String? = nil
         ) {
             self.id = id
             self.amount = amount
@@ -176,6 +189,8 @@ enum SpendSmartBackupService {
             self.accountId = accountId
             self.categoryId = categoryId
             self.transferDestinationAccountId = transferDestinationAccountId
+            self.importedFromTransactionId = importedFromTransactionId
+            self.checkNumber = checkNumber
         }
 
         init(from decoder: Decoder) throws {
@@ -204,6 +219,8 @@ enum SpendSmartBackupService {
             accountId = try container.decodeIfPresent(UUID.self, forKey: .accountId)
             categoryId = try container.decodeIfPresent(UUID.self, forKey: .categoryId)
             transferDestinationAccountId = try container.decodeIfPresent(UUID.self, forKey: .transferDestinationAccountId)
+            importedFromTransactionId = try container.decodeIfPresent(UUID.self, forKey: .importedFromTransactionId)
+            checkNumber = try container.decodeIfPresent(String.self, forKey: .checkNumber)
         }
     }
 
@@ -550,7 +567,9 @@ enum SpendSmartBackupService {
                 matchedTransactionId: dto.matchedTransactionId,
                 account: dto.accountId.flatMap { accountsById[$0] },
                 category: dto.categoryId.flatMap { categoriesById[$0] },
-                transferDestinationAccount: dto.transferDestinationAccountId.flatMap { accountsById[$0] }
+                transferDestinationAccount: dto.transferDestinationAccountId.flatMap { accountsById[$0] },
+                importedFromTransactionId: dto.importedFromTransactionId,
+                checkNumber: dto.checkNumber
             )
             context.insert(transaction)
         }
@@ -782,7 +801,9 @@ private extension SpendSmartBackupService.FinanceTransactionDTO {
             matchedTransactionId: transaction.matchedTransactionId,
             accountId: transaction.account?.id,
             categoryId: transaction.category?.id,
-            transferDestinationAccountId: transaction.transferDestinationAccount?.id
+            transferDestinationAccountId: transaction.transferDestinationAccount?.id,
+            importedFromTransactionId: transaction.importedFromTransactionId,
+            checkNumber: transaction.checkNumber
         )
     }
 }

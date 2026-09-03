@@ -1,4 +1,4 @@
-import SwiftUI
+ import SwiftUI
 import SwiftData
 
 @main
@@ -445,21 +445,44 @@ private struct RootView: View {
                     onboarding.updatedAt = .now
                 }
             } else {
+                // PHASE 2B VISUAL ASSETS — bottom navigation now uses Scott's supplied full-color
+                // artwork (from FavoritesBar/*.png) instead of SF Symbols. Each `NavX` asset is
+                // marked `template-rendering-intent: original` in its Contents.json so UIKit's tab
+                // bar renders it in full color rather than as a monochrome template mask. Manual
+                // Accounts deliberately reuses `AccountsArtwork` (from Accounts.png) — there is no
+                // separate ManualAccounts.png, and this same asset is also used by the generic
+                // Account Favorite (see `FavoriteDestinationID.imageAssetName`) — one canonical
+                // asset per visual, never a duplicate copy.
+                //
+                // PHASE 2B VISUAL FIX — `Label(_, image:)` handed straight to `.tabItem` rendered
+                // huge/cropped on a physical device. ROOT CAUSE (confirmed via `UIImage(named:)
+                // .size`, not guessed): each `NavX`/`AccountsArtwork` imageset declares only a
+                // single "1x" scale slot, so UIKit reports the image's `.size` as its raw PIXEL
+                // dimensions interpreted as POINTS (e.g. `NavDashboard` → 208×174pt,
+                // `AccountsArtwork` → 512×458pt). `UITabBarItem.image` lays out from that `.size`
+                // directly — unlike an SF Symbol, which carries its own point-size semantics — and
+                // once `.tabItem`'s content is bridged to a native `UITabBarItem`, ordinary SwiftUI
+                // `.resizable()`/`.frame()` modifiers on the icon are not honored (they DO work
+                // correctly elsewhere in this app, e.g. the Favorites bar, which never goes through
+                // this native bridging). `TabBarIconRenderer` below fixes this purely in code —
+                // never by modifying/re-exporting any artwork file — by handing UIKit an image whose
+                // own intrinsic `.size` is already a small, tab-bar-appropriate ~24pt, aspect-fit
+                // (never stretched) at runtime via `UIGraphicsImageRenderer`.
                 TabView {
                     DashboardView()
-                        .tabItem { Label("Dashboard", systemImage: "square.grid.2x2.fill") }
+                        .tabItem { TabBarIconRenderer.label("Dashboard", assetName: "NavDashboard") }
 
                     WeeklyBudgetView()
-                        .tabItem { Label("Weekly", systemImage: "calendar") }
+                        .tabItem { TabBarIconRenderer.label("Weekly", assetName: "NavWeekly") }
 
                     ExpenseListView()
-                        .tabItem { Label("Activity", systemImage: "list.bullet") }
+                        .tabItem { TabBarIconRenderer.label("Activity", assetName: "NavActivity") }
 
                     AccountListView()
-                        .tabItem { Label("Manual Accounts", systemImage: "creditcard.fill") }
+                        .tabItem { TabBarIconRenderer.label("Manual Accounts", assetName: "AccountsArtwork") }
 
                     SettingsView()
-                        .tabItem { Label("Settings", systemImage: "gearshape.fill") }
+                        .tabItem { TabBarIconRenderer.label("Settings", assetName: "NavSettings") }
                 }
                 .tint(Theme.accent)
                 .fullScreenCover(isPresented: pendingInvitationPopupBinding) {

@@ -19,8 +19,14 @@ struct FavoritesConfigurationView: View {
     /// `@Query` always agree on which row is "first" — see `FavoritesSettings.resolveCanonicalRecord`'s
     /// own header for why an unsorted `.first` was part of the proven real-device bug.
     @Query(sort: \FavoritesSettings.id) private var favoritesSettingsList: [FavoritesSettings]
+    /// TWO-LINE FAVORITES PHASE — candidates for the "Checking Register" Favorite's "Change"
+    /// affordance below, same non-archived-Manual-Account scoping `DashboardView`'s own picker uses.
+    @Query(sort: \Account.createdAt) private var manualAccounts: [Account]
 
     @State private var isPresentingMaxCapacityAlert = false
+    /// TWO-LINE FAVORITES PHASE — non-`nil` while re-choosing the "Checking Register" Favorite's
+    /// target account from this screen (the "Change" affordance on its already-selected row).
+    @State private var isPresentingCheckingRegisterPicker = false
 
     /// Read-only — a plain array read, never an insert. Creating/merging the canonical record only
     /// ever happens explicitly from `.onAppear` or a mutation call site below, never as a side
@@ -89,6 +95,11 @@ struct FavoritesConfigurationView: View {
             }
             .onAppear {
                 let record = FavoritesSettings.resolveCanonicalRecord(existing: favoritesSettingsList, in: modelContext)
+                // PHASE 2B VISUAL FIX — must run BEFORE reconcileEligibility (see that method's
+                // own migration-ordering note): converts any legacy "addToSavings" favorite to
+                // "monthlyPlan" persistently, before eligibility filtering would otherwise strip
+                // it outright now that it's no longer a separately selectable destination.
+                record.migrateAddToSavingsToMonthlyPlanIfNeeded()
                 record.reconcileEligibility(accountRelatedOptionsVisibility: accountRelatedOptionsViewModel.visibility)
             }
             .alert("No more Favorites can be added", isPresented: $isPresentingMaxCapacityAlert) {
@@ -96,31 +107,53 @@ struct FavoritesConfigurationView: View {
             } message: {
                 Text("Remove an existing favorite to add another.")
             }
+            .sheet(isPresented: $isPresentingCheckingRegisterPicker) {
+                CheckingRegisterAccountPickerView(accounts: manualAccounts.filter { !$0.isArchived }) { account in
+                    let record = FavoritesSettings.resolveCanonicalRecord(existing: favoritesSettingsList, in: modelContext)
+                    record.setCheckingRegisterAccount(account.id)
+                    try? modelContext.save()
+                    isPresentingCheckingRegisterPicker = false
+                }
+            }
         }
         .preferredColorScheme(.dark)
     }
 
     private func row(for destination: FavoriteDestinationID, isSelected: Bool) -> some View {
-        Button {
-            toggle(destination, currentlySelected: isSelected)
-        } label: {
-            HStack(spacing: Theme.Spacing.sm) {
-                FavoriteDestinationIconBadge(destination: destination, diameter: 32, symbolSize: 15)
-                    .opacity(isSelected ? 1 : 0.55)
+        HStack(spacing: Theme.Spacing.sm) {
+            Button {
+                toggle(destination, currentlySelected: isSelected)
+            } label: {
+                HStack(spacing: Theme.Spacing.sm) {
+                    FavoriteDestinationIconBadge(destination: destination, diameter: 32, symbolSize: 15)
+                        .opacity(isSelected ? 1 : 0.55)
 
-                Text(destination.displayName)
-                    .font(Theme.bodyFont)
-                    .foregroundStyle(Theme.textPrimary)
+                    Text(destination.displayName)
+                        .font(Theme.bodyFont)
+                        .foregroundStyle(Theme.textPrimary)
 
-                Spacer()
+                    Spacer()
 
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(isSelected ? Theme.accent : Theme.textTertiary)
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.textTertiary)
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            // TWO-LINE FAVORITES PHASE — lets Scott re-map the "Checking Register" Favorite to a
+            // different Manual Account later, per Part 7's "low-risk, if practical" request, without
+            // disturbing the row's own existing select/deselect tap target above.
+            if isSelected && destination == .checkingRegister {
+                Button("Change") {
+                    isPresentingCheckingRegisterPicker = true
+                }
+                .font(Theme.captionFont)
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
+            }
         }
-        .buttonStyle(.plain)
         .listRowBackground(Theme.cardSurface)
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }

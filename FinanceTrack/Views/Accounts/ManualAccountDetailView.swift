@@ -11,7 +11,14 @@ struct ManualAccountDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(PrivacyModeManager.self) private var privacyMode
 
-    @Query(sort: \FinanceTransaction.date, order: .reverse) private var allTransactions: [FinanceTransaction]
+    /// PERFORMANCE — scoped directly to this account (via `#Predicate`) rather than fetching every
+    /// `FinanceTransaction` in the app and filtering in Swift. The unscoped version re-fetched and
+    /// re-filtered the ENTIRE app's transaction list on every SwiftData autosave — including the
+    /// autosave triggered by toggling a single row's `isPaymentConfirmed` checkbox — which made a
+    /// single checkbox tap visibly slow to respond on a real device. Matches
+    /// `ManualAccountDeletionService.eligibility`'s own source-or-destination check, so passing
+    /// this scoped list to `deleteAccount()` below is equivalent to passing the old app-wide list.
+    @Query private var accountTransactions: [FinanceTransaction]
 
     @State private var isPresentingAddExpense = false
     @State private var isPresentingEdit = false
@@ -20,12 +27,21 @@ struct ManualAccountDetailView: View {
     @State private var transactionPendingDeletion: FinanceTransaction?
     @State private var transactionPendingBillTagEdit: FinanceTransaction?
     @State private var transactionPendingAmountEdit: FinanceTransaction?
+    @State private var transactionPendingCheckNumberEdit: FinanceTransaction?
     @State private var isPresentingDeletionError = false
     @State private var isPresentingAccountDeletionConfirmation = false
     @State private var accountDeletionBlockedMessage: String?
 
-    private var accountTransactions: [FinanceTransaction] {
-        allTransactions.filter { $0.account?.id == account.id || $0.transferDestinationAccount?.id == account.id }
+    init(account: Account) {
+        self.account = account
+        let accountID = account.id
+        _accountTransactions = Query(
+            filter: #Predicate<FinanceTransaction> { transaction in
+                transaction.account?.id == accountID || transaction.transferDestinationAccount?.id == accountID
+            },
+            sort: \FinanceTransaction.date,
+            order: .reverse
+        )
     }
 
     var body: some View {
@@ -64,13 +80,28 @@ struct ManualAccountDetailView: View {
                 AddAccountView(account: account)
             }
             .sheet(isPresented: $isPresentingPayBills) {
+                // PAY BILLS THIRD CORRECTION — THE VERIFIED-DIFFERENT ANCESTOR: unlike a minimal
+                // reproduction of Pay Bills' own ForEach/ScrollView/CurrencyAmountField structure
+                // (which survives repeated editing fine in isolation — see this fix's own
+                // regression test), THIS screen presents Pay Bills via `.sheet(isPresented:)` from
+                // a parent that observes `@Bindable var account` AND a live
+                // `@Query private var accountTransactions` — any re-render of THIS view (for any
+                // reason, not necessarily caused by Pay Bills itself) re-evaluates this sheet's
+                // content closure. `.id(...)` pins the presented view's identity explicitly, so
+                // SwiftUI can never treat a parent re-render as a reason to tear down and recreate
+                // Pay Bills' view hierarchy (and, with it, the in-progress `CurrencyUITextField`
+                // and its first-responder state) while the sheet is open.
                 PayBillsView(account: account)
+                    .id(account.id)
             }
             .sheet(item: $transactionPendingBillTagEdit) { transaction in
                 TransactionBillTagEditView(transaction: transaction)
             }
             .sheet(item: $transactionPendingAmountEdit) { transaction in
                 TransactionAmountEditView(transaction: transaction)
+            }
+            .sheet(item: $transactionPendingCheckNumberEdit) { transaction in
+                CheckNumberEditView(transaction: transaction)
             }
             .confirmationDialog(
                 transactionPendingDeletion.map { ManualTransactionDeletionService.confirmationCopy(for: $0).title } ?? "Delete?",
@@ -126,12 +157,12 @@ struct ManualAccountDetailView: View {
     }
 
     private func deleteAccount() {
-        let eligibility = ManualAccountDeletionService.eligibility(for: account, transactions: allTransactions)
+        let eligibility = ManualAccountDeletionService.eligibility(for: account, transactions: accountTransactions)
         guard eligibility == .eligible else {
             accountDeletionBlockedMessage = ManualAccountDeletionService.blockedMessage(for: eligibility)
             return
         }
-        let succeeded = ManualAccountDeletionService.delete(account, transactions: allTransactions, context: modelContext)
+        let succeeded = ManualAccountDeletionService.delete(account, transactions: accountTransactions, context: modelContext)
         if succeeded {
             dismiss()
         } else {
@@ -317,6 +348,29 @@ struct ManualAccountDetailView: View {
                     VStack(spacing: Theme.Spacing.md) {
                         ForEach(Array(accountTransactions.enumerated()), id: \.element.id) { index, transaction in
                             HStack(spacing: 0) {
+                                // REGISTER PAID CHECKBOX — a purely local "I actually sent/paid
+                                // this" tracking flag, independent of everything else this
+                                // transaction represents (see `FinanceTransaction
+                                // .isPaymentConfirmed`'s own header for the full "never affects
+                                // any calculation" guarantee). Mirrors Pay Bills' own established
+                                // checkbox visual (`checkmark.circle.fill`/`circle`) for
+                                // consistency, never a new visual language. Kept on the OUTER
+                                // `HStack(spacing: 0)` (unchanged from before) so the existing
+                                // TransactionRow-to-options-menu spacing is untouched; this
+                                // checkbox supplies its own trailing gap instead.
+                                Button {
+                                    transaction.isPaymentConfirmed.toggle()
+                                } label: {
+                                    Image(systemName: transaction.isPaymentConfirmed ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 20, weight: .semibold))
+                                        .foregroundStyle(transaction.isPaymentConfirmed ? Theme.accent : Theme.textTertiary)
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, Theme.Spacing.xs)
+                                .accessibilityLabel(transaction.isPaymentConfirmed ? "Mark as not yet paid" : "Mark as paid")
+
                                 TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled, showsTypeBadge: true)
                                     .contextMenu {
                                         if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
@@ -356,6 +410,14 @@ struct ManualAccountDetailView: View {
             if TransactionAmountEditView.isEligible(transaction) {
                 Button("Edit Amount", systemImage: "pencil") {
                     transactionPendingAmountEdit = transaction
+                }
+            }
+            // CHECK PAYMENT PHASE — only offered for a transaction that already has a check
+            // number (see `CheckNumberEditView.isEligible`) — never shown for an ordinary
+            // expense/deposit/transfer.
+            if CheckNumberEditView.isEligible(transaction) {
+                Button("Edit Check Number", systemImage: "number") {
+                    transactionPendingCheckNumberEdit = transaction
                 }
             }
             Button("Delete", systemImage: "trash", role: .destructive) {

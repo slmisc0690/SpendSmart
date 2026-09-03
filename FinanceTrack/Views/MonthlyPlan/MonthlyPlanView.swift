@@ -123,6 +123,7 @@ struct MonthlyPlanView: View {
     /// itself owns all scenario state (`MonthlyPlanScenarioViewModel`, recreated fresh each time
     /// it's presented); this view holds nothing scenario-related beyond whether the sheet is up.
     @State private var isPresentingScenario = false
+    @State private var isPresentingAskSpendSmart = false
     /// SAVED THIS MONTH — presentation-only trigger for the Add Savings sheet.
     @State private var isPresentingAddSavings = false
 
@@ -322,8 +323,26 @@ struct MonthlyPlanView: View {
                     Button("Scenario") { isPresentingScenario = true }
                         .foregroundStyle(Theme.accent)
                 }
+                // ASK SPENDSMART PHASE 2 — app-wide access entry point. Monthly Plan is
+                // particularly relevant to questions like "if I save $1,000 this month, what can
+                // I spend?" (the exact Phase 1 required-proof example), so this screen passes
+                // `.monthlyPlan` context.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isPresentingAskSpendSmart = true
+                    } label: {
+                        AskSpendSmartGlyph(size: 20)
+                    }
+                    // USER-FACING BRANDING CORRECTION — accessibility label updated to the
+                    // active "SpendAI" brand; placement/layout deliberately untouched (Part A of
+                    // this correction only changes Weekly/Activity/Manual Accounts placement).
+                    .accessibilityLabel("SpendAI")
+                }
             }
             .toolbarBackground(.hidden, for: .navigationBar)
+            .sheet(isPresented: $isPresentingAskSpendSmart) {
+                AskSpendSmartView(screenContext: .monthlyPlan)
+            }
             .sheet(isPresented: $isPresentingScenario) {
                 // MONTHLY PLAN SCENARIO MODE — deliberately passes allIncomeSources/
                 // allRecurringExpenses (the complete, unfiltered @Query results), never

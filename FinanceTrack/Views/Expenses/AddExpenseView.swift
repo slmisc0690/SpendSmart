@@ -13,6 +13,10 @@ struct AddExpenseView: View {
     @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @Query(sort: \Category.name) private var allCategories: [Category]
     @Query(sort: \RecurringExpense.name) private var allRecurringExpenses: [RecurringExpense]
+    /// CHECK PAYMENT PHASE — read only to scope the duplicate-check-number warning to the SAME
+    /// Manual Account (never across accounts) — see `duplicateCheckNumberWarningMessage`'s own
+    /// header. Never written to directly by this screen.
+    @Query(sort: \FinanceTransaction.date, order: .reverse) private var allTransactions: [FinanceTransaction]
 
     @State private var amount: Decimal?
     @State private var note: String = ""
@@ -33,6 +37,18 @@ struct AddExpenseView: View {
     @State private var isPresentingAddAccount = false
     @State private var hasAttemptedSave = false
     @State private var isPresentingDiscardConfirmation = false
+    /// CHECK PAYMENT PHASE — "Check" is a user-facing MENU CHOICE, never a `TransactionType` case
+    /// (see `FinanceTransaction.checkNumber`'s own header for why): selecting it sets `type =
+    /// .expense` and this flag together, so the transaction flows through the exact same
+    /// `.expense` save/balance/calculator path as any other expense, with only an extra
+    /// `checkNumber` detail attached. Cleared (along with `checkNumber` below) the moment the user
+    /// picks any OTHER Type menu choice — see that Menu's own button actions.
+    @State private var isCheckPayment = false
+    /// Deliberately `String`, never a numeric type — a check number's leading zeros (e.g.
+    /// `"001284"`) are significant and must never be silently stripped. Trimmed only at save time
+    /// (`trimmedCheckNumber`), never while the user is still typing.
+    @State private var checkNumber = ""
+    @State private var isPresentingDuplicateCheckWarning = false
     /// Always starts collapsed on every presentation — deliberately not persisted, so a fresh
     /// `@State` for a newly presented screen is always `false` regardless of what a previous
     /// presentation left it as.
@@ -123,17 +139,6 @@ struct AddExpenseView: View {
     /// an addition immediately without a separate cache to keep in sync.
     private var sortedDescriptions: [String] {
         DescriptionSorting.sortedAlphabetically(descriptionStore.all())
-    }
-
-    /// `note` IS the transaction's description — this binding just presents that single existing
-    /// property as an optional to `DescriptionPickerCard` (empty string means "no description
-    /// selected") rather than introducing a second, duplicate field. Typing directly into the
-    /// free-form Note field below updates the exact same value.
-    private var descriptionBinding: Binding<String?> {
-        Binding(
-            get: { note.isEmpty ? nil : note },
-            set: { newValue in note = newValue ?? "" }
-        )
     }
 
     /// True when this screen was opened from a specific Manual Account's own detail/register
@@ -286,7 +291,34 @@ struct AddExpenseView: View {
             // mandatory (see Phase 6's "No connected account selected" requirement).
             messages.append("Account is required.")
         }
+        // CHECK PAYMENT PHASE — a blank check number is never silently saved as an empty/fabricated
+        // value; Scott must either enter one or switch away from Check. Never blocks typing itself
+        // (this only runs at save time, driven by `hasAttemptedSave`'s existing display gate below).
+        if isCheckPayment, trimmedCheckNumber.isEmpty {
+            messages.append("Enter a check number.")
+        }
         return messages
+    }
+
+    /// CHECK PAYMENT PHASE — trimmed only here, at the boundary between the live-typing field and
+    /// validation/save; the raw `checkNumber` `@State` itself is never mutated mid-edit, so
+    /// backspacing/retyping behaves exactly like any other text field (no `Pay Bills`-style
+    /// editing bug reintroduced).
+    private var trimmedCheckNumber: String {
+        checkNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// CHECK PAYMENT PHASE — every OTHER check number already used on THIS SAME Manual Account
+    /// (never a different account, never a Plaid/general-flow transaction) — compared as
+    /// normalized, trimmed strings, exactly matching how `trimmedCheckNumber` itself is derived.
+    /// `nil` when there's nothing to warn about, or no account/number to compare yet.
+    private var duplicateCheckNumberWarningMessage: String? {
+        guard isCheckPayment, !trimmedCheckNumber.isEmpty, let selectedAccount else { return nil }
+        let existingNumbers = allTransactions
+            .filter { $0.account?.id == selectedAccount.id }
+            .compactMap { $0.checkNumber?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard existingNumbers.contains(trimmedCheckNumber) else { return nil }
+        return "Check \(trimmedCheckNumber) already exists in this register."
     }
 
     private var isValid: Bool { validationMessages.isEmpty }
@@ -338,6 +370,11 @@ struct AddExpenseView: View {
 
                     typeAndDateSection
                         .padding(.horizontal, Theme.Spacing.lg)
+
+                    if isCheckPayment {
+                        checkNumberSection
+                            .padding(.horizontal, Theme.Spacing.lg)
+                    }
 
                     if showsTransferAccountPickers {
                         transferAccountSection
@@ -443,6 +480,12 @@ struct AddExpenseView: View {
                     selectedExistingBillID = nil
                     selectedExistingBillTiming = nil
                     newBillTiming = nil
+                    // CHECK PAYMENT PHASE — defensive fallback alongside the Type Menu's own
+                    // buttons (which already clear these directly): a check number is only ever
+                    // meaningful for an expense (Part 10's own scope), so it can never survive a
+                    // switch to Deposit/Transfer/Balance Adjustment/etc.
+                    isCheckPayment = false
+                    checkNumber = ""
                 }
                 // TRANSFER TRACKING — default one side of From/To to the account whose register
                 // this screen was opened from, since that's the far more common starting point
@@ -501,6 +544,18 @@ struct AddExpenseView: View {
                     newBillTiming = .endMonth
                     billTagChoice = .newMonthlyBill
                 }
+                Button("Cancel", role: .cancel) {}
+            }
+            // CHECK PAYMENT PHASE — a WARNING, never a hard block (Part 5's own explicit
+            // requirement — legitimate duplicates can exist from corrections/imports). The message
+            // itself is computed fresh from `duplicateCheckNumberWarningMessage` at the moment
+            // `attemptSave()` detects a match, so it always names the actual conflicting number.
+            .confirmationDialog(
+                duplicateCheckNumberWarningMessage ?? "",
+                isPresented: $isPresentingDuplicateCheckWarning,
+                titleVisibility: .visible
+            ) {
+                Button("Save Anyway") { performSave() }
                 Button("Cancel", role: .cancel) {}
             }
         }
@@ -569,11 +624,31 @@ struct AddExpenseView: View {
                         .foregroundStyle(Theme.textTertiary)
                     Menu {
                         ForEach(availableTypes) { candidateType in
-                            Button(candidateType.label) { type = candidateType }
+                            Button(candidateType.label) {
+                                type = candidateType
+                                // CHECK PAYMENT PHASE — picking any OTHER Type choice always
+                                // leaves Check mode, even when `type` itself doesn't actually
+                                // change value (e.g. explicitly re-picking "Expense" while Check
+                                // was active) — `.onChange(of: type)` alone wouldn't fire in that
+                                // case, so this is set directly here, not only in that handler.
+                                isCheckPayment = false
+                                checkNumber = ""
+                            }
+                        }
+                        // CHECK PAYMENT PHASE — a user-facing MENU CHOICE only, never a
+                        // `TransactionType` case (see `FinanceTransaction.checkNumber`'s own
+                        // header) — stays `type == .expense` under the hood, so every calculator
+                        // and the save path below need zero changes. Manual Account register
+                        // entries only, matching this feature's own scope.
+                        if isManualAccountEntry {
+                            Button("Check") {
+                                type = .expense
+                                isCheckPayment = true
+                            }
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Text(type.label)
+                            Text(isCheckPayment ? "Check" : type.label)
                                 .font(Theme.bodyFont)
                                 .foregroundStyle(Theme.textPrimary)
                             Image(systemName: "chevron.up.chevron.down")
@@ -591,6 +666,32 @@ struct AddExpenseView: View {
                         .labelsHidden()
                         .tint(Theme.accent)
                 }
+            }
+        }
+    }
+
+    /// CHECK PAYMENT PHASE — shown ONLY while `isCheckPayment` is true (Part 10's own "Deposit/
+    /// Transfer/Balance Adjustment never show this" scope) — a plain `TextField` bound directly to
+    /// the `String` `checkNumber` state, matching `detailsSection`'s own Notes field styling
+    /// exactly. `.keyboardType(.numberPad)` is a keyboard PREFERENCE only — the underlying value
+    /// stays a free-form `String`, never parsed/reformatted, so leading zeros and normal
+    /// backspacing/retyping behave exactly like any other text field (no numeric formatter that
+    /// would strip them, no `CurrencyAmountField`-style state machine to reintroduce the Pay Bills
+    /// editing bug into).
+    private var checkNumberSection: some View {
+        CardBackground(padding: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Check Number")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.textTertiary)
+                TextField("e.g. 001284", text: $checkNumber)
+                    .keyboardType(.numberPad)
+                    .padding(Theme.Spacing.sm)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                            .fill(Theme.cardSurface)
+                    )
+                    .foregroundStyle(Theme.textPrimary)
             }
         }
     }
@@ -819,11 +920,21 @@ struct AddExpenseView: View {
         }
     }
 
-    /// Combines what used to be a standalone Description card (the reusable "pick a recent
-    /// description" list) with the free-form Note field into a single "Details" card — Description
-    /// on top, Notes below. Both edit the SAME underlying `note` value (see `descriptionBinding`'s
-    /// own header: "`note` IS the transaction's description"), so picking a description and then
-    /// typing in Notes just refines the same text, never two independent fields drifting apart.
+    /// DESCRIPTION REDESIGN PHASE — replaces the old two-control layout (a `Menu`-only
+    /// `DescriptionPickerCard`, which BLOCKED direct typing, sitting above a separately-labeled
+    /// free-form "Notes" `TextField`) with ONE plain, always-typeable `TextField` bound directly to
+    /// `note` plus a "Select" button beside it. Both old controls already edited the exact same
+    /// `note` value, so this is a pure UI consolidation, never a change to what gets saved: `note`
+    /// is still the one and only value written to
+    /// `FinanceTransaction.note` at save time. `DescriptionPickerCard.swift` is left in place,
+    /// unused, rather than deleted (matches this codebase's own "leave intact, don't delete
+    /// dead-but-harmless code" convention elsewhere).
+    ///
+    /// The "Select" `Menu` reuses the EXACT SAME canonical choices/source
+    /// (`sortedDescriptions`/`descriptionStore`) and "Add Description" alert flow the old picker
+    /// used — no second description library. Choosing an option sets `note` directly (never a
+    /// separate "locked selection" state), so the `TextField` above it remains immediately editable
+    /// afterward — typing, selecting, then re-editing all just mutate the same plain `String`.
     private var detailsSection: some View {
         CardBackground(padding: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
@@ -835,25 +946,33 @@ struct AddExpenseView: View {
                     Text("Description")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
-                    DescriptionPickerCard(
-                        descriptions: sortedDescriptions,
-                        selectedDescription: descriptionBinding,
-                        onRequestAddDescription: { isPresentingAddDescription = true },
-                        embedded: true
-                    )
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Notes")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.textTertiary)
-                    TextField("e.g. Trader Joe's", text: $note)
+                    TextField("Enter a description...", text: $note)
                         .padding(Theme.Spacing.sm)
                         .background(
                             RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
                                 .fill(Theme.cardSurface)
                         )
                         .foregroundStyle(Theme.textPrimary)
+
+                    Menu {
+                        if sortedDescriptions.isEmpty {
+                            Text("No saved descriptions yet")
+                        } else {
+                            ForEach(sortedDescriptions, id: \.self) { description in
+                                Button(description) { note = description }
+                            }
+                        }
+                        Divider()
+                        Button {
+                            isPresentingAddDescription = true
+                        } label: {
+                            Label("Add Description", systemImage: "plus")
+                        }
+                    } label: {
+                        Text("Select")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.accent)
+                    }
                 }
             }
         }
@@ -967,8 +1086,22 @@ struct AddExpenseView: View {
 
     // MARK: - Save
 
+    /// The Save button's own entry point — runs validation, then (Check transactions only) the
+    /// duplicate-check-number WARNING gate, before ever creating a `FinanceTransaction`. A
+    /// detected duplicate stops here and shows `isPresentingDuplicateCheckWarning` instead of
+    /// saving immediately; `performSave()` below does the actual creation, reached either directly
+    /// (no duplicate) or via that dialog's "Save Anyway" button.
     private func attemptSave() {
         hasAttemptedSave = true
+        guard isValid else { return }
+        if duplicateCheckNumberWarningMessage != nil {
+            isPresentingDuplicateCheckWarning = true
+            return
+        }
+        performSave()
+    }
+
+    private func performSave() {
         guard isValid, let amount else { return }
         // Only the Manual Account flow requires selectedAccount (enforced by `validationMessages`
         // above); the general flow never sets it, by construction (no Manual Account is ever
@@ -1042,7 +1175,8 @@ struct AddExpenseView: View {
             isOneTimeBillEntry: isOneTimeBillEntry,
             billTiming: billTiming,
             transferCounterpartyAccount: counterpartyAccount,
-            transferCounterpartyPlaidAccountId: counterpartyPlaidId
+            transferCounterpartyPlaidAccountId: counterpartyPlaidId,
+            checkNumber: isCheckPayment ? trimmedCheckNumber : nil
         )
         #if DEBUG
         // A single `print` call (one write, effectively atomic) rather than four separate calls —

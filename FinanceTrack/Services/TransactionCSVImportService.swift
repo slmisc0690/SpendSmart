@@ -62,6 +62,15 @@ enum TransactionCSVImportService {
         let source: TransactionSource
         let externalTransactionId: String?
         let accountName: String
+        /// PROVENANCE BACKUP FIX — present only when the CSV's header includes the trailing
+        /// "Imported From Transaction ID" column (a file exported before that column existed
+        /// parses every row with this `nil`, exactly as if the field had always been empty).
+        let importedFromTransactionId: UUID?
+        /// CHECK PAYMENT PHASE — present only when the CSV's header includes the trailing "Check
+        /// Number" column (a file exported before that column existed parses every row with this
+        /// `nil`, exactly as if the field had always been empty). Always plain text, never parsed
+        /// as a number — leading zeros survive verbatim.
+        let checkNumber: String?
     }
 
     /// Why a syntactically-parseable row was excluded from the restorable set.
@@ -215,39 +224,61 @@ enum TransactionCSVImportService {
     static func parse(_ csv: String) -> ParseResult {
         let rows = tokenizeRows(csv)
         var currentAccountName: String?
-        var sawHeaderForCurrentSection = false
+        // PROVENANCE BACKUP FIX — `nil` until a header line is recognized for the CURRENT
+        // section; then set to that section's own field count (9 for a pre-provenance export,
+        // 10 for a current one) so a file containing sections exported by different app versions
+        // is never mis-parsed against the wrong width.
+        var currentSectionFieldCount: Int?
         var isRecognizedFormat = false
         var parsed: [ParsedRow] = []
         var skipped: [SkippedRow] = []
 
-        let expectedHeaderFields = TransactionCSVExportService.header.components(separatedBy: ",")
+        let currentHeaderFields = TransactionCSVExportService.header.components(separatedBy: ",")
+        // The exact 9-column header this app produced before "Imported From Transaction ID" was
+        // appended — recognized so an older export continues to import exactly as it always did.
+        let legacyHeaderFields = "Date,Description,Category,Type,Amount,Pending,Source,Transaction ID,External ID".components(separatedBy: ",")
+        // CHECK PAYMENT PHASE — the exact 10-column header this app produced before "Check
+        // Number" was appended — recognized alongside the current (11-column) and the original
+        // (9-column) legacy headers, so a file exported by ANY prior app version still imports.
+        let priorHeaderFields = "Date,Description,Category,Type,Amount,Pending,Source,Transaction ID,External ID,Imported From Transaction ID".components(separatedBy: ",")
 
         for row in rows {
             // Blank-line section separator: a single empty field.
             if row.count == 1, row[0].isEmpty {
                 currentAccountName = nil
-                sawHeaderForCurrentSection = false
+                currentSectionFieldCount = nil
                 continue
             }
             // Account-name line: a single non-empty field.
             if row.count == 1 {
                 currentAccountName = row[0]
-                sawHeaderForCurrentSection = false
+                currentSectionFieldCount = nil
                 continue
             }
-            // This file's own column header.
-            if row == expectedHeaderFields {
-                sawHeaderForCurrentSection = true
+            // This file's own column header — either the current or the prior (pre-provenance)
+            // width is accepted.
+            if row == currentHeaderFields {
+                currentSectionFieldCount = currentHeaderFields.count
+                isRecognizedFormat = true
+                continue
+            }
+            if row == legacyHeaderFields {
+                currentSectionFieldCount = legacyHeaderFields.count
+                isRecognizedFormat = true
+                continue
+            }
+            if row == priorHeaderFields {
+                currentSectionFieldCount = priorHeaderFields.count
                 isRecognizedFormat = true
                 continue
             }
 
-            guard let accountName = currentAccountName, sawHeaderForCurrentSection else {
+            guard let accountName = currentAccountName, let expectedFieldCount = currentSectionFieldCount else {
                 skipped.append(SkippedRow(accountName: currentAccountName ?? "", reason: .malformedRow("row found outside a recognized account section")))
                 continue
             }
-            guard row.count == expectedHeaderFields.count else {
-                skipped.append(SkippedRow(accountName: accountName, reason: .malformedRow("expected \(expectedHeaderFields.count) fields, found \(row.count)")))
+            guard row.count == expectedFieldCount else {
+                skipped.append(SkippedRow(accountName: accountName, reason: .malformedRow("expected \(expectedFieldCount) fields, found \(row.count)")))
                 continue
             }
 
@@ -260,6 +291,12 @@ enum TransactionCSVImportService {
             let sourceLabel = row[6]
             let idString = row[7]
             let externalIdString = row[8]
+            // Absent entirely on a legacy (9-field) row — `nil`, exactly as if the column had
+            // always been empty.
+            let importedFromIdString: String? = expectedFieldCount >= 10 ? row[9] : nil
+            // CHECK PAYMENT PHASE — absent on any row narrower than the current 11-field width
+            // (9-field or 10-field) — `nil`, exactly as if the column had always been empty.
+            let checkNumberString: String? = expectedFieldCount >= 11 ? row[10] : nil
 
             guard let date = dateFormatter.date(from: dateString) else {
                 skipped.append(SkippedRow(accountName: accountName, reason: .malformedRow("invalid date \"\(dateString)\"")))
@@ -281,6 +318,17 @@ enum TransactionCSVImportService {
                 skipped.append(SkippedRow(accountName: accountName, reason: .malformedRow("missing or invalid Transaction ID")))
                 continue
             }
+            // A non-empty but unparseable provenance UUID indicates file corruption, same
+            // treatment as a malformed Transaction ID above — reported, never silently guessed
+            // or silently dropped.
+            var importedFromTransactionId: UUID?
+            if let importedFromIdString, !importedFromIdString.isEmpty {
+                guard let parsedImportedFromId = UUID(uuidString: importedFromIdString) else {
+                    skipped.append(SkippedRow(accountName: accountName, reason: .malformedRow("invalid Imported From Transaction ID")))
+                    continue
+                }
+                importedFromTransactionId = parsedImportedFromId
+            }
 
             if let type = restorableTypesByLabel[typeLabel] {
                 parsed.append(ParsedRow(
@@ -293,7 +341,9 @@ enum TransactionCSVImportService {
                     isPending: isPending,
                     source: source,
                     externalTransactionId: externalIdString.isEmpty ? nil : externalIdString,
-                    accountName: accountName
+                    accountName: accountName,
+                    importedFromTransactionId: importedFromTransactionId,
+                    checkNumber: (checkNumberString?.isEmpty ?? true) ? nil : checkNumberString
                 ))
             } else if unsupportedTypesByLabel[typeLabel] != nil {
                 skipped.append(SkippedRow(accountName: accountName, reason: .unsupportedType(typeLabel)))
@@ -403,7 +453,9 @@ enum TransactionCSVImportService {
                 externalTransactionId: row.externalTransactionId,
                 account: account,
                 category: categoriesByName[row.categoryName],
-                ownerUserID: account.ownerUserID
+                ownerUserID: account.ownerUserID,
+                importedFromTransactionId: row.importedFromTransactionId,
+                checkNumber: row.checkNumber
             )
             context.insert(transaction)
             createdTransactions.append(transaction)

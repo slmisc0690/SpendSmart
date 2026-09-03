@@ -17,16 +17,43 @@ final class FavoritesSettings {
     var orderedDestinationIDs: [String]
     var updatedAt: Date
 
-    init(id: UUID = UUID(), orderedDestinationIDs: [String] = [], updatedAt: Date = .now) {
+    /// TWO-LINE FAVORITES PHASE — which `Account` the `.checkingRegister` Favorite opens, by its
+    /// stable `Account.id` UUID — never a name/index, so a rename or reorder can never break it.
+    /// `nil` until Scott configures one (`CheckingRegisterAccountPickerView`), and safely `nil`
+    /// again if the configured account is ever deleted (`DashboardView.handleFavoriteSelection(_:)`
+    /// only ever resolves against currently-existing, non-archived accounts — a stale id here is
+    /// simply treated as "not yet configured," re-prompting rather than crashing or guessing).
+    /// Optional so every pre-existing `FavoritesSettings` row (from before this phase) decodes with
+    /// no migration needed, matching this model's own lightweight-migration-friendly convention.
+    var checkingRegisterAccountID: UUID?
+
+    init(id: UUID = UUID(), orderedDestinationIDs: [String] = [], updatedAt: Date = .now, checkingRegisterAccountID: UUID? = nil) {
         self.id = id
         self.orderedDestinationIDs = orderedDestinationIDs
         self.updatedAt = updatedAt
+        self.checkingRegisterAccountID = checkingRegisterAccountID
     }
 
     /// The recognized subset of `orderedDestinationIDs`, in the same order — the ONLY safe way to
     /// read this model's favorites. Never throws, never crashes on an unrecognized id.
+    ///
+    /// PHASE 2B VISUAL FIX — every raw id is mapped through `canonicalDisplayDestination` (which
+    /// collapses the retired `addToSavings` into `monthlyPlan`) and de-duplicated, so a legacy
+    /// `addToSavings` entry ALWAYS displays/routes correctly as "Monthly Plan" even before
+    /// `migrateAddToSavingsToMonthlyPlanIfNeeded()` below has ever run persistently, and a user who
+    /// somehow has both `monthlyPlan` and `addToSavings` stored never sees two "Monthly Plan"
+    /// pills. Read-only — never mutates `orderedDestinationIDs` itself.
     var validDestinationIDs: [FavoriteDestinationID] {
-        orderedDestinationIDs.compactMap(FavoriteDestinationID.init(rawValue:))
+        var seen = Set<FavoriteDestinationID>()
+        var result: [FavoriteDestinationID] = []
+        for raw in orderedDestinationIDs {
+            guard let parsed = FavoriteDestinationID(rawValue: raw) else { continue }
+            let canonical = parsed.canonicalDisplayDestination
+            guard !seen.contains(canonical) else { continue }
+            seen.insert(canonical)
+            result.append(canonical)
+        }
+        return result
     }
 
     /// Adds `id` at the end of the selected order. Returns `false` (a no-op) without mutating
@@ -60,6 +87,16 @@ final class FavoritesSettings {
         updatedAt = .now
     }
 
+    /// TWO-LINE FAVORITES PHASE — the one place `checkingRegisterAccountID` is ever written, called
+    /// only from an explicit, user-visible-context selection (`CheckingRegisterAccountPickerView`'s
+    /// own confirm action) — never a passive side effect of rendering the Dashboard, matching this
+    /// model's own established "no passive read/write during render" rule.
+    func setCheckingRegisterAccount(_ accountID: UUID?) {
+        guard checkingRegisterAccountID != accountID else { return }
+        checkingRegisterAccountID = accountID
+        updatedAt = .now
+    }
+
     /// Drops any stored id that is either unrecognized (stale) or no longer eligible for the
     /// current user (see `FavoriteDestinationID.isEligible`) — called explicitly from
     /// `FavoritesConfigurationView.onAppear`, a deliberate, user-visible-context cleanup action,
@@ -74,6 +111,37 @@ final class FavoritesSettings {
         }
         guard reconciled != orderedDestinationIDs else { return }
         orderedDestinationIDs = reconciled
+        updatedAt = .now
+    }
+
+    /// PHASE 2B VISUAL FIX — persistently rewrites any raw `"addToSavings"` entries to
+    /// `"monthlyPlan"` (never silently dropped), collapsing a duplicate if `"monthlyPlan"` is
+    /// ALSO already present rather than ever producing two Monthly Plan entries. Called explicitly
+    /// from `FavoritesConfigurationView.onAppear` — same "deliberate, user-visible-context
+    /// mutation, never a passive render side effect" pattern as `reconcileEligibility` — and MUST
+    /// run BEFORE it: `reconcileEligibility`'s own eligibility filter would otherwise strip a raw
+    /// `"addToSavings"` entry outright (now permanently ineligible for new selection — see
+    /// `FavoriteDestinationID.isEligible`) before it ever got the chance to migrate. Idempotent —
+    /// a no-op once no `addToSavings` entry remains.
+    func migrateAddToSavingsToMonthlyPlanIfNeeded() {
+        guard orderedDestinationIDs.contains(FavoriteDestinationID.addToSavings.rawValue) else { return }
+        var migrated: [String] = []
+        var hasMonthlyPlan = false
+        for raw in orderedDestinationIDs {
+            if raw == FavoriteDestinationID.monthlyPlan.rawValue {
+                guard !hasMonthlyPlan else { continue }
+                hasMonthlyPlan = true
+                migrated.append(raw)
+            } else if raw == FavoriteDestinationID.addToSavings.rawValue {
+                guard !hasMonthlyPlan else { continue }
+                hasMonthlyPlan = true
+                migrated.append(FavoriteDestinationID.monthlyPlan.rawValue)
+            } else {
+                migrated.append(raw)
+            }
+        }
+        guard migrated != orderedDestinationIDs else { return }
+        orderedDestinationIDs = migrated
         updatedAt = .now
     }
 

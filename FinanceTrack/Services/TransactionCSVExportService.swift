@@ -19,7 +19,23 @@ enum TransactionCSVExportService {
     /// transaction can never collide with what a later Plaid sync delivers for the same real
     /// bank transaction — see `TransactionCSVImportService`'s own header for the full restore
     /// design this schema exists to support.
-    static let header = "Date,Description,Category,Type,Amount,Pending,Source,Transaction ID,External ID"
+    ///
+    /// PROVENANCE BACKUP FIX — "Imported From Transaction ID" appended (again, only ever at the
+    /// end) preserves `FinanceTransaction.importedFromTransactionId`, the link a manual register
+    /// entry created via Activity's "Add to..." Register Import keeps back to its SOURCE connected
+    /// transaction. Without this column, a CSV export→restore round-trip would silently drop that
+    /// link and `RegisterImportService`'s duplicate check would no longer recognize the source
+    /// transaction as already imported. `TransactionCSVImportService` recognizes BOTH this 10-field
+    /// header and the prior 9-field one, so an older exported file continues to import exactly as
+    /// it always did.
+    ///
+    /// CHECK PAYMENT PHASE — "Check Number" appended as an 11th column, same "append, never
+    /// insert" rule. Always plain text, never treated as numeric (leading zeros like "001284" must
+    /// survive verbatim) — blank means no check number, exactly like every other optional column
+    /// here. `TransactionCSVImportService` recognizes this 11-field header alongside the prior
+    /// 10-field and 9-field ones, so both older exported files continue to import exactly as they
+    /// always did.
+    static let header = "Date,Description,Category,Type,Amount,Pending,Source,Transaction ID,External ID,Imported From Transaction ID,Check Number"
 
     /// The signed amount as shown to the user for this transaction — mirrors `TransactionRow`'s
     /// own `signPrefix` exactly (expense negative, refund/income positive, everything else
@@ -75,6 +91,8 @@ enum TransactionCSVExportService {
             transaction.source.label,
             transaction.id.uuidString,
             transaction.externalTransactionId ?? "",
+            transaction.importedFromTransactionId?.uuidString ?? "",
+            transaction.checkNumber ?? "",
         ]
         return fields.map(escapedField).joined(separator: ",")
     }

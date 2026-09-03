@@ -92,6 +92,15 @@ struct ExpenseListView: View {
     @Environment(AccountRelatedOptionsViewModel.self) private var accountRelatedOptionsViewModel
 
     @State private var isPresentingAdd = false
+    @State private var isPresentingAskSpendSmart = false
+    /// ACTIVITY REGISTER IMPORT — Select/Cancel toggle, connected-account transactions only.
+    @State private var isSelectingTransactions = false
+    /// The `FinanceTransaction.id`s of the currently selected connected transactions. Cleared
+    /// automatically whenever `effectiveSource` changes (see `.onChange` in `body`) — selection
+    /// never silently carries to a different source account, per this phase's explicit rule.
+    @State private var selectedTransactionIDs: Set<UUID> = []
+    @State private var isPresentingRegisterImportFlow = false
+    @State private var transactionPendingDuplicateWarning: FinanceTransaction?
     @State private var selectedDateFilter: ActivityDateFilter = .thisMonth
     @State private var customRangeStart: Date = .now
     @State private var customRangeEnd: Date = .now
@@ -150,6 +159,40 @@ struct ExpenseListView: View {
         return .owned(ActivityTabPresenter.defaultTab(tabs: ownedTabs))
     }
 
+    /// ACCOUNT PICKER (Part 1) — alphabetical-by-DISPLAYED-name ordering for the picker's menu
+    /// only; never touches `ownedTabs`/`ActivityTabPresenter.tabs`'s own stable id-based order,
+    /// which Dashboard/Weekly still rely on unchanged. Manual Transactions always sorts last,
+    /// matching its existing "reference bucket, not an account" positioning; any Primary-shared
+    /// accounts keep their existing relative order, appended after owned sources exactly as the
+    /// old chip bar did.
+    private var pickerSources: [ActivitySource] {
+        let ownedConnected = ownedTabs.compactMap { tab -> ActivitySource? in
+            if case .connectedAccount = tab { return .owned(tab) }
+            return nil
+        }.sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
+        let shared = sharedConnectedAccounts.map(ActivitySource.sharedConnected) + sharedManualAccounts.map(ActivitySource.sharedManual)
+        return ownedConnected + [.owned(.manual)] + shared
+    }
+
+    /// ACTIVITY REGISTER IMPORT (Part 2) — the Select control (and select-mode checkboxes) only
+    /// ever apply to an owned CONNECTED account; Manual Transactions rows are already register
+    /// entries themselves, and shared accounts are read-only reference data.
+    private var isShowingSelectableConnectedSource: Bool {
+        if case .owned(.connectedAccount) = effectiveSource { return true }
+        return false
+    }
+
+    /// Every source transaction id that already has a manual register entry pointing to it —
+    /// computed from the same `@Query`-backed `transactions` array every other Activity
+    /// computation already uses, never a second fetch.
+    private var alreadyImportedSourceIds: Set<UUID> {
+        RegisterImportService.alreadyImportedSourceIds(in: transactions)
+    }
+
+    private var selectedSourceTransactions: [FinanceTransaction] {
+        filteredTransactions.filter { selectedTransactionIDs.contains($0.id) }
+    }
+
     private var selectedInterval: DateInterval {
         switch selectedDateFilter {
         case .thisWeek:
@@ -195,7 +238,31 @@ struct ExpenseListView: View {
                 return (day, dayTransactions, total)
             }
         case .connectedAccount:
-            return DailyTransactionTotals.groups(for: filteredTransactions).map { ($0.day, $0.transactions, $0.total) }
+            // FINANCIAL DATA CORRECTNESS PHASE — root cause of a deposit-only day (e.g. four
+            // pending Wells Fargo deposits totaling $8,678.47) showing a "$0.00" heading: this
+            // used to read `DailyTransactionTotals.groups(for:).total`, which sums
+            // `spendingDelta` (an "amount spent" accumulator — `.expense` positive, `.refund`/
+            // `.income` negative, everything else — including `.creditCardPayment`, the type a
+            // Plaid deposit with a negative reported amount is classified as, see
+            // `PlaidTransactionImportService.classifyPlaidAmount` — contributes exactly ZERO) and
+            // then FLOORS the result at zero. A day of only `.creditCardPayment`-typed deposits
+            // therefore summed to 0, floored to 0, matching the reported bug exactly. Per this
+            // phase's own "create an Activity-account-specific net value, do not change the
+            // shared helper globally" instruction, this now sums `signedActivityAmount(for:)` —
+            // the SAME signed-net convention already correctly used for this screen's own bottom
+            // Posted/Pending/Total summary — never floored, so a deposit-only day now shows a
+            // true positive net and an expense-only day still shows a true negative net.
+            // `DailyTransactionTotals`/`spendingDelta`/`groups(for:)`/`sharedDailyGroups` are
+            // completely untouched — this is a change to THIS call site only.
+            let calendar = Calendar.current
+            let days = Set(filteredTransactions.map { calendar.startOfDay(for: $0.date) }).sorted(by: >)
+            return days.map { day in
+                let dayTransactions = filteredTransactions
+                    .filter { calendar.isDate($0.date, inSameDayAs: day) }
+                    .sorted { $0.date > $1.date }
+                let total = dayTransactions.reduce(Decimal(0)) { $0 + signedActivityAmount(for: $1) }
+                return (day, dayTransactions, total)
+            }
         }
     }
 
@@ -276,13 +343,24 @@ struct ExpenseListView: View {
         filteredTransactions.filter { $0.isPending }.reduce(Decimal(0)) { $0 + signedActivityAmount(for: $1) }
     }
 
+    /// SPENDAI LAUNCHER VISUAL CORRECTION — the ONE `SpendAILauncherControl` call site for this
+    /// screen, shared by both the iOS 26+ and pre-26 toolbar branches below (see `body`'s own
+    /// `.toolbar` for why two branches exist at all) — factored out so the two branches present
+    /// the exact same control instance/action rather than two independently-constructed copies.
+    private var spendAILauncherContent: some View {
+        SpendAILauncherControl(glyphSize: 28) {
+            isPresentingAskSpendSmart = true
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     if sources.count > 1 {
-                        sourceTabSection
+                        accountPickerSection
                     }
+                    selectControlRow
                     filterSection
 
                     if case .owned = effectiveSource {
@@ -294,6 +372,17 @@ struct ExpenseListView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
+            .safeAreaInset(edge: .bottom) {
+                if !selectedTransactionIDs.isEmpty {
+                    selectedActionBar
+                }
+            }
+            .onChange(of: effectiveSource) {
+                // ACTIVITY REGISTER IMPORT — selection never silently carries to a different
+                // source account: switching sources always clears it and exits select mode.
+                isSelectingTransactions = false
+                selectedTransactionIDs = []
+            }
             .navigationTitle("Activity")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -311,9 +400,62 @@ struct ExpenseListView: View {
                         }
                     }
                 }
+                // SPENDAI UI PLACEMENT CORRECTION — always present regardless of which Activity
+                // tab is selected (unlike the conditional "+" above); artwork ABOVE the "SpendAI"
+                // label via the one shared `SpendAILauncherControl` (never a per-screen
+                // duplicate), noticeably larger than the prior bare 20pt glyph.
+                //
+                // SPENDAI LAUNCHER VISUAL CORRECTION — ROOT CAUSE of the unwanted circle Scott saw
+                // on a physical device: this is not a background/circle/capsule this app ever
+                // drew itself (`SpendAILauncherControl`/`AskSpendSmartGlyph` contain no such
+                // modifier — confirmed by direct inspection of both). It is the OS automatically
+                // applying its Liquid Glass effect to toolbar item content in the navigation bar
+                // (confirmed via current SwiftUI documentation: "toolbar items will be given a
+                // glass background effect"). `.sharedBackgroundVisibility(.hidden)` is Apple's
+                // documented lever for opting a specific toolbar item out of that automatic glass
+                // background — the correct fix at its actual source, not a cosmetic override.
+                // Gated behind `#available(iOS 26.0, *)` since this modifier doesn't exist on the
+                // app's iOS 17.0 deployment target; pre-26 runtimes had no Liquid Glass to begin
+                // with, so the plain (ungated) `ToolbarItem` below is already circle-free there.
+                // Both branches present the exact same `spendAILauncherContent` — one control,
+                // never a second/duplicate launcher — only the glass-visibility modifier differs.
+                if #available(iOS 26.0, *) {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        spendAILauncherContent
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        spendAILauncherContent
+                    }
+                }
             }
             .sheet(isPresented: $isPresentingAdd) {
                 AddExpenseView()
+            }
+            .sheet(isPresented: $isPresentingAskSpendSmart) {
+                AskSpendSmartView(screenContext: .activity)
+            }
+            .sheet(isPresented: $isPresentingRegisterImportFlow) {
+                RegisterImportFlowView(
+                    sourceTransactions: selectedSourceTransactions,
+                    alreadyImportedSourceIds: alreadyImportedSourceIds,
+                    onSuccess: {
+                        isSelectingTransactions = false
+                        selectedTransactionIDs = []
+                    }
+                )
+            }
+            .alert(
+                "Already Added",
+                isPresented: Binding(
+                    get: { transactionPendingDuplicateWarning != nil },
+                    set: { isPresented in if !isPresented { transactionPendingDuplicateWarning = nil } }
+                )
+            ) {
+                Button("OK") { transactionPendingDuplicateWarning = nil }
+            } message: {
+                Text("This transaction has already been added to a register.")
             }
             .confirmationDialog(
                 transactionPendingDeletion.map { ManualTransactionDeletionService.confirmationCopy(for: $0).title } ?? "Delete?",
@@ -433,17 +575,83 @@ struct ExpenseListView: View {
 
     // MARK: - Source tabs (Manual Transactions, each owned connected account, each shared account)
 
-    private var sourceTabSection: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Theme.Spacing.sm) {
-                ForEach(sources) { source in
-                    FilterChip(title: source.label, isSelected: source == effectiveSource) {
+    /// ACCOUNT PICKER (Part 1) — replaces the old horizontally-scrolling `FilterChip` row with a
+    /// single compact `Menu`, directly under the Activity title. `pickerSources` (alphabetized by
+    /// displayed name) drives the menu's contents; selecting an entry still just writes
+    /// `selectedSource`, so `effectiveSource`/`filteredTransactions`/`dailyGroups` and every
+    /// calculation downstream of them are completely unchanged.
+    private var accountPickerSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Text("Account")
+                .font(Theme.captionFont)
+                .foregroundStyle(Theme.textSecondary)
+            Menu {
+                ForEach(pickerSources) { source in
+                    Button {
                         selectedSource = source
+                    } label: {
+                        if source == effectiveSource {
+                            Label(source.label, systemImage: "checkmark")
+                        } else {
+                            Text(source.label)
+                        }
                     }
                 }
+            } label: {
+                HStack {
+                    Text(effectiveSource.label)
+                        .font(Theme.bodyFont)
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .padding(.horizontal, Theme.Spacing.md)
+                .frame(minHeight: 44)
+                .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.cardSurface))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).strokeBorder(Theme.cardStroke, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+    }
+
+    /// ACTIVITY REGISTER IMPORT (Part 2) — Select/Cancel, connected accounts only.
+    @ViewBuilder
+    private var selectControlRow: some View {
+        if isShowingSelectableConnectedSource {
+            HStack {
+                Button(isSelectingTransactions ? "Cancel" : "Select") {
+                    isSelectingTransactions.toggle()
+                    if !isSelectingTransactions {
+                        selectedTransactionIDs = []
+                    }
+                }
+                .font(Theme.bodyFont)
+                .foregroundStyle(Theme.accent)
+                Spacer()
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }
+    }
+
+    /// ACTIVITY REGISTER IMPORT (Part 2/3) — the "N Selected / Add to..." action area, pinned
+    /// above the bottom tab bar via `.safeAreaInset(edge: .bottom)` so it never covers it.
+    private var selectedActionBar: some View {
+        HStack {
+            Text("\(selectedTransactionIDs.count) Selected")
+                .font(Theme.bodyFont)
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+            Button("Add to...") {
+                isPresentingRegisterImportFlow = true
+            }
+            .font(Theme.bodyFont.weight(.semibold))
+            .foregroundStyle(Theme.accent)
+        }
+        .padding(Theme.Spacing.md)
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - Filters
@@ -546,7 +754,37 @@ struct ExpenseListView: View {
     @ViewBuilder
     private func transactionRow(for transaction: FinanceTransaction) -> some View {
         if transaction.source == .plaid {
-            ConnectedTransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
+            let isAlreadyImported = alreadyImportedSourceIds.contains(transaction.id)
+            if isSelectingTransactions {
+                Button {
+                    if isAlreadyImported {
+                        transactionPendingDuplicateWarning = transaction
+                    } else if selectedTransactionIDs.contains(transaction.id) {
+                        selectedTransactionIDs.remove(transaction.id)
+                    } else {
+                        selectedTransactionIDs.insert(transaction.id)
+                    }
+                } label: {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        Image(systemName: selectedTransactionIDs.contains(transaction.id) ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 20))
+                            .foregroundStyle(selectedTransactionIDs.contains(transaction.id) ? Theme.accent : Theme.textTertiary)
+                        ConnectedTransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
+                    }
+                    .opacity(isAlreadyImported ? 0.5 : 1)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(isAlreadyImported ? "Already added to a register" : "")
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    ConnectedTransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
+                    if isAlreadyImported {
+                        Text("\u{2713} In Register")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+            }
         } else {
             HStack(spacing: 0) {
                 TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled, showsTypeBadge: true, connectedAccountLabel: connectedAccountLabel(for: transaction))
