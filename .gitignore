@@ -31,3 +31,7 @@ supabase/.temp/
 
 # Local backups
 *.zip
+
+# Local, throwaway verification scripts (never contain secrets themselves — they prompt at
+# runtime — but don't belong in the repo either)
+.claude-scratch/
