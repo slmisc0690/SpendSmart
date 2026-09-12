@@ -3,16 +3,27 @@ import SwiftData
 
 /// EXCLUDE TRANSACTIONS — lets the user pick specific transactions to leave out of Weekly/Monthly
 /// budget calculations, WITHOUT touching the transaction itself in any way (no field on
-/// `FinanceTransaction` is ever read or written here). Shows every local transaction — Connected
-/// Account, Manual Account, and manually-added expenses alike — day-grouped exactly like
+/// `FinanceTransaction` is ever read or written here). Shows CURRENT-MONTH local transactions only —
+/// Connected Account, Manual Account, and manually-added expenses alike — day-grouped exactly like
 /// `ExpenseListView`'s own Activity list (`DailyTransactionTotals.groups(for:)`, the same shared
 /// day-bucketing service that screen uses), reusing `ConnectedTransactionRow`/`TransactionRow`
 /// unmodified for each row. A checkmark button is added ALONGSIDE each row, never inside it.
 ///
-/// DRAFT-THEN-SAVE: selections are held in local `@State` (`draftExcludedIDs`) until "Save" is
-/// tapped, so "Cancel" truly discards every change, matching the required Cancel/Save contract.
-/// Persistence itself is a single write to `BudgetSettings.excludedTransactionIDs` — no per-row
-/// SwiftData mutation of any kind.
+/// MONTH SCOPE (Scott's explicit request): this screen used to show every transaction ever, all
+/// months mixed together. It now scopes the browsable/toggleable list to
+/// `DateRangeHelper.currentMonthRange()` — the SAME helper `DashboardView.monthInterval` already
+/// uses — so October only ever shows October's own activity, etc. This is a DISPLAY scope change
+/// ONLY: `BudgetSettings.excludedTransactionIDs` is loaded in full at `.task` time and `save()`
+/// still persists the complete `draftExcludedIDs` set, so a transaction excluded in August stays
+/// excluded in August's own historical totals forever — nothing about how exclusions are STORED or
+/// APPLIED changes, only what is shown/toggleable in this one screen.
+///
+/// EARLIER-MONTH EXCLUSIONS STAY REACHABLE (required addition, not optional): scoping the main list
+/// to the current month would otherwise create hidden, un-reachable state — a past exclusion the
+/// user can never see or undo again. `earlierExclusions` surfaces exactly those (and only those —
+/// not every past transaction, just the ones actually checked) in a collapsed-by-default
+/// `SettingsCollapsibleSection` ABOVE the current month's list, so it's immediately visible on
+/// opening the screen, never something to discover by scrolling.
 struct ExcludeTransactionsView: View {
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactions: [FinanceTransaction]
     @Query private var settingsList: [BudgetSettings]
@@ -23,29 +34,78 @@ struct ExcludeTransactionsView: View {
     @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     @State private var draftExcludedIDs: Set<UUID> = []
+    @State private var isEarlierExclusionsExpanded = false
 
     private var settings: BudgetSettings? { settingsList.first }
 
+    private var currentMonthRange: DateInterval {
+        DateRangeHelper.currentMonthRange()
+    }
+
+    private var currentMonthTransactions: [FinanceTransaction] {
+        transactions.filter { currentMonthRange.contains($0.date) }
+    }
+
     private var dayGroups: [DailyTransactionTotals.DayGroup] {
-        DailyTransactionTotals.groups(for: transactions)
+        DailyTransactionTotals.groups(for: currentMonthTransactions)
+    }
+
+    /// Transactions currently checked as excluded (via the live, editable `draftExcludedIDs` —
+    /// same state the current month's own checkmarks read, so un-checking one here updates
+    /// immediately exactly like the current-month rows do) whose date falls OUTSIDE the current
+    /// month. Deliberately only these specific rows, never every past transaction — the point is
+    /// to surface exactly what's hidden, not to reintroduce the full all-time list this change
+    /// removes.
+    private var earlierExclusions: [FinanceTransaction] {
+        transactions.filter { draftExcludedIDs.contains($0.id) && !currentMonthRange.contains($0.date) }
+    }
+
+    private var earlierExclusionsDayGroups: [DailyTransactionTotals.DayGroup] {
+        DailyTransactionTotals.groups(for: earlierExclusions)
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                if dayGroups.isEmpty {
-                    Text("No transactions yet.")
-                        .font(Theme.bodyFont)
-                        .foregroundStyle(Theme.textTertiary)
-                        .padding(.top, Theme.Spacing.xl)
-                } else {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                        ForEach(dayGroups) { group in
-                            daySection(group)
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                    // EARLIER-MONTH EXCLUSIONS — always checked and shown first (never gated behind
+                    // `dayGroups.isEmpty`, since past exclusions can exist even with zero current-
+                    // month transactions), collapsed by default, so it's visible immediately on
+                    // opening the screen rather than requiring scroll discovery.
+                    if !earlierExclusions.isEmpty {
+                        SettingsCollapsibleSection(
+                            title: "Excluded in Earlier Months (\(earlierExclusions.count))",
+                            isExpanded: $isEarlierExclusionsExpanded
+                        ) {
+                            // `SettingsCollapsibleSection` already applies its own horizontal
+                            // padding around `content()`, and `daySection` applies the SAME
+                            // padding internally too — negated here so nested rows line up with
+                            // the current-month list below, one layer of inset, not two.
+                            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                                ForEach(earlierExclusionsDayGroups) { group in
+                                    daySection(group)
+                                }
+                            }
+                            .padding(.horizontal, -Theme.Spacing.lg)
+                            .padding(.top, Theme.Spacing.sm)
                         }
                     }
-                    .padding(.vertical, Theme.Spacing.lg)
+
+                    if dayGroups.isEmpty {
+                        Text("No transactions this month.")
+                            .font(Theme.bodyFont)
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.top, Theme.Spacing.xl)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                            ForEach(dayGroups) { group in
+                                daySection(group)
+                            }
+                        }
+                    }
                 }
+                .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .navigationTitle("Exclude Transactions")

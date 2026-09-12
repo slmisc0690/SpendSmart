@@ -32799,6 +32799,54 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("Button(\"Save\") { save() }"))
     }
 
+    // MARK: - MONTH SCOPE (Part 2) — current-month-only browsing, earlier exclusions stay reachable
+
+    func testExcludeTransactionsViewScopesBrowsableListToCurrentMonth() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/ExcludeTransactionsView.swift")
+        XCTAssertTrue(source.contains("DateRangeHelper.currentMonthRange()"), "the browsable/toggleable list must be scoped to the current month, not every transaction ever")
+    }
+
+    /// The exact trap Scott named: scoping the DISPLAY to the current month must never also scope
+    /// what gets PERSISTED — `save()` must still write the complete draft set, including any
+    /// earlier-month exclusion ids never shown in the current-month list, or a past exclusion the
+    /// user never touched this session would be silently dropped on the next Save.
+    func testExcludeTransactionsSaveStillPersistsFullDraftSetNotJustCurrentMonth() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/ExcludeTransactionsView.swift")
+        guard let range = source.range(of: "private func save() {") else {
+            XCTFail("save() not found"); return
+        }
+        let scoped = String(source[range.lowerBound...].prefix(400))
+        XCTAssertTrue(scoped.contains("Array(draftExcludedIDs)"), "save() must persist the complete draft set, unfiltered by month")
+    }
+
+    func testExcludeTransactionsViewSurfacesEarlierMonthExclusions() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/ExcludeTransactionsView.swift")
+        XCTAssertTrue(source.contains("Excluded in Earlier Months"), "exclusions outside the current month must be surfaced, never silently hidden with no way back to them")
+        XCTAssertTrue(source.contains("SettingsCollapsibleSection"), "must reuse the existing shared collapsible-section component, not a new one")
+        XCTAssertTrue(source.contains("@State private var isEarlierExclusionsExpanded = false"), "must default to collapsed — visible on open, not forced open over the current month's own list")
+    }
+
+    /// Mirrors `ExcludeTransactionsView.earlierExclusions`' own filter exactly — a `private`
+    /// computed property inside a SwiftUI View, not directly testable, same rationale as this
+    /// file's existing `PlaidAccountReconciliation`/Activity-signed-amount mirror tests.
+    @MainActor
+    func testEarlierExclusionsFilterMirrorLogic() {
+        let currentMonthRange = DateRangeHelper.currentMonthRange()
+        let account = Account(name: "Checking", type: .checking)
+        let thisMonthExcluded = FinanceTransaction(amount: 10, date: .now, type: .expense, source: .manual, account: account)
+        let lastMonthDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
+        let lastMonthExcluded = FinanceTransaction(amount: 20, date: lastMonthDate, type: .expense, source: .manual, account: account)
+        let lastMonthNotExcluded = FinanceTransaction(amount: 30, date: lastMonthDate, type: .expense, source: .manual, account: account)
+
+        let allTransactions = [thisMonthExcluded, lastMonthExcluded, lastMonthNotExcluded]
+        let draftExcludedIDs: Set<UUID> = [thisMonthExcluded.id, lastMonthExcluded.id]
+
+        let earlierExclusions = allTransactions.filter { draftExcludedIDs.contains($0.id) && !currentMonthRange.contains($0.date) }
+
+        XCTAssertEqual(earlierExclusions.count, 1)
+        XCTAssertEqual(earlierExclusions.first?.id, lastMonthExcluded.id, "must include only the CHECKED earlier-month transaction — never an un-excluded one, and never the current-month one")
+    }
+
     func testExpenseListViewDoesNotReferenceBudgetCalculatorActualSpendingForTotal() throws {
         // The Activity Total must never be confused with Weekly/Monthly Actual Spending — those
         // stay fully untouched by this task.
