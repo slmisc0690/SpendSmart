@@ -9,8 +9,8 @@ import Foundation
 enum SpendAIResultFormatter {
     static func format(_ result: SpendAIQueryResult) -> String {
         switch result {
-        case .budgetExclusions(let exclusions, let dateRangeLabel):
-            return formatBudgetExclusions(exclusions, dateRangeLabel: dateRangeLabel)
+        case .budgetExclusions(let exclusions, let operation, let operationWasExplicit, let dateRangeLabel):
+            return formatBudgetExclusions(exclusions, operation: operation, operationWasExplicit: operationWasExplicit, dateRangeLabel: dateRangeLabel)
         case .budgetSettings(let settings):
             return formatBudgetSettings(settings)
         case .weeklyStatus(let weekly):
@@ -46,8 +46,20 @@ enum SpendAIResultFormatter {
 
     // MARK: - Budget Exclusions (reuses the exact wording already proven in AskSpendSmartFallbackRouter)
 
-    private static func formatBudgetExclusions(_ result: AskSpendSmartToolContext.BudgetExclusionsResult, dateRangeLabel: String) -> String {
-        AskSpendSmartFallbackRouter.formatBudgetExclusionsAnswer(result: result, operation: .both, dateRangeLabel: dateRangeLabel)
+    /// ROOT-CAUSE FIX — this used to hardcode `operation: .both`, discarding whatever the router or
+    /// Apple's model actually chose (count/total/both/list) — see `SpendAIQueryResult.budgetExclusions`'s
+    /// own header for the full explanation. `SpendAIOperation` has more cases than this domain ever
+    /// produces (only count/total/both/list ever reach here, via `generalizedOperation`), so the
+    /// `default: .both` branch below is unreachable in practice, not a silent behavior change.
+    private static func formatBudgetExclusions(_ result: AskSpendSmartToolContext.BudgetExclusionsResult, operation: SpendAIOperation, operationWasExplicit: Bool, dateRangeLabel: String) -> String {
+        let localOperation: AskSpendSmartFallbackRouter.Operation
+        switch operation {
+        case .count: localOperation = .count
+        case .total: localOperation = .amount
+        case .list: localOperation = .list
+        default: localOperation = .both
+        }
+        return AskSpendSmartFallbackRouter.formatBudgetExclusionsAnswer(result: result, operation: localOperation, operationWasExplicit: operationWasExplicit, dateRangeLabel: dateRangeLabel)
     }
 
     // MARK: - Budget Settings

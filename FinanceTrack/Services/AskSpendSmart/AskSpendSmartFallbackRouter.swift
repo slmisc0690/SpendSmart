@@ -58,21 +58,42 @@ enum AskSpendSmartFallbackRouter {
 
     // MARK: - Operation recognition
 
-    private static func parseOperation(_ normalized: String) -> Operation {
+    /// HONEST-MATCH PHASE — returns `nil` when NO operation keyword is present at all, so the
+    /// caller can tell a genuine match from a silent default. Scott's own explicit requirement:
+    /// "You have 12 excluded transactions totaling $847" is a true statement and a non-answer to
+    /// "what are my excluded transactions" — presenting a default as if it were the answer is
+    /// worse than admitting the question wasn't understood. "total" is deliberately its OWN
+    /// confident match (not the fallthrough) — a bare "total of X" was already reasoned through as
+    /// a genuine, intentional ambiguity between count and dollar total (see
+    /// `testEndToEndPastTwoWeeksExcludedTransactionsTotal`'s own comment), not a failure to
+    /// classify, so it must never trigger the "I'm not sure what you're asking" wording.
+    private static func matchOperationKeyword(_ normalized: String) -> Operation? {
         if normalized.contains("how many") || normalized.contains("number of") || normalized.contains("count") {
             return .count
         }
         if normalized.contains("list") || normalized.contains("show me") || normalized.contains("show my")
-            || normalized.contains("which transaction") || normalized.contains("what transaction") {
+            || normalized.contains("which transaction") || normalized.contains("what transaction")
+            || normalized.contains("what are") || normalized.contains("what were")
+            || normalized.contains("break down") || normalized.contains("breakdown") || normalized.contains("itemize") {
             return .list
         }
         if normalized.contains("how much") {
             return .amount
         }
-        // "total"/"total amount"/"total number" fell through the more specific checks above —
-        // an ambiguous "total" returns BOTH the count and the money total rather than guessing or
-        // failing, per this feature's own explicit "never fail on an ambiguous total" requirement.
-        return .both
+        if normalized.contains("total") {
+            return .both
+        }
+        return nil
+    }
+
+    /// Preserves the exact prior behavior (no keyword → `.both`) for the ONE caller that doesn't
+    /// need to distinguish a genuine match from a silent default — the follow-up-context path
+    /// below, where a bare "what was that?" after an already-answered Budget Exclusions question
+    /// defaulting to both is pre-existing behavior Scott did not ask to change. The Budget
+    /// Exclusions plan-building branch calls `matchOperationKeyword` directly instead, specifically
+    /// so it CAN tell the difference (see `operationWasExplicit` on `SpendAIQueryPlan`).
+    private static func parseOperation(_ normalized: String) -> Operation {
+        matchOperationKeyword(normalized) ?? .both
     }
 
     // MARK: - Date-range recognition (rolling windows are LOCAL to this router — see this type's
@@ -160,6 +181,7 @@ enum AskSpendSmartFallbackRouter {
     static func formatBudgetExclusionsAnswer(
         result: AskSpendSmartToolContext.BudgetExclusionsResult,
         operation: Operation,
+        operationWasExplicit: Bool = true,
         dateRangeLabel: String
     ) -> String {
         guard result.isEnabled else {
@@ -178,9 +200,19 @@ enum AskSpendSmartFallbackRouter {
         case .amount:
             return "Your excluded transactions\(rangePhrase) total \(formattedAmount(result.totalAmount))."
         case .both:
-            return "You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase), totaling \(formattedAmount(result.totalAmount))."
+            // HONEST-MATCH PHASE — `.both` is reached two different ways: a confident "total of X"
+            // match (see `matchOperationKeyword`) and a genuine no-keyword-matched-at-all default.
+            // `operationWasExplicit` distinguishes them so the second case never presents a default
+            // as if it were a considered answer to the actual question asked.
+            let uncertaintyPrefix = operationWasExplicit ? "" : "I'm not sure exactly what you're asking for, so here's the count and total: "
+            return "\(uncertaintyPrefix)You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase), totaling \(formattedAmount(result.totalAmount))."
         case .list:
-            let names = result.transactions.prefix(5).map { "\($0.description) (\(formattedAmount($0.amount)))" }.joined(separator: ", ")
+            // CAP RAISED FROM 5 TO 50 — matches `AskSpendSmartToolContext.budgetExclusions`'s own
+            // `resultLimit: Int = 50` fetch cap exactly (Part 1c); `result.totalMatchCount` above
+            // was ALREADY the true, uncapped total even before this change (verified directly
+            // against that function's own `matched.count`, computed before any `resultLimit`
+            // truncation) — only the itemized listing itself was ever short.
+            let names = result.transactions.prefix(50).map { "\($0.description) (\(formattedAmount($0.amount)))" }.joined(separator: ", ")
             let more = result.truncated ? " — showing \(result.transactions.count) of \(result.totalMatchCount)" : ""
             return "You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase): \(names)\(more)."
         }
@@ -221,9 +253,15 @@ enum AskSpendSmartFallbackRouter {
         }
 
         if matchesBudgetExclusionsDomain(normalized) {
-            let operation = parseOperation(normalized)
+            let matchedOperation = matchOperationKeyword(normalized)
             let (range, label) = parseDateRange(normalized, now: now, calendar: calendar)
-            return SpendAIQueryPlan(domain: .budgetExclusions, operation: generalizedOperation(from: operation, domain: .budgetExclusions), dateRange: range, dateRangeLabel: label)
+            return SpendAIQueryPlan(
+                domain: .budgetExclusions,
+                operation: generalizedOperation(from: matchedOperation ?? .both, domain: .budgetExclusions),
+                dateRange: range,
+                dateRangeLabel: label,
+                operationWasExplicit: matchedOperation != nil
+            )
         }
 
         if containsAny(normalized, ["what if", "hypothetical"]) || (normalized.contains("if i") && (normalized.contains("save") || normalized.contains("saved"))) {

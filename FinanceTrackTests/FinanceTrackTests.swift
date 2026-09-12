@@ -11810,6 +11810,73 @@ final class FinanceTrackTests: XCTestCase {
         _ = excluded
     }
 
+    // MARK: - SPEND AI ROUTING HONESTY PHASE — unmatched operation must say so, never silently
+    // present a default as the answer to a different question
+
+    /// A question that confidently matches the Budget Exclusions DOMAIN but contains no operation
+    /// keyword at all ("count"/"how many"/"how much"/"list"/"total"/etc.) must be flagged as an
+    /// unmatched default, not a genuine "both" match — Scott's own explicit requirement that a
+    /// confident non-answer is worse than a stated uncertainty.
+    func testBudgetExclusionsUnmatchedOperationIsFlaggedNotSilentlyBoth() throws {
+        let now = day(2026, 8, 30)
+        let plan = try XCTUnwrap(AskSpendSmartFallbackRouter.routeGeneralized("tell me about my excluded transactions", now: now))
+        XCTAssertEqual(plan.domain, .budgetExclusions)
+        XCTAssertEqual(plan.operation, .both)
+        XCTAssertFalse(plan.operationWasExplicit, "no operation keyword is present at all — this must be flagged as a silent default")
+
+        let result = AskSpendSmartToolContext.BudgetExclusionsResult(isEnabled: true, count: 2, totalAmount: "-50.00", transactions: [], totalMatchCount: 2, truncated: false)
+        let answer = SpendAIResultFormatter.format(.budgetExclusions(result, operation: plan.operation, operationWasExplicit: plan.operationWasExplicit, dateRangeLabel: plan.dateRangeLabel))
+        XCTAssertTrue(answer.localizedCaseInsensitiveContains("not sure"), "an unmatched operation must say it isn't sure what was asked, rather than presenting count+total as if it were the considered answer")
+    }
+
+    /// "total" is a DELIBERATE, previously-reasoned ambiguity (count vs. dollar total) — a
+    /// confident choice to answer both, never the silent-default case above.
+    func testBudgetExclusionsTotalKeywordIsConfidentMatchNotUncertain() throws {
+        let now = day(2026, 8, 30)
+        let plan = try XCTUnwrap(AskSpendSmartFallbackRouter.routeGeneralized("what's the total of my excluded transactions", now: now))
+        XCTAssertEqual(plan.operation, .both)
+        XCTAssertTrue(plan.operationWasExplicit, "\"total\" is a confident match, not a silent fallback")
+
+        let result = AskSpendSmartToolContext.BudgetExclusionsResult(isEnabled: true, count: 2, totalAmount: "-50.00", transactions: [], totalMatchCount: 2, truncated: false)
+        let answer = SpendAIResultFormatter.format(.budgetExclusions(result, operation: plan.operation, operationWasExplicit: plan.operationWasExplicit, dateRangeLabel: plan.dateRangeLabel))
+        XCTAssertFalse(answer.localizedCaseInsensitiveContains("not sure"), "a confident \"total\" match must never carry the uncertainty prefix")
+    }
+
+    /// ROOT-CAUSE REGRESSION GUARD — before this fix, `SpendAIQueryResult.budgetExclusions` carried
+    /// NO operation at all, and `SpendAIResultFormatter.formatBudgetExclusions` hardcoded `.both`:
+    /// a "list"-worded question was correctly PARSED as `.list` by the router but always ANSWERED
+    /// as count+total regardless, because the operation never survived the hand-off to the
+    /// formatter. This proves it now flows through end to end.
+    func testBudgetExclusionsListOperationFlowsThroughToFormattedAnswer() throws {
+        let now = day(2026, 8, 30)
+        let plan = try XCTUnwrap(AskSpendSmartFallbackRouter.routeGeneralized("show me my excluded transactions", now: now))
+        XCTAssertEqual(plan.operation, .list)
+
+        let transactions = (1...3).map { i in
+            AskSpendSmartToolContext.ExcludedTransactionResult(date: "2026-08-1\(i)", amount: "\(i)0.00", type: "expense", description: "Merchant \(i)", category: nil, accountName: "Checking", isPending: false)
+        }
+        let result = AskSpendSmartToolContext.BudgetExclusionsResult(isEnabled: true, count: 3, totalAmount: "-60.00", transactions: transactions, totalMatchCount: 3, truncated: false)
+        let answer = SpendAIResultFormatter.format(.budgetExclusions(result, operation: plan.operation, operationWasExplicit: plan.operationWasExplicit, dateRangeLabel: plan.dateRangeLabel))
+        XCTAssertTrue(answer.contains("Merchant 1"))
+        XCTAssertTrue(answer.contains("Merchant 2"))
+        XCTAssertTrue(answer.contains("Merchant 3"), "a genuine list request must enumerate every fetched transaction, never fall back to count+total")
+    }
+
+    /// CAP RAISED FROM 5 TO 50 (Part 1c) — matches `AskSpendSmartToolContext.budgetExclusions`'s
+    /// own `resultLimit: Int = 50` fetch cap; `totalMatchCount` was already the true, uncapped
+    /// total even before this change (verified directly against `budgetExclusions`'s own
+    /// `matched.count`, computed before any `resultLimit` truncation) — only the itemized listing
+    /// itself was ever short.
+    func testBudgetExclusionsListCapRaisedTo50() {
+        let transactions = (1...30).map { i in
+            AskSpendSmartToolContext.ExcludedTransactionResult(date: "2026-08-01", amount: "1.00", type: "expense", description: "Item \(i)", category: nil, accountName: nil, isPending: false)
+        }
+        let result = AskSpendSmartToolContext.BudgetExclusionsResult(isEnabled: true, count: 30, totalAmount: "-30.00", transactions: transactions, totalMatchCount: 30, truncated: false)
+        let answer = AskSpendSmartFallbackRouter.formatBudgetExclusionsAnswer(result: result, operation: .list, dateRangeLabel: "all time")
+        XCTAssertTrue(answer.contains("Item 1"))
+        XCTAssertTrue(answer.contains("Item 30"), "the display cap was raised to 50 — all 30 items must appear, not be cut off at 5")
+    }
+
     // MARK: - RUNTIME RELIABILITY PHASE — fresh snapshot / error classification / architecture
 
     func testConversationModelRefreshesToolContextBeforeSendWhenProvided() async {

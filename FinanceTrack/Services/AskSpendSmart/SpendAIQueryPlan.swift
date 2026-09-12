@@ -74,6 +74,16 @@ struct SpendAIQueryPlan: Sendable, Equatable {
     var hypotheticalAmount: Decimal?
     /// Only meaningful for `.appFeatureInformation` — the feature/topic name being asked about.
     var featureTopic: String?
+    /// SPEND AI ROUTING HONESTY PHASE — only meaningful for `.budgetExclusions`, and only ever set
+    /// `false` by the local deterministic router (`AskSpendSmartFallbackRouter`), when the question
+    /// contained no operation-specific keyword ("list", "how many", "how much", "total", etc.) at
+    /// all — meaning `operation` above was silently defaulted to `.both` rather than genuinely
+    /// chosen. Always `true` for a plan Apple's on-device model produces itself (it always chooses
+    /// an explicit operation value, never a silent fallback) and for every other domain, which
+    /// don't read this field at all. Used by `SpendAIResultFormatter`/`formatBudgetExclusionsAnswer`
+    /// to decide whether to answer plainly or to first say the question wasn't clearly understood —
+    /// Scott's own explicit "a confident non-answer is worse than a stated uncertainty" requirement.
+    var operationWasExplicit: Bool = true
 
     init(
         domain: SpendAIDomain,
@@ -87,7 +97,8 @@ struct SpendAIQueryPlan: Sendable, Equatable {
         pendingFilter: PendingFilterSpec = .all,
         resultLimit: Int = 50,
         hypotheticalAmount: Decimal? = nil,
-        featureTopic: String? = nil
+        featureTopic: String? = nil,
+        operationWasExplicit: Bool = true
     ) {
         self.domain = domain
         self.operation = operation
@@ -101,6 +112,7 @@ struct SpendAIQueryPlan: Sendable, Equatable {
         self.resultLimit = resultLimit
         self.hypotheticalAmount = hypotheticalAmount
         self.featureTopic = featureTopic
+        self.operationWasExplicit = operationWasExplicit
     }
 }
 
@@ -138,7 +150,15 @@ struct SpendAIFollowUpContext: Sendable, Equatable {
 /// what "map each domain to existing canonical logic" (Phase F) looks like at the type level: the
 /// registry's job is choosing/calling the right existing method, never re-deriving its math.
 enum SpendAIQueryResult: Sendable, Equatable {
-    case budgetExclusions(AskSpendSmartToolContext.BudgetExclusionsResult, dateRangeLabel: String)
+    /// ROOT-CAUSE FIX — `operation`/`operationWasExplicit` were MISSING from this case entirely
+    /// before this change: `SpendAIDataRegistry.execute` read `plan.dateRange` but never
+    /// `plan.operation`, so no matter what the router correctly parsed (count/total/both/list),
+    /// `SpendAIResultFormatter.formatBudgetExclusions` had nothing to format with except a
+    /// hardcoded `.both` — every Budget Exclusions question, including an explicit "list my
+    /// excluded transactions," was answered with count+total only. This is the actual bug behind
+    /// Scott's reported "it can only tell me the count and the total" — broader than a keyword-
+    /// matching gap.
+    case budgetExclusions(AskSpendSmartToolContext.BudgetExclusionsResult, operation: SpendAIOperation, operationWasExplicit: Bool, dateRangeLabel: String)
     case budgetSettings(AskSpendSmartToolContext.BudgetSettingsResult)
     case weeklyStatus(AskSpendSmartToolContext.WeeklyStatusResult)
     case monthlyPlanStatus(AskSpendSmartToolContext.FinancialSummaryResult)

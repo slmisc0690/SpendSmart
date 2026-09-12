@@ -21,7 +21,12 @@ enum SpendAIDataRegistry {
     static func execute(_ plan: SpendAIQueryPlan, using context: AskSpendSmartToolContext) -> SpendAIQueryResult {
         switch plan.domain {
         case .budgetExclusions:
-            return .budgetExclusions(context.budgetExclusions(dateRange: plan.dateRange), dateRangeLabel: plan.dateRangeLabel)
+            return .budgetExclusions(
+                context.budgetExclusions(dateRange: plan.dateRange),
+                operation: plan.operation,
+                operationWasExplicit: plan.operationWasExplicit,
+                dateRangeLabel: plan.dateRangeLabel
+            )
 
         case .budgetSettings, .autoCalculate:
             return .budgetSettings(context.budgetSettingsStatus())
