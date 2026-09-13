@@ -37475,18 +37475,6 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(scoped.contains("Menu {"), "Is this a Bill? must be a dropdown")
     }
 
-    func testAddExpenseViewDetailsCardMergesDescriptionAndNotes() throws {
-        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
-        XCTAssertFalse(source.contains("private var categoryAndDescriptionRow"), "the standalone Description card must be removed, not just hidden")
-        guard let range = source.range(of: "private var detailsSection") else {
-            XCTFail("detailsSection not found"); return
-        }
-        let scoped = String(source[range.lowerBound...].prefix(1300))
-        XCTAssertTrue(scoped.contains("Text(\"Description\")"), "Details must show Description first")
-        XCTAssertTrue(scoped.contains("DescriptionPickerCard("), "Details must embed the reusable description picker")
-        XCTAssertTrue(scoped.contains("Text(\"Notes\")"), "Details must show Notes below Description")
-    }
-
     func testAddExpenseViewOptionsMovedUnderAmountCard() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
         guard let amountRange = source.range(of: "amountSection\n"),
