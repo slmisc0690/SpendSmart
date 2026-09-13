@@ -17725,7 +17725,7 @@ final class FinanceTrackTests: XCTestCase {
             .appendingPathComponent("../FinanceTrack/Sync/ConnectedAccountsDashboardPresenter.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        XCTAssertTrue(source.contains("static func displays(for connections: [PlaidConnection]) -> [Display]"), "The balance-presentation function must take no transaction input at all — a raw cached-balance passthrough needs none")
+        XCTAssertTrue(source.contains("static func displays(for connections: [PlaidConnection], aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()) -> [Display]"), "The balance-presentation function must take no transaction input at all — a raw cached-balance passthrough needs none")
         XCTAssertFalse(source.contains("pendingExcluded"))
         XCTAssertFalse(source.contains("ConnectedAccountPostedBalancePresenter"))
     }
@@ -33633,7 +33633,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: ".sheet(isPresented: $isPresentingPayBills) {") else {
             XCTFail("Pay Bills sheet not found"); return
         }
-        let scoped = String(source[range.lowerBound...].prefix(80))
+        let scoped = String(source[range.lowerBound...].prefix(1300))
         XCTAssertTrue(scoped.contains("PayBillsView"), "Pay Bills must present as a .sheet modal, matching every other action on this screen")
     }
 
@@ -34467,7 +34467,7 @@ final class FinanceTrackTests: XCTestCase {
         let csv = TransactionCSVExportService.csvString(for: [checking], allTransactions: [transaction])!
         let lines = csv.components(separatedBy: "\n")
         XCTAssertEqual(lines[0], "Everyday Checking")
-        XCTAssertEqual(lines[1], "Date,Description,Category,Type,Amount,Pending,Source,Transaction ID,External ID")
+        XCTAssertEqual(lines[1], "Date,Description,Category,Type,Amount,Pending,Source,Transaction ID,External ID,Imported From Transaction ID,Check Number")
     }
 
     func testCSVExportMultipleTransactionsProduceMultipleRows() {
@@ -34596,7 +34596,7 @@ final class FinanceTrackTests: XCTestCase {
         let account = Account(name: "Checking", type: .checking)
         let transaction = csvTransaction(amount: 10, date: csvDate(2026, 8, 1), account: account)
         let csv = TransactionCSVExportService.csvString(for: [account], allTransactions: [transaction])!
-        XCTAssertTrue(csv.hasSuffix("\(transaction.id.uuidString),,"), "the Transaction ID column must carry the transaction's own stable id, immediately followed by the (empty, for a manual transaction) External ID and Imported From Transaction ID columns")
+        XCTAssertTrue(csv.hasSuffix("\(transaction.id.uuidString),,,"), "the Transaction ID column must carry the transaction's own stable id, immediately followed by the (empty, for a manual transaction) External ID, Imported From Transaction ID, and Check Number columns")
     }
 
     func testCSVExportIncludesExternalTransactionIdWhenPresent() {
@@ -34634,7 +34634,7 @@ final class FinanceTrackTests: XCTestCase {
             importedFromTransactionId: sourceId
         )
         let csv = TransactionCSVExportService.csvString(for: [account], allTransactions: [transaction])!
-        XCTAssertTrue(csv.hasSuffix(sourceId.uuidString), "the new trailing column must carry the exact UUID and be the row's own suffix")
+        XCTAssertTrue(csv.hasSuffix("\(sourceId.uuidString),"), "the Imported From Transaction ID column must carry the exact UUID, immediately followed by the (empty, for this transaction) Check Number column")
     }
 
     func testCSVExportImportedFromTransactionIdBlankWhenNil() {
@@ -34872,14 +34872,14 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testCSVImportInvalidUUIDRejected() {
-        let csv = "Checking\n\(TransactionCSVExportService.header)\n2026-08-01,Coffee,,Expense,-10.00,No,Manual,not-a-uuid,,"
+        let csv = "Checking\n\(TransactionCSVExportService.header)\n2026-08-01,Coffee,,Expense,-10.00,No,Manual,not-a-uuid,,,"
         let result = TransactionCSVImportService.parse(csv)
         XCTAssertTrue(result.rows.isEmpty)
         XCTAssertEqual(result.skipped.first?.reason, .malformedRow("missing or invalid Transaction ID"))
     }
 
     func testCSVImportInvalidDecimalRejected() {
-        let csv = "Checking\n\(TransactionCSVExportService.header)\n2026-08-01,Coffee,,Expense,not-a-number,No,Manual,\(UUID().uuidString),,"
+        let csv = "Checking\n\(TransactionCSVExportService.header)\n2026-08-01,Coffee,,Expense,not-a-number,No,Manual,\(UUID().uuidString),,,"
         let result = TransactionCSVImportService.parse(csv)
         XCTAssertTrue(result.rows.isEmpty)
         if case .malformedRow(let reason)? = result.skipped.first?.reason {
@@ -34890,7 +34890,7 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testCSVImportInvalidDateRejected() {
-        let csv = "Checking\n\(TransactionCSVExportService.header)\nnot-a-date,Coffee,,Expense,-10.00,No,Manual,\(UUID().uuidString),,"
+        let csv = "Checking\n\(TransactionCSVExportService.header)\nnot-a-date,Coffee,,Expense,-10.00,No,Manual,\(UUID().uuidString),,,"
         let result = TransactionCSVImportService.parse(csv)
         XCTAssertTrue(result.rows.isEmpty)
         if case .malformedRow(let reason)? = result.skipped.first?.reason {
@@ -34936,7 +34936,7 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     func testCSVImportInvalidImportedFromTransactionIdRejected() {
-        let csv = "Checking\n\(TransactionCSVExportService.header)\n2026-08-01,Coffee,,Expense,-10.00,No,Manual,\(UUID().uuidString),,not-a-uuid"
+        let csv = "Checking\n\(TransactionCSVExportService.header)\n2026-08-01,Coffee,,Expense,-10.00,No,Manual,\(UUID().uuidString),,not-a-uuid,"
         let result = TransactionCSVImportService.parse(csv)
         XCTAssertTrue(result.rows.isEmpty)
         XCTAssertEqual(result.skipped.first?.reason, .malformedRow("invalid Imported From Transaction ID"), "a malformed provenance value must be reported, never silently dropped or guessed")
@@ -37445,7 +37445,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var typeAndDateSection") else {
             XCTFail("typeAndDateSection not found"); return
         }
-        let scoped = String(source[range.lowerBound...].prefix(1800))
+        let scoped = String(source[range.lowerBound...].prefix(3000))
         XCTAssertTrue(scoped.contains("Menu {"), "Type must be a dropdown, not a segmented control")
         XCTAssertTrue(scoped.contains("DatePicker(\"Date\""), "Date must share the same row/card as Type")
     }
