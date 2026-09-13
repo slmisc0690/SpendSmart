@@ -38374,6 +38374,17 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("isPresentingConnectedAccounts = true"))
     }
 
+    /// 20 — no unrelated Settings section's own rows were touched by this phase (spot-check: Tools/
+    /// Account/Favorites anchors are all still present and unchanged in count).
+    func testAboutPhaseTouchedNoUnrelatedSettingsSection() throws {
+        let source = try Self.settingsViewSource()
+        XCTAssertTrue(source.contains("isPresentingQuickStats = true"))
+        XCTAssertTrue(source.contains("isPresentingDataBackup = true"))
+        XCTAssertTrue(source.contains("isPresentingCalculateTransactions = true"))
+        XCTAssertTrue(source.contains("isPresentingFavorites = true"))
+        XCTAssertEqual(source.components(separatedBy: "SettingsCollapsibleSection(").count - 1, 7, "the 5 real Tools/Developer-Options collapsible section call sites (plus 2 doc-comment mentions, one of which is the Check Payment phase's own example usage in a header comment) must be untouched in count")
+    }
+
     /// 21 — Every moved control still reads/writes the SAME pre-existing model types
     /// (`BudgetSettings`/`MonthlyPlanSettings`) — no duplicate/parallel state was introduced to
     /// support the move.
@@ -40696,6 +40707,19 @@ final class FinanceTrackTests: XCTestCase {
 
         XCTAssertEqual(transaction.amount, originalAmount)
         XCTAssertEqual(account.currentBalance, originalBalance, "preparing/reading the calculator's view model must never touch a real account balance")
+    }
+
+    /// A denied/restricted permission must fall back to the keyboard SILENTLY — never an error
+    /// state blocking the screen, since this is Scott's explicit choice over showing a
+    /// go-to-Settings message.
+    func testAskSpendSmartViewFallsBackToKeyboardSilentlyWhenVoicePermissionDenied() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/AskSpendSmart/AskSpendSmartView.swift")
+        guard let range = source.range(of: "private func beginVoiceModeIfPossible() async {") else {
+            return XCTFail("beginVoiceModeIfPossible not found")
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(section.contains("guard state == .authorized, let conversationModel else {"))
+        XCTAssertTrue(section.contains("inputMode = .keyboard"))
     }
 }
 
