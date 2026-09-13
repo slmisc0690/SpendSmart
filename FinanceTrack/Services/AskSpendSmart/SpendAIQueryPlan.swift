@@ -32,6 +32,11 @@ enum SpendAIOperation: String, Sendable, Equatable, CaseIterable {
     case total
     case both
     case list
+    /// COMPOUND-REQUEST PHASE — a single question asking for more than one of count/total/list at
+    /// once (currently only produced for `.budgetExclusions`, by
+    /// `AskSpendSmartFallbackRouter.matchOperationKeyword`). Means "present all of them together,"
+    /// never "pick one."
+    case all
     case search
     case summary
     case status

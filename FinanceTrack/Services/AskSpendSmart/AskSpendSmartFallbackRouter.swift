@@ -22,6 +22,15 @@ enum AskSpendSmartFallbackRouter {
         case amount
         case both
         case list
+        /// COMPOUND-REQUEST PHASE — a single question that asks for more than one distinct kind of
+        /// answer at once ("how many excluded transactions this week, show me all of them, and a
+        /// total") used to silently collapse to whichever keyword `matchOperationKeyword` happened
+        /// to check first, discarding the rest of what was actually asked — not a data-access gap
+        /// (`BudgetExclusionsResult` already carries count/total/list together on every fetch), a
+        /// pure "which one do I mention" bug. `.all` means "present count, total, AND the list
+        /// together," and is only ever produced when 2+ of those keyword categories are present in
+        /// the same question.
+        case all
     }
 
     struct RoutedBudgetExclusionsQuery: Sendable, Equatable {
@@ -67,21 +76,40 @@ enum AskSpendSmartFallbackRouter {
     /// a genuine, intentional ambiguity between count and dollar total (see
     /// `testEndToEndPastTwoWeeksExcludedTransactionsTotal`'s own comment), not a failure to
     /// classify, so it must never trigger the "I'm not sure what you're asking" wording.
+    /// COMPOUND-REQUEST PHASE — checks every category rather than returning on the first match, so
+    /// a question naming more than one ("how many excluded transactions this week, show me all of
+    /// them, and a total") is recognized as genuinely asking for all of them (`.all`) instead of
+    /// silently collapsing to whichever category happened to be checked first.
     private static func matchOperationKeyword(_ normalized: String) -> Operation? {
-        if normalized.contains("how many") || normalized.contains("number of") || normalized.contains("count") {
-            return .count
-        }
-        if normalized.contains("list") || normalized.contains("show me") || normalized.contains("show my")
+        let hasCount = normalized.contains("how many") || normalized.contains("number of") || normalized.contains("count")
+        let hasList = normalized.contains("list") || normalized.contains("show me") || normalized.contains("show my")
             || normalized.contains("which transaction") || normalized.contains("what transaction")
             || normalized.contains("what are") || normalized.contains("what were")
-            || normalized.contains("break down") || normalized.contains("breakdown") || normalized.contains("itemize") {
+            || normalized.contains("break down") || normalized.contains("breakdown") || normalized.contains("itemize")
+        let hasAmount = normalized.contains("how much")
+        let hasTotalWord = normalized.contains("total")
+
+        // "list" alongside ANY numeric ask (count/amount/"total") is the genuine compound case —
+        // the user wants the itemized list AND a number, never just one or the other.
+        if hasList && (hasCount || hasAmount || hasTotalWord) {
+            return .all
+        }
+        // "total" ahead of a bare "how many" (no list): `.both`'s wording already states BOTH the
+        // count and the dollar total, so "how many ... and what's the total" is already fully
+        // answered by `.both` — checking it before `hasCount` here avoids re-introducing the exact
+        // same "silently drop the total" bug this phase exists to fix, just for this pair instead
+        // of pairing with `.list`.
+        if hasTotalWord {
+            return .both
+        }
+        if hasCount {
+            return .count
+        }
+        if hasList {
             return .list
         }
-        if normalized.contains("how much") {
+        if hasAmount {
             return .amount
-        }
-        if normalized.contains("total") {
-            return .both
         }
         return nil
     }
@@ -215,6 +243,12 @@ enum AskSpendSmartFallbackRouter {
             let names = result.transactions.prefix(50).map { "\($0.description) (\(formattedAmount($0.amount)))" }.joined(separator: ", ")
             let more = result.truncated ? " — showing \(result.transactions.count) of \(result.totalMatchCount)" : ""
             return "You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase): \(names)\(more)."
+        case .all:
+            // COMPOUND-REQUEST PHASE — count, total, AND the itemized list together, never just
+            // one of the three. Same 50-item cap and truncation wording as `.list` above.
+            let names = result.transactions.prefix(50).map { "\($0.description) (\(formattedAmount($0.amount)))" }.joined(separator: ", ")
+            let more = result.truncated ? " — showing \(result.transactions.count) of \(result.totalMatchCount)" : ""
+            return "You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase), totaling \(formattedAmount(result.totalAmount)): \(names)\(more)."
         }
     }
 
@@ -348,6 +382,7 @@ enum AskSpendSmartFallbackRouter {
         case .amount: return .total
         case .both: return .both
         case .list: return .list
+        case .all: return .all
         }
     }
 

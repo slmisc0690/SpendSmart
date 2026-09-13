@@ -11877,6 +11877,36 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(answer.contains("Item 30"), "the display cap was raised to 50 — all 30 items must appear, not be cut off at 5")
     }
 
+    /// COMPOUND-REQUEST PHASE — a question naming more than one kind of answer at once ("how many
+    /// excluded transactions this week, show me all of them, and a total") used to silently
+    /// collapse to whichever keyword `matchOperationKeyword` checked first (here, "how many" ->
+    /// `.count`), discarding the list and total the user also explicitly asked for. Reported by
+    /// Scott directly as SpendAI "struggling with information it has access to" — it wasn't a
+    /// data-access gap (`BudgetExclusionsResult` always carries count/total/list together), purely
+    /// a "which one do I mention" bug.
+    func testBudgetExclusionsCompoundRequestReturnsCountTotalAndList() throws {
+        let now = day(2026, 8, 30)
+        let plan = try XCTUnwrap(AskSpendSmartFallbackRouter.routeGeneralized("how many transactions I excluded for the week and show me all of them and then a total", now: now))
+        XCTAssertEqual(plan.operation, .all, "a question naming count, list, AND total together must resolve to the combined operation, not just the first keyword matched")
+
+        let transactions = (1...3).map { i in
+            AskSpendSmartToolContext.ExcludedTransactionResult(date: "2026-08-1\(i)", amount: "\(i)0.00", type: "expense", description: "Merchant \(i)", category: nil, accountName: "Checking", isPending: false)
+        }
+        let result = AskSpendSmartToolContext.BudgetExclusionsResult(isEnabled: true, count: 3, totalAmount: "-60.00", transactions: transactions, totalMatchCount: 3, truncated: false)
+        let answer = SpendAIResultFormatter.format(.budgetExclusions(result, operation: plan.operation, operationWasExplicit: plan.operationWasExplicit, dateRangeLabel: plan.dateRangeLabel))
+        XCTAssertTrue(answer.contains("3"), "the count must be present")
+        XCTAssertTrue(answer.contains("Merchant 1") && answer.contains("Merchant 2") && answer.contains("Merchant 3"), "every fetched transaction must be listed")
+        XCTAssertTrue(answer.lowercased().contains("total"), "the total must be present, not dropped in favor of just the count or just the list")
+    }
+
+    /// A single numeric ask plus "total" ("how many, and what's the total") stays `.both` — the
+    /// existing count+total combined wording — since no `.list` keyword is present; `.all` is only
+    /// for when the itemized list is ALSO explicitly requested.
+    func testBudgetExclusionsCountAndTotalWithoutListStaysBoth() throws {
+        let plan = try XCTUnwrap(AskSpendSmartFallbackRouter.routeGeneralized("how many excluded transactions do I have and what's the total", now: day(2026, 8, 30)))
+        XCTAssertEqual(plan.operation, .both)
+    }
+
     // MARK: - RUNTIME RELIABILITY PHASE — fresh snapshot / error classification / architecture
 
     func testConversationModelRefreshesToolContextBeforeSendWhenProvided() async {
