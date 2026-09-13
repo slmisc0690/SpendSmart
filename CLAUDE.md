@@ -58,6 +58,20 @@ of which are unfinished code:
 - Path: `/Users/scott/Documents/Apple Apps/FinanceTracker`, branch `main`.
 - Xcode project is generated via `xcodegen` from `project.yml` — after any file add/move, run
   `xcodegen generate` before building.
+- **Test destination is pinned — use `scripts/test.sh`, never a raw `xcodebuild -destination`
+  string.** `scripts/test.sh build`/`scripts/test.sh test` are THE authoritative default,
+  pinned to `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5` (the newest non-beta runtime
+  installed as of 2026-09-13). Before this existed, an unpinned `-destination 'platform=iOS
+  Simulator,name=iPhone 17 Pro'` (no OS) was used ad hoc — with three same-named simulators
+  installed (iOS 26.3, 26.5, and a 27.0 BETA), that silently resolved to "whichever is newest,"
+  i.e. the beta, with nothing in any report saying which OS actually ran. That made results
+  unreproducible and briefly mis-graded a real iOS 27 SwiftData behavior change as if it were a
+  flaky test (see `testRollbackBehaviorOnCurrentSDKDoesNotRestoreBalanceButProductionDoesNotDependOnIt`
+  and the 2026-09-13 Session Log entry). Name+OS (not a simulator UUID) is used deliberately —
+  a UUID is specific to one machine and would silently fail to resolve, or resolve to a
+  different device, elsewhere. For a DELIBERATE check against the iOS 27.0 beta, use the
+  separate `scripts/test-beta-ios27.sh` — never confuse the two: the default script answers "did
+  my code break," the beta script answers "is the next iOS about to change something under me."
 - No Docker locally — `supabase db dump`/`diff` (schema-shadow-db features) and `deno test` are
   **not runnable locally**. Local verification is: full `xcodebuild build` + `xcodebuild test`,
   plus direct code review of SQL/Deno source. Live/empirical DB and Edge Function verification
