@@ -3,27 +3,29 @@ import SwiftData
 
 /// EXCLUDE TRANSACTIONS — lets the user pick specific transactions to leave out of Weekly/Monthly
 /// budget calculations, WITHOUT touching the transaction itself in any way (no field on
-/// `FinanceTransaction` is ever read or written here). Shows CURRENT-MONTH local transactions only —
-/// Connected Account, Manual Account, and manually-added expenses alike — day-grouped exactly like
-/// `ExpenseListView`'s own Activity list (`DailyTransactionTotals.groups(for:)`, the same shared
-/// day-bucketing service that screen uses), reusing `ConnectedTransactionRow`/`TransactionRow`
-/// unmodified for each row. A checkmark button is added ALONGSIDE each row, never inside it.
+/// `FinanceTransaction` is ever read or written here). Shows local transactions in the BROWSABLE
+/// WINDOW below only — Connected Account, Manual Account, and manually-added expenses alike —
+/// day-grouped exactly like `ExpenseListView`'s own Activity list (`DailyTransactionTotals.groups(for:)`,
+/// the same shared day-bucketing service that screen uses), reusing
+/// `ConnectedTransactionRow`/`TransactionRow` unmodified for each row. A checkmark button is added
+/// ALONGSIDE each row, never inside it.
 ///
-/// MONTH SCOPE (Scott's explicit request): this screen used to show every transaction ever, all
-/// months mixed together. It now scopes the browsable/toggleable list to
-/// `DateRangeHelper.currentMonthRange()` — the SAME helper `DashboardView.monthInterval` already
-/// uses — so October only ever shows October's own activity, etc. This is a DISPLAY scope change
-/// ONLY: `BudgetSettings.excludedTransactionIDs` is loaded in full at `.task` time and `save()`
-/// still persists the complete `draftExcludedIDs` set, so a transaction excluded in August stays
-/// excluded in August's own historical totals forever — nothing about how exclusions are STORED or
-/// APPLIED changes, only what is shown/toggleable in this one screen.
+/// BROWSABLE WINDOW (Scott's explicit request, extended from an earlier current-month-only design):
+/// the literal last 7 days of the PREVIOUS month plus the entirety of the current month — e.g. in
+/// September, Aug 25-31 plus all of September; come October, Sept 24-30 plus all of October. This
+/// is a fixed 7-day lookback, not a calendar-week (Sun-Sat) boundary — Scott's own explicit choice,
+/// so the window never shifts length depending on which weekday a month happens to end on. This is
+/// a DISPLAY scope change ONLY: `BudgetSettings.excludedTransactionIDs` is loaded in full at
+/// `.task` time and `save()` still persists the complete `draftExcludedIDs` set, so a transaction
+/// excluded in August stays excluded in August's own historical totals forever — nothing about how
+/// exclusions are STORED or APPLIED changes, only what is shown/toggleable in this one screen.
 ///
-/// EARLIER-MONTH EXCLUSIONS STAY REACHABLE (required addition, not optional): scoping the main list
-/// to the current month would otherwise create hidden, un-reachable state — a past exclusion the
-/// user can never see or undo again. `earlierExclusions` surfaces exactly those (and only those —
-/// not every past transaction, just the ones actually checked) in a collapsed-by-default
-/// `SettingsCollapsibleSection` ABOVE the current month's list, so it's immediately visible on
-/// opening the screen, never something to discover by scrolling.
+/// EARLIER EXCLUSIONS STAY REACHABLE (required addition, not optional): scoping the main list to
+/// this window would otherwise create hidden, un-reachable state — a past exclusion the user can
+/// never see or undo again. `earlierExclusions` surfaces exactly those (and only those — not every
+/// past transaction, just the ones actually checked) in a collapsed-by-default
+/// `SettingsCollapsibleSection` ABOVE the window's own list, so it's immediately visible on opening
+/// the screen, never something to discover by scrolling.
 struct ExcludeTransactionsView: View {
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var transactions: [FinanceTransaction]
     @Query private var settingsList: [BudgetSettings]
@@ -38,26 +40,32 @@ struct ExcludeTransactionsView: View {
 
     private var settings: BudgetSettings? { settingsList.first }
 
-    private var currentMonthRange: DateInterval {
-        DateRangeHelper.currentMonthRange()
+    /// The last 7 days of the previous month, plus the entirety of the current month. A fixed
+    /// 7-day lookback from the current month's own start — never a calendar-week boundary, so the
+    /// window is always exactly the same length regardless of what weekday the previous month
+    /// happened to end on.
+    private var browsableRange: DateInterval {
+        let currentMonth = DateRangeHelper.currentMonthRange()
+        let calendar = Calendar.current
+        let start = calendar.date(byAdding: .day, value: -7, to: currentMonth.start) ?? currentMonth.start
+        return DateInterval(start: start, end: currentMonth.end)
     }
 
-    private var currentMonthTransactions: [FinanceTransaction] {
-        transactions.filter { currentMonthRange.contains($0.date) }
+    private var browsableTransactions: [FinanceTransaction] {
+        transactions.filter { browsableRange.contains($0.date) }
     }
 
     private var dayGroups: [DailyTransactionTotals.DayGroup] {
-        DailyTransactionTotals.groups(for: currentMonthTransactions)
+        DailyTransactionTotals.groups(for: browsableTransactions)
     }
 
     /// Transactions currently checked as excluded (via the live, editable `draftExcludedIDs` —
-    /// same state the current month's own checkmarks read, so un-checking one here updates
-    /// immediately exactly like the current-month rows do) whose date falls OUTSIDE the current
-    /// month. Deliberately only these specific rows, never every past transaction — the point is
-    /// to surface exactly what's hidden, not to reintroduce the full all-time list this change
-    /// removes.
+    /// same state the browsable window's own checkmarks read, so un-checking one here updates
+    /// immediately exactly like those rows do) whose date falls OUTSIDE the browsable window.
+    /// Deliberately only these specific rows, never every past transaction — the point is to
+    /// surface exactly what's hidden, not to reintroduce the full all-time list this change removes.
     private var earlierExclusions: [FinanceTransaction] {
-        transactions.filter { draftExcludedIDs.contains($0.id) && !currentMonthRange.contains($0.date) }
+        transactions.filter { draftExcludedIDs.contains($0.id) && !browsableRange.contains($0.date) }
     }
 
     private var earlierExclusionsDayGroups: [DailyTransactionTotals.DayGroup] {
@@ -92,7 +100,7 @@ struct ExcludeTransactionsView: View {
                     }
 
                     if dayGroups.isEmpty {
-                        Text("No transactions this month.")
+                        Text("No transactions in the past week or this month.")
                             .font(Theme.bodyFont)
                             .foregroundStyle(Theme.textTertiary)
                             .padding(.top, Theme.Spacing.xl)
