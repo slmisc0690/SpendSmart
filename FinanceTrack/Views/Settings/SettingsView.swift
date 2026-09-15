@@ -85,6 +85,7 @@ struct SettingsView: View {
     @State private var isQuickStatsExpanded = false
     @State private var isDataToolsExpanded = false
     @State private var isCalculateTransactionsExpanded = false
+    @State private var isScheduledTransfersExpanded = false
     #if DEBUG
     @State private var isDeveloperOptionsExpanded = false
     #endif
@@ -101,6 +102,7 @@ struct SettingsView: View {
     @State private var isPresentingAccountSettings = false
     @State private var isPresentingQuickStats = false
     @State private var isPresentingCalculateTransactions = false
+    @State private var isPresentingScheduledTransfers = false
     /// LOCAL DATA RESTORE — drives the "Restore from Cloud" row's inline status. `nil` = idle
     /// (default state, including after a successful restore's brief confirmation fades away via
     /// user navigation — this is never auto-dismissed on a timer, only replaced by the next action).
@@ -180,6 +182,7 @@ struct SettingsView: View {
                         quickStatsSection
                         dataSection
                         calculateTransactionsSection
+                        scheduledTransfersSection
                         #if DEBUG
                         debugSection
                         #endif
@@ -261,6 +264,9 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $isPresentingCalculateTransactions) {
                 CalculateTransactionsView()
+            }
+            .sheet(isPresented: $isPresentingScheduledTransfers) {
+                ScheduledTransfersView()
             }
             .sheet(isPresented: $isPresentingCSVImportPreview) {
                 if let csvImportPreview {
@@ -845,6 +851,58 @@ struct SettingsView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Theme.textTertiary)
                     }
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, Theme.Spacing.sm)
+        }
+    }
+
+    /// SCHEDULED TRANSFERS — Scott's own explicit request: set up a recurring Account Register
+    /// transfer (e.g. "$25, Checking to Savings, every Mid-Month") once instead of re-entering it
+    /// by hand every cycle. Same shared `SettingsCollapsibleSection`/single-row-button pattern as
+    /// Calculate Transactions immediately above. See `ScheduledTransfersView`/`ScheduledTransfer`/
+    /// `ScheduledTransferPostingService` for the actual feature; this is presentation-entry-point
+    /// only.
+    private var scheduledTransfersSection: some View {
+        SettingsCollapsibleSection(
+            title: "Scheduled Transfers",
+            infoTitle: "About Scheduled Transfers",
+            infoExplanation: """
+                Set up a recurring transfer between two of your Account Registers — e.g. $25 from \
+                Checking to Savings every Mid-Month — instead of entering it by hand every cycle.
+
+                It checks when you open the app: once its scheduled day (Beginning/Mid/End of \
+                Month) has arrived and it hasn't already posted this month, it automatically \
+                creates the transfer and updates both account balances. If you don't open the app \
+                until after the scheduled day, it still posts once, dated the day it was supposed \
+                to happen — it never posts twice in the same month.
+
+                Account Registers only — a Connected (Plaid) account is never a source or \
+                destination here.
+                """,
+            isExpanded: $isScheduledTransfersExpanded
+        ) {
+            CardBackground {
+                Button {
+                    isPresentingScheduledTransfers = true
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Scheduled Transfers")
+                                .font(Theme.bodyFont)
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("Automate a recurring transfer between Account Registers")
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }

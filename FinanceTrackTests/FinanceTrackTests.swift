@@ -40916,6 +40916,271 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(section.contains("guard state == .authorized, let conversationModel else {"))
         XCTAssertTrue(section.contains("inputMode = .keyboard"))
     }
+
+    // MARK: - ScheduledTransfer / ScheduledTransferPostingService
+
+    func testScheduledTransferPostingServiceResolvesBeginningMidEndOfMonth() {
+        let referenceDate = day(2026, 8, 10)
+        let schedule = ScheduledTransfer(amount: 25, timing: .beginningMonth)
+        XCTAssertEqual(ScheduledTransferPostingService.scheduledDate(for: schedule, inMonthContaining: referenceDate), day(2026, 8, 1))
+        schedule.timing = .midMonth
+        XCTAssertEqual(ScheduledTransferPostingService.scheduledDate(for: schedule, inMonthContaining: referenceDate), day(2026, 8, 15))
+        schedule.timing = .endMonth
+        XCTAssertEqual(ScheduledTransferPostingService.scheduledDate(for: schedule, inMonthContaining: referenceDate), day(2026, 8, 31))
+    }
+
+    /// A short month (February) must clamp End of Month to its own real last day, not roll into
+    /// March — the same short-month rule `MonthlyDepositDay` already guarantees for income.
+    func testScheduledTransferPostingServiceEndOfMonthClampsForFebruary() {
+        let schedule = ScheduledTransfer(amount: 25, timing: .endMonth)
+        XCTAssertEqual(ScheduledTransferPostingService.scheduledDate(for: schedule, inMonthContaining: day(2027, 2, 5)), day(2027, 2, 28))
+    }
+
+    func testScheduledTransferPostingServiceNotDueBeforeScheduledDay() {
+        let checking = Account(name: "Checking", type: .checking)
+        let savings = Account(name: "Savings", type: .savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings)
+        XCTAssertFalse(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 14)))
+    }
+
+    func testScheduledTransferPostingServiceDueOnAndAfterScheduledDay() {
+        let checking = Account(name: "Checking", type: .checking)
+        let savings = Account(name: "Savings", type: .savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings)
+        XCTAssertTrue(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 15)))
+        XCTAssertTrue(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 20)), "a missed schedule must still be due, not silently skipped")
+    }
+
+    func testScheduledTransferPostingServiceNotDueWhenInactive() {
+        let checking = Account(name: "Checking", type: .checking)
+        let savings = Account(name: "Savings", type: .savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings, isActive: false)
+        XCTAssertFalse(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 20)))
+    }
+
+    func testScheduledTransferPostingServiceNotDueWithoutBothAccounts() {
+        let checking = Account(name: "Checking", type: .checking)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: nil)
+        XCTAssertFalse(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 20)))
+    }
+
+    /// The core idempotency guarantee: once posted for a given month, it must never be due again
+    /// within that same month, regardless of how many more times the app opens.
+    func testScheduledTransferPostingServiceNotDueTwiceInSameMonth() {
+        let checking = Account(name: "Checking", type: .checking)
+        let savings = Account(name: "Savings", type: .savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings, lastPostedMonth: day(2026, 8, 15))
+        XCTAssertFalse(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 28)))
+    }
+
+    /// Once a new calendar month begins, the same schedule becomes due again.
+    func testScheduledTransferPostingServiceDueAgainInANewMonth() {
+        let checking = Account(name: "Checking", type: .checking)
+        let savings = Account(name: "Savings", type: .savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings, lastPostedMonth: day(2026, 8, 15))
+        XCTAssertTrue(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 9, 16)))
+    }
+
+    /// Full posting test: a Savings destination posts as `.transferToSavings`, dated the scheduled
+    /// day (never "now"), with `account`/`transferCounterpartyAccount` assigned so the source is
+    /// "this account" — matching a manual Transfer To Savings entry exactly — and both balances
+    /// move correctly.
+    @MainActor
+    func testScheduledTransferPostingServicePostsTransferToSavingsWhenDestinationIsSavings() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        let savings = Account(name: "Savings", type: .savings, currentBalance: 500)
+        context.insert(checking)
+        context.insert(savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings)
+
+        let postedCount = ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, now: day(2026, 8, 20))
+
+        XCTAssertEqual(postedCount, 1)
+        XCTAssertEqual(checking.currentBalance, 975)
+        XCTAssertEqual(savings.currentBalance, 525)
+        XCTAssertEqual(schedule.lastPostedMonth, day(2026, 8, 20))
+
+        let transactions = try! context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertEqual(transactions.count, 1)
+        let created = transactions[0]
+        XCTAssertEqual(created.type, .transferToSavings)
+        XCTAssertEqual(created.amount, 25)
+        XCTAssertEqual(created.date, day(2026, 8, 15), "must be dated the scheduled day, never the day the app happened to check")
+        XCTAssertEqual(created.account?.id, checking.id)
+        XCTAssertEqual(created.transferCounterpartyAccount?.id, savings.id)
+    }
+
+    /// A non-Savings destination posts as `.transferDeposit` ("Transfer to Checking"), with
+    /// `account`/`transferCounterpartyAccount` swapped relative to the Savings case — the
+    /// destination is "this account," matching `ManualTransactionDeletionService`'s own existing
+    /// convention for that type.
+    @MainActor
+    func testScheduledTransferPostingServicePostsTransferDepositWhenDestinationIsNotSavings() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        let cash = Account(name: "Cash", type: .cash, currentBalance: 200)
+        context.insert(checking)
+        context.insert(cash)
+        let schedule = ScheduledTransfer(amount: 50, timing: .beginningMonth, sourceAccount: checking, destinationAccount: cash)
+
+        ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, now: day(2026, 8, 1))
+
+        let transactions = try! context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertEqual(transactions.count, 1)
+        let created = transactions[0]
+        XCTAssertEqual(created.type, .transferDeposit)
+        XCTAssertEqual(created.account?.id, cash.id)
+        XCTAssertEqual(created.transferCounterpartyAccount?.id, checking.id)
+        XCTAssertEqual(checking.currentBalance, 950)
+        XCTAssertEqual(cash.currentBalance, 250)
+    }
+
+    /// An inactive schedule must never post, even if its scheduled day has clearly passed.
+    @MainActor
+    func testScheduledTransferPostingServiceSkipsInactiveSchedules() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        let savings = Account(name: "Savings", type: .savings, currentBalance: 500)
+        context.insert(checking)
+        context.insert(savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings, isActive: false)
+
+        let postedCount = ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, now: day(2026, 8, 20))
+
+        XCTAssertEqual(postedCount, 0)
+        XCTAssertEqual(checking.currentBalance, 1000)
+        XCTAssertEqual(savings.currentBalance, 500)
+        XCTAssertTrue(try! context.fetch(FetchDescriptor<FinanceTransaction>()).isEmpty)
+    }
+
+    /// Calling `postDueTransfers` a second time in the same month (e.g. the app reopened later
+    /// that day) must never create a second transaction — the whole point of `lastPostedMonth`.
+    @MainActor
+    func testScheduledTransferPostingServiceDoesNotDoublePostOnASecondCheckSameMonth() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        let savings = Account(name: "Savings", type: .savings, currentBalance: 500)
+        context.insert(checking)
+        context.insert(savings)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationAccount: savings)
+
+        ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, now: day(2026, 8, 20))
+        ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, now: day(2026, 8, 25))
+
+        XCTAssertEqual(try! context.fetch(FetchDescriptor<FinanceTransaction>()).count, 1)
+        XCTAssertEqual(checking.currentBalance, 975)
+        XCTAssertEqual(savings.currentBalance, 525)
+    }
+
+    // MARK: - ScheduledTransfer schema / Settings wiring (source-scan)
+
+    func testScheduledTransferIsRegisteredInUserDataStoreSchema() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/UserDataStoreManager.swift")
+        XCTAssertTrue(source.contains("ScheduledTransfer.self"))
+    }
+
+    func testSettingsViewHasScheduledTransfersEntryPoint() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
+        XCTAssertTrue(source.contains("scheduledTransfersSection"))
+        XCTAssertTrue(source.contains("ScheduledTransfersView()"))
+    }
+
+    func testDashboardChecksForDueScheduledTransfersOnLaunchAndForeground() throws {
+        let source = try Self.dashboardViewSource()
+        XCTAssertTrue(source.contains("postDueScheduledTransfersIfNeeded()"))
+        XCTAssertTrue(source.contains("ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext)"))
+    }
+
+    // MARK: - ScheduledTransfer Connected/Plaid account support
+
+    /// Scott's own reported gap: the From/To pickers only ever showed his Manual Accounts, when
+    /// his real Savings is a Connected (Plaid) account — the picker must offer both.
+    func testAddEditScheduledTransferViewOffersConnectedAccountsToo() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Accounts/ScheduledTransfersView.swift")
+        XCTAssertTrue(source.contains("private var partyOptions: [TransferParty] {"))
+        XCTAssertTrue(source.contains("activeAccounts.map { .manual($0) } + connectedAccountOptions.map { .connected(id: $0.id, label: $0.label) }"))
+    }
+
+    /// A Manual source paired with a Connected Savings destination must post as
+    /// `.transferToSavings` (Saved-tracking parity) once the destination's id resolves into
+    /// `savingsPlaidAccountIds` — "this account" stays the Manual source per that type's own
+    /// established convention; the Connected destination is a reference tag only.
+    @MainActor
+    func testScheduledTransferPostingServicePostsTransferToSavingsForConnectedSavingsDestination() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        context.insert(checking)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationConnectedAccountId: "plaid-savings-1")
+
+        let postedCount = ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, savingsPlaidAccountIds: ["plaid-savings-1"], now: day(2026, 8, 20))
+
+        XCTAssertEqual(postedCount, 1)
+        XCTAssertEqual(checking.currentBalance, 975, "the Manual source is the only local balance to mutate — the Connected destination has none")
+        let transactions = try! context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertEqual(transactions.count, 1)
+        XCTAssertEqual(transactions[0].type, .transferToSavings)
+        XCTAssertEqual(transactions[0].account?.id, checking.id)
+        XCTAssertEqual(transactions[0].transferCounterpartyPlaidAccountId, "plaid-savings-1")
+        XCTAssertNil(transactions[0].transferCounterpartyAccount)
+    }
+
+    /// The same Connected destination, WITHOUT its id resolved into `savingsPlaidAccountIds`,
+    /// must never be assumed Savings — it posts as `.transferDeposit` instead, matching
+    /// `SavedViaTransferCalculator`'s own identical "never guess" rule for an unresolved id.
+    @MainActor
+    func testScheduledTransferPostingServicePostsTransferDepositWhenConnectedDestinationIdUnresolved() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        context.insert(checking)
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceAccount: checking, destinationConnectedAccountId: "plaid-checking-2")
+
+        ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, savingsPlaidAccountIds: [], now: day(2026, 8, 20))
+
+        // No local `account` field for either side of a Manual-source-to-Connected-non-savings
+        // transfer (see `postOne`'s own header) — nothing can be posted; the schedule is simply
+        // skipped rather than guessing at an unsupported shape.
+        XCTAssertTrue(try! context.fetch(FetchDescriptor<FinanceTransaction>()).isEmpty)
+        XCTAssertEqual(checking.currentBalance, 1000)
+        XCTAssertNil(schedule.lastPostedMonth, "an unpostable schedule must never be marked as posted")
+    }
+
+    /// A Connected source paired with a Manual destination (any type) posts as `.transferDeposit`
+    /// — "this account" is the Manual destination (credited), the Connected source is a reference
+    /// tag only, matching a manual Transfer Dep entry with a Connected counterparty.
+    @MainActor
+    func testScheduledTransferPostingServicePostsTransferDepositForConnectedSource() {
+        let context = makePlaidSyncTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
+        context.insert(checking)
+        let schedule = ScheduledTransfer(amount: 60, timing: .beginningMonth, sourceConnectedAccountId: "plaid-checking-1", destinationAccount: checking)
+
+        let postedCount = ScheduledTransferPostingService.postDueTransfers([schedule], modelContext: context, now: day(2026, 8, 1))
+
+        XCTAssertEqual(postedCount, 1)
+        XCTAssertEqual(checking.currentBalance, 1060)
+        let transactions = try! context.fetch(FetchDescriptor<FinanceTransaction>())
+        XCTAssertEqual(transactions[0].type, .transferDeposit)
+        XCTAssertEqual(transactions[0].account?.id, checking.id)
+        XCTAssertEqual(transactions[0].transferCounterpartyPlaidAccountId, "plaid-checking-1")
+    }
+
+    /// A schedule with NEITHER side Manual (Connected-to-Connected) must never be considered due —
+    /// there is no local account to post a transaction against or mutate.
+    func testScheduledTransferPostingServiceNotDueWhenBothSidesConnected() {
+        let schedule = ScheduledTransfer(amount: 25, timing: .midMonth, sourceConnectedAccountId: "plaid-a", destinationConnectedAccountId: "plaid-b")
+        XCTAssertFalse(ScheduledTransferPostingService.isDue(schedule, now: day(2026, 8, 20)))
+    }
+
+    /// The add/edit form must reject a Connected-to-Connected combination at validation time,
+    /// before it can ever reach the posting service.
+    func testAddEditScheduledTransferViewRejectsBothSidesConnected() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Accounts/ScheduledTransfersView.swift")
+        XCTAssertTrue(source.contains("if case .connected = sourceParty, case .connected = destinationParty {"))
+        XCTAssertTrue(source.contains("At least one account must be an Account Register you track in this app."))
+    }
+
+
 }
 
 /// Mirrors the decision rule `refreshPlaidAccounts` (supabase/functions/_shared/plaid.ts) applies

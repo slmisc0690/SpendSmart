@@ -151,6 +151,7 @@ final class UserDataStoreManager {
             FavoritesSettings.self,
             QuickStatsSettings.self,
             OnboardingSettings.self,
+            ScheduledTransfer.self,
         ])
     }
 

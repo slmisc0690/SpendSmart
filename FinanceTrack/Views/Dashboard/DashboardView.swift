@@ -13,6 +13,7 @@ struct DashboardView: View {
     /// Scott picks the specific account himself (Part 6 audit found no reliable way to infer "the"
     /// checking account automatically, and no reason to assume he has only one).
     @Query(sort: \Account.createdAt) private var manualAccounts: [Account]
+    @Query private var scheduledTransfers: [ScheduledTransfer]
     /// Sorted deterministically (`\.id`), matching `FavoritesConfigurationView`'s own identically-
     /// sorted `@Query` — a proven real-device bug had these two screens each resolving `.first`
     /// against an UNSORTED query, so if more than one `FavoritesSettings` row ever existed
@@ -300,6 +301,16 @@ struct DashboardView: View {
     /// transient decode error) never blocks any other connection's own pull, and none of this ever
     /// surfaces a raw error to the user — the exact same "silent, retried next time" posture this
     /// file's other `...IfNeeded` methods already use.
+    /// SCHEDULED TRANSFERS — the one place this app checks for a due `ScheduledTransfer` and
+    /// posts it (see `ScheduledTransferPostingService`/`ScheduledTransfer`'s own headers for why
+    /// this can only ever be an on-open check, never a true background job). Called from the same
+    /// launch/foreground lifecycle points the Plaid pull above already uses. Synchronous and
+    /// local-only (a plain SwiftData write, no network) — never `async`, unlike the Plaid call
+    /// beside it.
+    private func postDueScheduledTransfersIfNeeded() {
+        ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext)
+    }
+
     private func pullSyncedTransactionsForConnectedAccountsIfNeeded() async {
         guard !Task.isCancelled else { return }
         await Task.yield()
@@ -623,12 +634,16 @@ struct DashboardView: View {
             .task {
                 await pullSyncedTransactionsForConnectedAccountsIfNeeded()
             }
+            .task {
+                postDueScheduledTransfersIfNeeded()
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     Task { await syncSavingsSummaryIfNeeded() }
                     Task { await syncDashboardSummaryIfNeeded() }
                     Task { await syncSavedViaTransferSummaryIfNeeded() }
                     Task { await pullSyncedTransactionsForConnectedAccountsIfNeeded() }
+                    postDueScheduledTransfersIfNeeded()
                     // SHARED USER REFRESH PARITY — re-pulls the Secondary's own shared Dashboard
                     // aggregate on foreground-return, same trigger the Primary's own push above
                     // already uses. A no-op for a Primary (`secondaryOutlookPrimaryUserId` is nil,

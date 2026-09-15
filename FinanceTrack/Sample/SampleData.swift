@@ -82,6 +82,7 @@ enum SampleData {
             RecurringExpense.self,
             MonthlyPlanSettings.self,
             SavingsEntry.self,
+            ScheduledTransfer.self,
         ])
         // See UserDataStoreManager.makeUserContainer's own header for why cloudKitDatabase: .none
         // is required on every ModelConfiguration once the app carries an iCloud entitlement.
