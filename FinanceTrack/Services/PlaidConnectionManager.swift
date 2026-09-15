@@ -539,13 +539,11 @@ final class PlaidConnectionManager {
         // is a query-time filter, never a transaction mutation, so there is nothing to reconcile
         // or rewrite after a sync completes.
         //
-        // ACCOUNT REGISTER AUTO DEPOSIT — runs AFTER `applySync` (the deposit transactions it
-        // mirrors must already be persisted) and uses `self.connections`, the manager's own
-        // up-to-date cached-balance state (not just this sync's `accountBalances` delta), since an
-        // account's `type`/`subtype` were already cached whenever that account was first linked or
-        // last balance-refreshed — never re-fetched here. No-ops (and costs nothing) while the
-        // feature is off, per `AccountRegisterAutoDepositService`'s own header.
-        try AccountRegisterAutoDepositService.applyAutoDeposits(connections: connections, context: context)
+        // ACCOUNT REGISTER AUTO DEPOSIT — deliberately NO action here either, same rationale:
+        // `AccountRegisterAutoDepositService` never creates a register entry unattended (see that
+        // type's own header for why — the double-count risk a silent post can't resolve).
+        // `DashboardView`'s own review-prompt check picks up newly-synced eligible deposits the
+        // next time it computes `pendingDeposits`, exactly like Auto-Tracked Budgeting above.
         markSynced(connectionId: connectionId)
         return outcome
     }

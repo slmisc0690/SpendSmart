@@ -39705,9 +39705,9 @@ final class FinanceTrackTests: XCTestCase {
     }
 
     /// The master toggle being off must leave every account and transaction completely untouched
-    /// — not just skip creating an entry, but never even attempt to read the deposit list.
+    /// — `pendingDeposits` returns empty, so there's nothing to review at all.
     @MainActor
-    func testApplyAutoDepositsNoOpsWhenDisabled() throws {
+    func testPendingDepositsEmptyWhenDisabled() throws {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking)
         context.insert(checking)
@@ -39717,18 +39717,28 @@ final class FinanceTrackTests: XCTestCase {
         context.insert(deposit)
         try context.save()
 
-        let created = try AccountRegisterAutoDepositService.applyAutoDeposits(connections: [makeDepositoryConnection()], context: context)
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [deposit], connections: [makeDepositoryConnection()], settings: settings)
 
-        XCTAssertEqual(created, 0)
-        XCTAssertEqual(checking.currentBalance, 0, "disabled must never mutate the destination register's balance")
-        XCTAssertEqual(try context.fetch(FetchDescriptor<FinanceTransaction>()).count, 1, "disabled must never create a second transaction")
+        XCTAssertTrue(pending.isEmpty)
     }
 
-    /// THE core end-to-end guarantee: an eligible deposit becomes a real manual register entry in
-    /// the selected Account Register, with the balance updated exactly like a hand-entered Deposit
-    /// would, and the source Connected transaction itself is never mutated.
+    /// No destination register selected (even with the master toggle on) must also leave nothing
+    /// pending — there's nowhere configured to review a deposit for.
     @MainActor
-    func testApplyAutoDepositsCreatesRegisterEntryForEligibleDeposit() throws {
+    func testPendingDepositsEmptyWhenNoDestinationSelected() throws {
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [])
+        let deposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [deposit], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    /// THE core guarantee: an eligible, un-reviewed deposit shows up in `pendingDeposits`, and
+    /// confirming it creates a real manual register entry — balance updated exactly like a
+    /// hand-entered Deposit would, source Connected transaction never mutated.
+    @MainActor
+    func testPendingDepositAppearsThenConfirmCreatesRegisterEntry() throws {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
         context.insert(checking)
@@ -39738,7 +39748,11 @@ final class FinanceTrackTests: XCTestCase {
         context.insert(sourceDeposit)
         try context.save()
 
-        let created = try AccountRegisterAutoDepositService.applyAutoDeposits(connections: [makeDepositoryConnection()], context: context)
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [sourceDeposit], connections: [makeDepositoryConnection()], settings: settings)
+        XCTAssertEqual(pending.map(\.id), [sourceDeposit.id], "an eligible, un-reviewed deposit must be pending review, never posted on its own")
+        XCTAssertEqual(checking.currentBalance, 100, "merely being pending must never touch a balance — nothing happens until confirmed")
+
+        let created = try AccountRegisterAutoDepositService.confirmDeposits(shown: pending, included: pending, destinations: [checking], settings: settings, context: context)
 
         XCTAssertEqual(created, 1)
         XCTAssertEqual(checking.currentBalance, 600, "the register balance must increase by the deposit amount, exactly like a hand-entered Deposit")
@@ -39750,35 +39764,55 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(newEntry.account?.id, checking.id)
         XCTAssertEqual(newEntry.importedFromTransactionId, sourceDeposit.id, "must dedup off the same field the manual Register Import flow uses")
         XCTAssertNil(sourceDeposit.account, "the source Connected transaction must never itself be mutated")
+
+        let stillPending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: try context.fetch(FetchDescriptor<FinanceTransaction>()), connections: [makeDepositoryConnection()], settings: settings)
+        XCTAssertTrue(stillPending.isEmpty, "a confirmed deposit must never be offered for review again")
     }
 
-    /// A deposit already manually imported (via the existing Register Import flow) must never be
-    /// auto-deposited a second time — proves this feature shares dedup with, rather than
-    /// duplicating, `RegisterImportService`.
+    /// THE exact scenario Scott described: a deposit shown for review but left UNCHECKED (he
+    /// already recorded it himself, e.g. a Savings-to-Checking transfer he made by hand) must never
+    /// create a register entry, AND must never be asked about again on a later check.
     @MainActor
-    func testApplyAutoDepositsSkipsAlreadyManuallyImportedDeposit() throws {
+    func testDecliningAPendingDepositCreatesNothingAndNeverAsksAgain() throws {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
         context.insert(checking)
         let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
         context.insert(settings)
-        let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+        let sourceDeposit = FinanceTransaction(amount: 100, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)
-        let alreadyImported = FinanceTransaction(amount: 500, date: .now, type: .income, source: .manual, account: checking, importedFromTransactionId: sourceDeposit.id)
-        context.insert(alreadyImported)
         try context.save()
 
-        let created = try AccountRegisterAutoDepositService.applyAutoDeposits(connections: [makeDepositoryConnection()], context: context)
+        let created = try AccountRegisterAutoDepositService.confirmDeposits(shown: [sourceDeposit], included: [], destinations: [checking], settings: settings, context: context)
 
-        XCTAssertEqual(created, 0, "a transaction already imported by the manual flow must never be auto-deposited again")
-        XCTAssertEqual(try context.fetch(FetchDescriptor<FinanceTransaction>()).count, 2, "no new transaction should be created")
+        XCTAssertEqual(created, 0, "an unchecked deposit must never be added")
+        XCTAssertEqual(checking.currentBalance, 100, "declining must never touch any balance")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<FinanceTransaction>()).count, 1, "declining must never create a second transaction")
+
+        let stillPending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [sourceDeposit], connections: [makeDepositoryConnection()], settings: settings)
+        XCTAssertTrue(stillPending.isEmpty, "a declined deposit was still SHOWN for review, so it must never be offered again")
     }
 
-    /// Selecting more than one destination register broadcasts the SAME deposit into every
-    /// selected register, per Scott's own "they can do all or 1 by 1" framing — not a
+    /// A deposit already manually imported (via the existing Register Import flow) must never even
+    /// appear as pending — proves this feature shares dedup with, rather than duplicating,
+    /// `RegisterImportService`.
+    @MainActor
+    func testPendingDepositsExcludesAlreadyManuallyImportedDeposit() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+        let alreadyImported = FinanceTransaction(amount: 500, date: .now, type: .income, source: .manual, account: checking, importedFromTransactionId: sourceDeposit.id)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [sourceDeposit, alreadyImported], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertTrue(pending.isEmpty, "a transaction already imported by the manual flow must never be offered for review")
+    }
+
+    /// Selecting more than one destination register broadcasts the SAME confirmed deposit into
+    /// every selected register, per Scott's own "they can do all or 1 by 1" framing — not a
     /// per-source-account mapping.
     @MainActor
-    func testApplyAutoDepositsBroadcastsToEveryEnabledRegister() throws {
+    func testConfirmDepositsBroadcastsToEveryEnabledRegister() throws {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking)
         let cash = Account(name: "Cash", type: .checking)
@@ -39790,7 +39824,7 @@ final class FinanceTrackTests: XCTestCase {
         context.insert(sourceDeposit)
         try context.save()
 
-        let created = try AccountRegisterAutoDepositService.applyAutoDeposits(connections: [makeDepositoryConnection()], context: context)
+        let created = try AccountRegisterAutoDepositService.confirmDeposits(shown: [sourceDeposit], included: [sourceDeposit], destinations: [checking, cash], settings: settings, context: context)
 
         XCTAssertEqual(created, 2, "both selected registers must receive their own entry")
         XCTAssertEqual(checking.currentBalance, 500)

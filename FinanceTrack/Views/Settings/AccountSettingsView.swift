@@ -389,11 +389,13 @@ struct AccountSettingsView: View {
 
     // MARK: - Account Register Auto Deposit
 
-    /// ACCOUNT REGISTER AUTO DEPOSIT — Scott's own explicit request (2026-09-15). Off by default;
-    /// when on, a posted Connected-account deposit (paycheck, refund, etc.) is automatically
-    /// mirrored into whichever Account Register(s) are selected below, with no review step — see
-    /// `AccountRegisterAutoDepositService` for the actual sweep logic, which runs after every
-    /// Connected-account transaction sync.
+    /// ACCOUNT REGISTER AUTO DEPOSIT — Scott's own explicit request (2026-09-15), revised the same
+    /// day to add a review step: he pointed out that a transfer he makes BY HAND (e.g. Savings to
+    /// Checking) will also show up as an ordinary Plaid deposit once it posts, indistinguishable
+    /// from a real external deposit — so this can never post unattended without risking a double
+    /// count. Off by default; when on, a posted Connected-account deposit is offered for review
+    /// (never posted automatically) the next time the app opens — see
+    /// `AccountRegisterAutoDepositService` for the actual detection/review logic.
     private var accountRegisterAutoDepositSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(
@@ -401,20 +403,24 @@ struct AccountSettingsView: View {
                 infoTitle: "About Account Register Auto Deposit",
                 infoExplanation: """
                     When a Connected account (like a checking account at your bank) receives a \
-                    deposit — a paycheck, a refund, anything money coming in — turning this on adds \
-                    a matching entry to your Account Register(s) automatically the next time the \
-                    app syncs with that bank, with nothing for you to review or approve.
+                    deposit — a paycheck, a refund, anything money coming in — turning this on \
+                    means you'll be asked to review it the next time you open the app, so you can \
+                    add it to your Account Register(s) with one tap instead of typing it in by hand.
+
+                    You always get to choose which deposits to add and which to skip — for \
+                    example, if you already transferred that same money yourself, you can leave it \
+                    unchecked so it's never added twice.
 
                     If you have more than one Account Register, choose which one(s) should receive \
-                    these automatic entries below. Selecting more than one adds the SAME deposit to \
+                    confirmed deposits below. Selecting more than one adds the SAME deposit to \
                     every register you've selected.
 
                     Turn this off at any time to go back to adding deposits to your register \
-                    yourself.
+                    yourself, with no review prompts.
 
-                    Example: your paycheck hits your Connected checking account. Next time \
-                    SpendSmart syncs, it sees the deposit and adds a matching entry to your \
-                    checking Account Register automatically — no extra step from you.
+                    Example: your paycheck hits your Connected checking account. Next time you \
+                    open SpendSmart, you're asked to confirm it, then it's added to your checking \
+                    Account Register.
                     """
             )
 
@@ -422,7 +428,7 @@ struct AccountSettingsView: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     TransactionToggleRow(
                         title: "Auto Deposit",
-                        subtitle: "Automatically add Connected-account deposits to your Account Register(s)",
+                        subtitle: "Review Connected-account deposits to add to your Account Register(s)",
                         isOn: Binding(
                             get: { accountRegisterAutoDepositEnabled },
                             set: { newValue in

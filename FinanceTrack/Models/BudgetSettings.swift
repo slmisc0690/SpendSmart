@@ -88,17 +88,17 @@ final class BudgetSettings {
     /// "nothing excluded" via `?? []`.
     var excludedTransactionIDs: [UUID]?
     /// ACCOUNT REGISTER AUTO DEPOSIT — master on/off. When on, a posted Connected-account deposit
-    /// (see `AccountRegisterAutoDepositService.isEligibleDeposit`) is automatically mirrored into
-    /// every Account Register listed in `accountRegisterAutoDepositAccountIds` below, with no
-    /// review step. Defaults to off. Scott's own explicit request (2026-09-15): "once my app
-    /// updates from Plaid... it will see the deposit and add it to my register."
+    /// (see `AccountRegisterAutoDepositService.isEligibleDeposit`) is offered for review the next
+    /// time the app opens, for mirroring into every Account Register listed in
+    /// `accountRegisterAutoDepositAccountIds` below. Defaults to off. Scott's own explicit request
+    /// (2026-09-15).
     ///
     /// Optional (rather than a plain `Bool`) so it migrates cleanly for installs that already had
     /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "off"
     /// via `?? false`.
     var accountRegisterAutoDepositEnabled: Bool?
-    /// ACCOUNT REGISTER AUTO DEPOSIT — which Account Register(s) (`Account.id`) receive an
-    /// auto-created deposit entry. Selecting more than one means EVERY eligible deposit is mirrored
+    /// ACCOUNT REGISTER AUTO DEPOSIT — which Account Register(s) (`Account.id`) receive a
+    /// confirmed deposit entry. Selecting more than one means EVERY confirmed deposit is mirrored
     /// into EVERY selected register (a deliberate broadcast, not a per-source-account mapping) —
     /// per Scott's own "they can do all or 1 by 1" framing. Ignored entirely while
     /// `accountRegisterAutoDepositEnabled` is off/`nil`.
@@ -107,6 +107,18 @@ final class BudgetSettings {
     /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "no
     /// registers selected" via `?? []`.
     var accountRegisterAutoDepositAccountIds: [UUID]?
+    /// ACCOUNT REGISTER AUTO DEPOSIT — REVIEW STEP (added 2026-09-15, see
+    /// `AccountRegisterAutoDepositService`'s own header for why this exists): every Connected
+    /// transaction id (`FinanceTransaction.id`) already shown to the user in a deposit-review
+    /// prompt, whether they chose to include it or not. A transaction only ever appears in
+    /// `AccountRegisterDepositReviewView` once — this is what prevents that. Never touched by
+    /// anything except that review flow; unrelated to `excludedTransactionIDs` above, which governs
+    /// budget totals, not this feature.
+    ///
+    /// Optional (rather than a plain `[UUID]`) so it migrates cleanly for installs that already had
+    /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "nothing
+    /// reviewed yet" via `?? []`.
+    var accountRegisterAutoDepositReviewedTransactionIds: [UUID]?
     /// Whether Spend Sense (local, deterministic financial observations) is enabled. Defaults to
     /// on — Spend Sense never networks or reads/writes Supabase; this only ever governs whether
     /// its local, on-device output is shown.
@@ -150,6 +162,7 @@ final class BudgetSettings {
         excludedTransactionIDs: [UUID] = [],
         accountRegisterAutoDepositEnabled: Bool = false,
         accountRegisterAutoDepositAccountIds: [UUID] = [],
+        accountRegisterAutoDepositReviewedTransactionIds: [UUID] = [],
         spendSenseEnabled: Bool = true,
         showMonthlySpendingQuickStat: Bool = true,
         showSavedThisMonthQuickStat: Bool = true,
@@ -170,6 +183,7 @@ final class BudgetSettings {
         self.excludedTransactionIDs = excludedTransactionIDs
         self.accountRegisterAutoDepositEnabled = accountRegisterAutoDepositEnabled
         self.accountRegisterAutoDepositAccountIds = accountRegisterAutoDepositAccountIds
+        self.accountRegisterAutoDepositReviewedTransactionIds = accountRegisterAutoDepositReviewedTransactionIds
         self.spendSenseEnabled = spendSenseEnabled
         self.showMonthlySpendingQuickStat = showMonthlySpendingQuickStat
         self.showSavedThisMonthQuickStat = showSavedThisMonthQuickStat

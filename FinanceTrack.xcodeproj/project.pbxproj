@@ -235,6 +235,7 @@
 		E0CFA0221BDAB9C395A6DE1D /* SpendSenseAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = D277033162D3C201B480E8A6 /* SpendSenseAction.swift */; };
 		E48F301875A49ACB60B0BD95 /* AccountBalanceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA1DCF5C7DB128D71258D2D /* AccountBalanceManager.swift */; };
 		E549FB7BC113C98A8ACB6FB8 /* ConnectedTransactionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A55DC19A94A5B34E8B37E84 /* ConnectedTransactionRow.swift */; };
+		E58BF72A298470C46150F798 /* AccountRegisterDepositReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D6543A0ACCD98F61A94346 /* AccountRegisterDepositReviewView.swift */; };
 		E807A590EEA66A67806CBC68 /* FavoriteDestinationIconBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = D476B86599B2D82D08576412 /* FavoriteDestinationIconBadge.swift */; };
 		E8F39E70E53C3A0032D93237 /* SpendAIQueryPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0787DC43869746B9F7B4ADC7 /* SpendAIQueryPlan.swift */; };
 		E9E79D3CE05E97536C250F25 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD7920DA6C0424A7CF5E9CA0 /* DashboardView.swift */; };
@@ -437,6 +438,7 @@
 		A820EE42F22C4B9CB68FFDC0 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A82DF2CF6235C8389E0E7BD1 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		A8804351AC2BF1726C31979D /* SavingsCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavingsCalculator.swift; sourceTree = "<group>"; };
+		A8D6543A0ACCD98F61A94346 /* AccountRegisterDepositReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRegisterDepositReviewView.swift; sourceTree = "<group>"; };
 		A91B254F873E0BA052E7496B /* SpendAIVoiceInputService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendAIVoiceInputService.swift; sourceTree = "<group>"; };
 		AA92F639E1144EC97BA7C535 /* AccountSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSettingsView.swift; sourceTree = "<group>"; };
 		AB2C3B7F8FA606E33CBB4240 /* SpendSenseSeverity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendSenseSeverity.swift; sourceTree = "<group>"; };
@@ -903,6 +905,7 @@
 		CBD12D60F6FC7CED31682991 /* Dashboard */ = {
 			isa = PBXGroup;
 			children = (
+				A8D6543A0ACCD98F61A94346 /* AccountRegisterDepositReviewView.swift */,
 				B7F7FA62D3E00D116491387D /* CheckingRegisterAccountPickerView.swift */,
 				CD7920DA6C0424A7CF5E9CA0 /* DashboardView.swift */,
 				E71BAD9FDE2C230C8B2F377F /* ExcludeTransactionsView.swift */,
@@ -1121,6 +1124,7 @@
 				F91E26BCBE32ED717A486D78 /* AccountListView.swift in Sources */,
 				D6AED72CD6B32EB4760CD6F0 /* AccountPickerCard.swift in Sources */,
 				97FC7DDD8368C04594BF4058 /* AccountRegisterAutoDepositService.swift in Sources */,
+				E58BF72A298470C46150F798 /* AccountRegisterDepositReviewView.swift in Sources */,
 				9B1CE29101D4FBBB1E01A206 /* AccountRelatedOptionsView.swift in Sources */,
 				72F2E9EAE1BE0F8A59866FFE /* AccountRelatedOptionsViewModel.swift in Sources */,
 				327EB4D7571B82076D12634D /* AccountSettingsView.swift in Sources */,
