@@ -538,6 +538,14 @@ final class PlaidConnectionManager {
         // budget screen recomputes (see that type's own header) — Auto Tracking account selection
         // is a query-time filter, never a transaction mutation, so there is nothing to reconcile
         // or rewrite after a sync completes.
+        //
+        // ACCOUNT REGISTER AUTO DEPOSIT — runs AFTER `applySync` (the deposit transactions it
+        // mirrors must already be persisted) and uses `self.connections`, the manager's own
+        // up-to-date cached-balance state (not just this sync's `accountBalances` delta), since an
+        // account's `type`/`subtype` were already cached whenever that account was first linked or
+        // last balance-refreshed — never re-fetched here. No-ops (and costs nothing) while the
+        // feature is off, per `AccountRegisterAutoDepositService`'s own header.
+        try AccountRegisterAutoDepositService.applyAutoDeposits(connections: connections, context: context)
         markSynced(connectionId: connectionId)
         return outcome
     }

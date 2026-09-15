@@ -16,6 +16,7 @@ struct AccountSettingsView: View {
     @Query private var recurringExpenses: [RecurringExpense]
     @Query private var monthlyPlanSettingsList: [MonthlyPlanSettings]
     @Query(sort: \Category.name) private var categories: [Category]
+    @Query(sort: \Account.createdAt) private var allAccounts: [Account]
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(PrivacyModeManager.self) private var privacyMode
@@ -37,6 +38,8 @@ struct AccountSettingsView: View {
     @State private var isPresentingWeeklySpendingEdit = false
     @State private var isPresentingSavingsGoalEdit = false
     @State private var isPresentingCategoryManagement = false
+    @State private var accountRegisterAutoDepositEnabled = false
+    @State private var accountRegisterAutoDepositAccountIds: [UUID] = []
 
     private var settings: BudgetSettings {
         if let existing = settingsList.first {
@@ -87,6 +90,7 @@ struct AccountSettingsView: View {
                     accountRelatedOptionsSection
                     budgetSection
                     monthlyPlanSection
+                    accountRegisterAutoDepositSection
                     securitySection
                     connectedAccountsSection
                     categoriesSection
@@ -107,6 +111,8 @@ struct AccountSettingsView: View {
                 requireFaceIDSetting = settings.requireFaceID
                 hideBalancesByDefault = settings.hideBalancesByDefault
                 biometricAuth.isFaceIDRequired = settings.requireFaceID
+                accountRegisterAutoDepositEnabled = settings.accountRegisterAutoDepositEnabled ?? false
+                accountRegisterAutoDepositAccountIds = settings.accountRegisterAutoDepositAccountIds ?? []
             }
             .sheet(isPresented: $isPresentingAccountRelatedOptions) {
                 AccountRelatedOptionsView()
@@ -337,7 +343,7 @@ struct AccountSettingsView: View {
 
                     You don't have to fill in Monthly Plan for the app to work. Your Spent This \
                     Week and Spent This Month totals are always based on your real transactions — \
-                    Manual Account entries and any Connected Accounts you've turned on under Auto \
+                    Account Register entries and any Connected Accounts you've turned on under Auto \
                     Calculate — whether or not Monthly Plan has anything in it. What changes is only \
                     the TARGET those totals are compared against: with nothing entered in Monthly \
                     Plan, Flexible Spending Available is $0, so Automatic weekly planning would also \
@@ -379,6 +385,102 @@ struct AccountSettingsView: View {
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }
+    }
+
+    // MARK: - Account Register Auto Deposit
+
+    /// ACCOUNT REGISTER AUTO DEPOSIT — Scott's own explicit request (2026-09-15). Off by default;
+    /// when on, a posted Connected-account deposit (paycheck, refund, etc.) is automatically
+    /// mirrored into whichever Account Register(s) are selected below, with no review step — see
+    /// `AccountRegisterAutoDepositService` for the actual sweep logic, which runs after every
+    /// Connected-account transaction sync.
+    private var accountRegisterAutoDepositSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            DashboardSectionHeader(
+                title: "Account Register Auto Deposit",
+                infoTitle: "About Account Register Auto Deposit",
+                infoExplanation: """
+                    When a Connected account (like a checking account at your bank) receives a \
+                    deposit — a paycheck, a refund, anything money coming in — turning this on adds \
+                    a matching entry to your Account Register(s) automatically the next time the \
+                    app syncs with that bank, with nothing for you to review or approve.
+
+                    If you have more than one Account Register, choose which one(s) should receive \
+                    these automatic entries below. Selecting more than one adds the SAME deposit to \
+                    every register you've selected.
+
+                    Turn this off at any time to go back to adding deposits to your register \
+                    yourself.
+
+                    Example: your paycheck hits your Connected checking account. Next time \
+                    SpendSmart syncs, it sees the deposit and adds a matching entry to your \
+                    checking Account Register automatically — no extra step from you.
+                    """
+            )
+
+            CardBackground {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    TransactionToggleRow(
+                        title: "Auto Deposit",
+                        subtitle: "Automatically add Connected-account deposits to your Account Register(s)",
+                        isOn: Binding(
+                            get: { accountRegisterAutoDepositEnabled },
+                            set: { newValue in
+                                accountRegisterAutoDepositEnabled = newValue
+                                settings.accountRegisterAutoDepositEnabled = newValue
+                                settings.updatedAt = .now
+                            }
+                        )
+                    )
+
+                    if accountRegisterAutoDepositEnabled {
+                        Divider().overlay(Theme.cardStroke)
+
+                        Text("Deposit to:")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textSecondary)
+
+                        if allAccounts.isEmpty {
+                            Text("No Account Registers yet. Add one in Account Registers to choose a destination here.")
+                                .font(Theme.captionFont)
+                                .foregroundStyle(Theme.textTertiary)
+                        } else {
+                            ForEach(Array(allAccounts.enumerated()), id: \.element.id) { index, account in
+                                if index > 0 {
+                                    Divider().overlay(Theme.cardStroke)
+                                }
+                                TransactionToggleRow(
+                                    title: account.name,
+                                    subtitle: "Receives auto-deposited entries",
+                                    isOn: Binding(
+                                        get: { isAutoDepositAccountSelected(account.id) },
+                                        set: { newValue in setAutoDepositAccountSelected(account.id, isSelected: newValue) }
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.Spacing.lg)
+        }
+    }
+
+    private func isAutoDepositAccountSelected(_ accountId: UUID) -> Bool {
+        accountRegisterAutoDepositAccountIds.contains(accountId)
+    }
+
+    private func setAutoDepositAccountSelected(_ accountId: UUID, isSelected: Bool) {
+        var updated = Set(accountRegisterAutoDepositAccountIds)
+        if isSelected {
+            updated.insert(accountId)
+        } else {
+            updated.remove(accountId)
+        }
+        let updatedArray = Array(updated)
+        accountRegisterAutoDepositAccountIds = updatedArray
+        settings.accountRegisterAutoDepositAccountIds = updatedArray
+        settings.updatedAt = .now
     }
 
     // MARK: - Security & Privacy

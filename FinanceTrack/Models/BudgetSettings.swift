@@ -87,6 +87,26 @@ final class BudgetSettings {
     /// had a `BudgetSettings` record before this field existed. Every read site treats `nil` as
     /// "nothing excluded" via `?? []`.
     var excludedTransactionIDs: [UUID]?
+    /// ACCOUNT REGISTER AUTO DEPOSIT — master on/off. When on, a posted Connected-account deposit
+    /// (see `AccountRegisterAutoDepositService.isEligibleDeposit`) is automatically mirrored into
+    /// every Account Register listed in `accountRegisterAutoDepositAccountIds` below, with no
+    /// review step. Defaults to off. Scott's own explicit request (2026-09-15): "once my app
+    /// updates from Plaid... it will see the deposit and add it to my register."
+    ///
+    /// Optional (rather than a plain `Bool`) so it migrates cleanly for installs that already had
+    /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "off"
+    /// via `?? false`.
+    var accountRegisterAutoDepositEnabled: Bool?
+    /// ACCOUNT REGISTER AUTO DEPOSIT — which Account Register(s) (`Account.id`) receive an
+    /// auto-created deposit entry. Selecting more than one means EVERY eligible deposit is mirrored
+    /// into EVERY selected register (a deliberate broadcast, not a per-source-account mapping) —
+    /// per Scott's own "they can do all or 1 by 1" framing. Ignored entirely while
+    /// `accountRegisterAutoDepositEnabled` is off/`nil`.
+    ///
+    /// Optional (rather than a plain `[UUID]`) so it migrates cleanly for installs that already had
+    /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "no
+    /// registers selected" via `?? []`.
+    var accountRegisterAutoDepositAccountIds: [UUID]?
     /// Whether Spend Sense (local, deterministic financial observations) is enabled. Defaults to
     /// on — Spend Sense never networks or reads/writes Supabase; this only ever governs whether
     /// its local, on-device output is shown.
@@ -128,6 +148,8 @@ final class BudgetSettings {
         autoCalculateConnectedAccountIds: [String] = [],
         excludeTransactionsEnabled: Bool = false,
         excludedTransactionIDs: [UUID] = [],
+        accountRegisterAutoDepositEnabled: Bool = false,
+        accountRegisterAutoDepositAccountIds: [UUID] = [],
         spendSenseEnabled: Bool = true,
         showMonthlySpendingQuickStat: Bool = true,
         showSavedThisMonthQuickStat: Bool = true,
@@ -146,6 +168,8 @@ final class BudgetSettings {
         self.autoCalculateConnectedAccountIds = autoCalculateConnectedAccountIds
         self.excludeTransactionsEnabled = excludeTransactionsEnabled
         self.excludedTransactionIDs = excludedTransactionIDs
+        self.accountRegisterAutoDepositEnabled = accountRegisterAutoDepositEnabled
+        self.accountRegisterAutoDepositAccountIds = accountRegisterAutoDepositAccountIds
         self.spendSenseEnabled = spendSenseEnabled
         self.showMonthlySpendingQuickStat = showMonthlySpendingQuickStat
         self.showSavedThisMonthQuickStat = showSavedThisMonthQuickStat
