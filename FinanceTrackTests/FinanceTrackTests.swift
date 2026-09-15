@@ -9821,12 +9821,23 @@ final class FinanceTrackTests: XCTestCase {
     // MARK: - Autosave: invalid drafts never persist
 
     func testInvalidDraftDoesNotSaveAsRealRecord() {
-        // Name present but amount missing/zero — still invalid, so still not autosave-eligible.
-        let incomeMessages = AutosaveCommitter.incomeSourceValidationMessages(name: "Side Gig", amount: 0, frequency: .monthly, hasNextPayDate: false)
-        XCTAssertFalse(incomeMessages.isEmpty, "Amount must be greater than 0 for autosave to be eligible")
+        // Name present but amount missing/negative — still invalid, so still not autosave-eligible.
+        let incomeMessages = AutosaveCommitter.incomeSourceValidationMessages(name: "Side Gig", amount: -5, frequency: .monthly, hasNextPayDate: false)
+        XCTAssertFalse(incomeMessages.isEmpty, "A negative amount must never be autosave-eligible")
 
         let expenseMessages = AutosaveCommitter.recurringExpenseValidationMessages(name: "", amount: Decimal(string: "50"), frequency: .monthly, hasDueDate: false)
         XCTAssertFalse(expenseMessages.isEmpty, "Name is required for autosave to be eligible")
+    }
+
+    /// ZERO-AMOUNT PHASE — $0.00 is a legitimate value (e.g. a card paid off this month, or an
+    /// income source with nothing coming in yet), never treated the same as "no amount entered
+    /// at all." Only `nil` (blank field) or a negative amount are rejected.
+    func testZeroAmountIsValidForIncomeAndRecurringExpense() {
+        let incomeMessages = AutosaveCommitter.incomeSourceValidationMessages(name: "Side Gig", amount: 0, frequency: .monthly, hasNextPayDate: false, monthlyDepositDay: .numericDay(1))
+        XCTAssertTrue(incomeMessages.isEmpty, "$0.00 must be a valid income amount")
+
+        let expenseMessages = AutosaveCommitter.recurringExpenseValidationMessages(name: "American Express", amount: 0, frequency: .monthly, hasDueDate: false)
+        XCTAssertTrue(expenseMessages.isEmpty, "$0.00 must be a valid recurring expense amount")
     }
 
     // MARK: - Autosave: transaction screens are not autosaved

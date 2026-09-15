@@ -27,8 +27,8 @@ enum AutosaveCommitter {
         if name.trimmingCharacters(in: .whitespaces).isEmpty {
             messages.append("Name is required.")
         }
-        if amount == nil || (amount ?? 0) <= 0 {
-            messages.append("Amount must be greater than 0.")
+        if amount == nil || (amount ?? 0) < 0 {
+            messages.append("Amount can't be negative.")
         }
         switch frequency {
         case .oneTime:
@@ -127,8 +127,8 @@ enum AutosaveCommitter {
         if name.trimmingCharacters(in: .whitespaces).isEmpty {
             messages.append("Name is required.")
         }
-        if amount == nil || (amount ?? 0) <= 0 {
-            messages.append("Amount must be greater than 0.")
+        if amount == nil || (amount ?? 0) < 0 {
+            messages.append("Amount can't be negative.")
         }
         if frequency == .oneTime, !hasDueDate {
             messages.append("One-time expenses need a due date to know which month they count toward.")

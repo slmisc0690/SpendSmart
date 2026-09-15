@@ -210,7 +210,7 @@ struct AddEditIncomeSourceView: View {
                 CurrencyAmountField(
                     amount: $amount,
                     style: .hero,
-                    isInvalid: hasAttemptedSave && (amount ?? 0) <= 0,
+                    isInvalid: hasAttemptedSave && (amount ?? 0) < 0,
                     accessibilityLabel: "Amount per deposit"
                 )
             }
