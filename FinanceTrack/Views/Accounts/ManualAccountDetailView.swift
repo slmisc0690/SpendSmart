@@ -130,7 +130,7 @@ struct ManualAccountDetailView: View {
                 Text("This transaction couldn't be safely deleted, so nothing was changed.")
             }
             .confirmationDialog(
-                "Delete Manual Account?",
+                "Delete Account Register?",
                 isPresented: $isPresentingAccountDeletionConfirmation,
                 titleVisibility: .visible
             ) {
@@ -139,7 +139,7 @@ struct ManualAccountDetailView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will permanently delete this manual account and its manually entered account entries. This cannot be undone.")
+                Text("This will permanently delete this account register and its manually entered account entries. This cannot be undone.")
             }
             .alert(
                 "Can't Delete Account",

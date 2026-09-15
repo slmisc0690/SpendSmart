@@ -383,8 +383,8 @@ struct AddExpenseView: View {
                         if activeAccounts.isEmpty {
                             EmptyStateCard(
                                 systemIconName: "creditcard.fill",
-                                message: "Add a manually tracked account before logging an expense. Connected banks and credit cards are managed in Connected Accounts.",
-                                actionTitle: "Add Manual Tracked Account"
+                                message: "Add an Account Register before logging an expense. Connected banks and credit cards are managed in Connected Accounts.",
+                                actionTitle: "Add Account Register"
                             ) {
                                 isPresentingAddAccount = true
                             }
@@ -703,7 +703,7 @@ struct AddExpenseView: View {
     private var accountDropdownSection: some View {
         CardBackground(padding: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Manual Account")
+                Text("Account Register")
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
                 Menu {

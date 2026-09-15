@@ -479,7 +479,7 @@ private struct RootView: View {
                         .tabItem { TabBarIconRenderer.label("Activity", assetName: "NavActivity") }
 
                     AccountListView()
-                        .tabItem { TabBarIconRenderer.label("Manual Accounts", assetName: "AccountsArtwork") }
+                        .tabItem { TabBarIconRenderer.label("Account Registers", assetName: "AccountsArtwork") }
 
                     SettingsView()
                         .tabItem { TabBarIconRenderer.label("Settings", assetName: "NavSettings") }

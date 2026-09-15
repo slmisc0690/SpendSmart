@@ -704,7 +704,7 @@ struct SettingsView: View {
                                 Text("Restore from Cloud")
                                     .font(Theme.bodyFont)
                                     .foregroundStyle(Theme.textPrimary)
-                                Text("Recover Monthly Plan and Manual Accounts already synced to the cloud")
+                                Text("Recover Monthly Plan and Account Registers already synced to the cloud")
                                     .font(Theme.captionFont)
                                     .foregroundStyle(Theme.textTertiary)
                             }

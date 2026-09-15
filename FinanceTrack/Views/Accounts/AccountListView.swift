@@ -14,9 +14,10 @@ struct AccountListView: View {
         below your own accounts, clearly labeled "Shared with You" so it's never confused with \
         something you own.
 
-        Example: you keep a Manual Account for your checking account, entering deposits and bill \
-        payments by hand since your bank isn't connected. Its balance updates every time you add \
-        or edit an entry, giving you an accurate running total without needing a bank connection.
+        Example: you keep an Account Register for your checking account, entering deposits and \
+        bill payments by hand since your bank isn't connected. Its balance updates every time you \
+        add or edit an entry, giving you an accurate running total without needing a bank \
+        connection.
         """
 
     @Query(sort: \Account.createdAt) private var allAccounts: [Account]
@@ -80,10 +81,10 @@ struct AccountListView: View {
                 .padding(.vertical, Theme.Spacing.lg)
             }
             .background(Theme.backgroundGradient.ignoresSafeArea())
-            .navigationTitle("Manual Accounts")
+            .navigationTitle("Account Registers")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    InfoButton(title: "About Manual Accounts", explanation: Self.infoExplanation)
+                    InfoButton(title: "About Account Registers", explanation: Self.infoExplanation)
                 }
                 // SPENDAI LAUNCHER VISUAL CORRECTION — "+" and the SpendAI launcher are one
                 // `ToolbarItemGroup` (Apple's documented way to combine related toolbar controls
@@ -192,7 +193,7 @@ struct AccountListView: View {
                     .font(.system(size: 30, weight: .medium))
                     .foregroundStyle(Theme.accentGradient)
 
-                Text("No Manual Accounts")
+                Text("No Account Registers")
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
 
@@ -201,7 +202,7 @@ struct AccountListView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
 
-                PremiumActionButton(title: "Add Manual Tracked Account") {
+                PremiumActionButton(title: "Add Account Register") {
                     isPresentingAdd = true
                 }
 

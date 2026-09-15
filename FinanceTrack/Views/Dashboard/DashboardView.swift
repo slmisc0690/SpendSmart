@@ -1404,7 +1404,7 @@ struct DashboardView: View {
 
         • Saved This Month — money you've logged as savings this month, using Monthly Plan's "Add to Savings."
 
-        • Saved — money you've moved into a Savings account this month using the "Transfer To Savings" entry type in a Manual Account's register (for example, moving $200 from Checking to Savings). This never changes your Monthly Remaining or Projected Available — it's tracked separately, purely so you can see at a glance how much you've actually put into savings, distinct from "Saved This Month," which tracks manually-logged savings entries instead.
+        • Saved — money you've moved into a Savings account this month using the "Transfer To Savings" entry type in an Account Register (for example, moving $200 from Checking to Savings). This never changes your Monthly Remaining or Projected Available — it's tracked separately, purely so you can see at a glance how much you've actually put into savings, distinct from "Saved This Month," which tracks manually-logged savings entries instead.
 
         Tap the "+" next to "Quick Stats" to choose which of these tiles show — nothing is deleted when you hide one, it just tidies up the grid.
 

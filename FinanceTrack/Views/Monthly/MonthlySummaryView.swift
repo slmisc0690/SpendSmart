@@ -140,8 +140,8 @@ struct MonthlySummaryView: View {
                     if activeAccounts.isEmpty {
                         EmptyStateCard(
                             systemIconName: "creditcard.fill",
-                            message: "Add a manually tracked account to start tracking your monthly spending. Connected banks and credit cards are managed in Connected Accounts.",
-                            actionTitle: "Add Manual Tracked Account"
+                            message: "Add an Account Register to start tracking your monthly spending. Connected banks and credit cards are managed in Connected Accounts.",
+                            actionTitle: "Add Account Register"
                         ) {
                             isPresentingAddAccount = true
                         }

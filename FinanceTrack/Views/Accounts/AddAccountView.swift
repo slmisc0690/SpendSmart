@@ -122,7 +122,7 @@ struct AddAccountView: View {
             .background(Theme.backgroundGradient.ignoresSafeArea())
             .scrollDismissesKeyboard(.interactively)
             .dismissKeyboardOnBackgroundTap()
-            .navigationTitle(isEditing ? "Edit Manual Tracked Account" : "Add Manual Tracked Account")
+            .navigationTitle(isEditing ? "Edit Account Register" : "Add Account Register")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

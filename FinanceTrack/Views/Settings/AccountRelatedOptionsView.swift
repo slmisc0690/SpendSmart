@@ -395,12 +395,12 @@ private struct ManualAccountSharingSectionView: View {
         let globalShared = viewModel.isShared(category: Self.category, itemId: nil)
 
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Manual Account Sharing")
+            DashboardSectionHeader(title: "Account Register Sharing")
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     SharingGlobalToggleRow(
-                        title: "Share Manual Accounts",
+                        title: "Share Account Registers",
                         isShared: globalShared,
                         isDisabled: viewModel.activeMutation == .manualGlobal
                     ) { newValue in
@@ -734,20 +734,20 @@ private struct SecondaryShareManualAccountSectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(title: "Share Manual Account")
+            DashboardSectionHeader(title: "Share Account Register")
 
             CardBackground {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     if accounts.isEmpty {
-                        Text("You have no Manual Accounts of your own to share yet.")
+                        Text("You have no Account Registers of your own to share yet.")
                             .font(Theme.captionFont)
                             .foregroundStyle(Theme.textTertiary)
                     } else if unsharedCount == 0 {
-                        Text("All of your Manual Accounts are already shared with your household Primary.")
+                        Text("All of your Account Registers are already shared with your household Primary.")
                             .font(Theme.captionFont)
                             .foregroundStyle(Theme.textTertiary)
                     } else {
-                        Text("Choose which of your own Manual Accounts to share with your household Primary.")
+                        Text("Choose which of your own Account Registers to share with your household Primary.")
                             .font(Theme.captionFont)
                             .foregroundStyle(Theme.textTertiary)
                     }

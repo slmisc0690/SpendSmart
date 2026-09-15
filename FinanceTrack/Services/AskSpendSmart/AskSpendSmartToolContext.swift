@@ -841,16 +841,16 @@ final class AskSpendSmartToolContext: @unchecked Sendable {
          "Monthly Plan is where you set your income, fixed bills, and savings goal for the month. From those, SpendSmart calculates how much flexible spending you have available, and your recommended weekly spending limit."),
         (["quick stat"], "Quick Stats",
          "Quick Stats are the small summary tiles on your Dashboard — Planned Weekly Spending, Spent This Week, Planned Monthly Spending, Projected Available After Spend, Saved This Month, and Saved (via transfer). You can choose which ones show in Settings."),
-        (["manual register", "manual account"], "Manual Accounts / Register",
-         "A Manual Account is a register you track by hand — like a checking account, cash wallet, or any account you don't connect through Plaid. You add deposits, expenses, and transfers yourself, and SpendSmart keeps a running balance."),
+        (["manual register", "manual account", "account register"], "Account Registers",
+         "An Account Register is an account you track by hand — like a checking account, cash wallet, or any account you don't connect through Plaid. You add deposits, expenses, and transfers yourself, and SpendSmart keeps a running balance."),
         (["activity"], "Activity",
-         "Activity is the full list of your transactions — both from connected (bank-linked) accounts and your own Manual Accounts — with filtering by account, date, pending/posted status, and more. It's a factual record of everything that happened, independent of budget totals."),
+         "Activity is the full list of your transactions — both from connected (bank-linked) accounts and your own Account Registers — with filtering by account, date, pending/posted status, and more. It's a factual record of everything that happened, independent of budget totals."),
         (["weekly budget", "weekly spending"], "Weekly Budget",
          "Weekly Budget shows how much you've spent this week against your weekly spending limit (derived from Monthly Plan), and how much you have left."),
         (["saving"], "Savings",
          "SpendSmart tracks savings two ways: money you manually log as saved this month, and money you transfer into a savings-type account (Saved via Transfer). Your Monthly Plan savings goal is the target amount you're aiming to save each month."),
         (["bill", "pay bills"], "Bills / Pay Bills",
-         "Fixed Bills are the recurring bills you set up in Monthly Plan. Pay Bills lets you record a bill as paid by linking it to a Manual Account transaction — SpendSmart then tracks whether each bill has been paid yet this month.")
+         "Fixed Bills are the recurring bills you set up in Monthly Plan. Pay Bills lets you record a bill as paid by linking it to an Account Register transaction — SpendSmart then tracks whether each bill has been paid yet this month.")
     ]
 
     func appFeatureInfo(topic: String) -> AppFeatureInfoResult {

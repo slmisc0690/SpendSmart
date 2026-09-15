@@ -779,7 +779,7 @@ struct GetManualRegisterTool: Tool {
 
     @Generable
     struct Arguments {
-        @Guide(description: "Optional Manual Account name to filter to a single register (e.g. \"Checking\"). Leave empty to get every Manual Account.")
+        @Guide(description: "Optional Account Register name to filter to a single register (e.g. \"Checking\"). Leave empty to get every Account Register.")
         var accountName: String?
     }
 

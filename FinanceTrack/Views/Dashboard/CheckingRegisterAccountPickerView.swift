@@ -72,11 +72,11 @@ struct CheckingRegisterAccountPickerView: View {
                 .font(.system(size: 30, weight: .medium))
                 .foregroundStyle(Theme.accentGradient)
 
-            Text("No Manual Accounts Yet")
+            Text("No Account Registers Yet")
                 .font(Theme.headlineFont)
                 .foregroundStyle(Theme.textPrimary)
 
-            Text("Add a Manual Account first (Manual Accounts ▸ +), then choose it here for the Checking Register Favorite.")
+            Text("Add an Account Register first (Account Registers ▸ +), then choose it here for the Checking Register Favorite.")
                 .font(Theme.bodyFont)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)

@@ -83,7 +83,7 @@ enum AskSpendSmartScreenContext: Equatable, Sendable {
         case .dashboard: return "This conversation was opened from the Dashboard."
         case .weekly: return "This conversation was opened from the Weekly Spending screen."
         case .activity: return "This conversation was opened from the Activity screen."
-        case .manualAccounts: return "This conversation was opened from the Manual Accounts screen."
+        case .manualAccounts: return "This conversation was opened from the Account Registers screen."
         case .monthlyPlan: return "This conversation was opened from the Monthly Plan screen."
         case .settings: return "This conversation was opened from Settings."
         }

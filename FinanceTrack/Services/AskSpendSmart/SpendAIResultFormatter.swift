@@ -113,13 +113,13 @@ enum SpendAIResultFormatter {
 
     private static func formatManualRegisters(_ registers: [AskSpendSmartToolContext.ManualRegisterResult]) -> String {
         guard !registers.isEmpty else {
-            return "I couldn't find that Manual Account."
+            return "I couldn't find that Account Register."
         }
         if registers.count == 1, let only = registers.first {
             return "Your \(only.accountName) balance is \(money(only.currentBalance)), across \(only.transactionCount) transaction\(only.transactionCount == 1 ? "" : "s")."
         }
         let lines = registers.map { "\($0.accountName): \(money($0.currentBalance))" }.joined(separator: "; ")
-        return "Here are your Manual Account balances: \(lines)."
+        return "Here are your Account Register balances: \(lines)."
     }
 
     // MARK: - Bills

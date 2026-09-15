@@ -387,7 +387,7 @@ enum AskSpendSmartFallbackRouter {
     }
 
     private static func matchFeatureTopicKeyword(_ normalized: String) -> String? {
-        let keywords = ["budget exclusion", "auto calculate", "monthly plan", "quick stat", "manual account", "manual register", "activity", "weekly budget", "saving", "bill", "pay bills"]
+        let keywords = ["budget exclusion", "auto calculate", "monthly plan", "quick stat", "manual account", "manual register", "account register", "activity", "weekly budget", "saving", "bill", "pay bills"]
         return keywords.first { normalized.contains($0) }
     }
 

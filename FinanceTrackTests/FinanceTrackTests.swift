@@ -25718,7 +25718,7 @@ final class FinanceTrackTests: XCTestCase {
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         XCTAssertTrue(source.contains("private struct ManualAccountSharingSectionView"), "the Primary's own Manual Account section must remain untouched")
-        XCTAssertTrue(source.contains("Share Manual Accounts"), "the Primary's own global toggle label is unchanged")
+        XCTAssertTrue(source.contains("Share Account Registers"), "the Primary's own global toggle label uses the renamed term")
     }
 
     @MainActor
@@ -37032,9 +37032,10 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(body.contains("\"Shared with You\""), "the shared section must never reuse the owner's own \"Manual Accounts\" title")
     }
 
-    func testOwnManualAccountsSectionTitleUnchanged() throws {
+    /// ACCOUNT REGISTER RENAME — was "Manual Accounts"; renamed per Scott's explicit request.
+    func testOwnAccountRegistersSectionTitle() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Accounts/AccountListView.swift")
-        XCTAssertTrue(source.contains("navigationTitle(\"Manual Accounts\")"), "the user's own accounts screen keeps its existing title")
+        XCTAssertTrue(source.contains("navigationTitle(\"Account Registers\")"), "the user's own accounts screen uses the renamed title")
     }
 
     // MARK: - Week-boundary double-count fix (half-open interval)
@@ -37780,7 +37781,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testManualAccountsScreenHasInfoButton() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Accounts/AccountListView.swift")
-        XCTAssertTrue(source.contains("InfoButton(title: \"About Manual Accounts\""))
+        XCTAssertTrue(source.contains("InfoButton(title: \"About Account Registers\""))
     }
 
     func testWeeklyBudgetScreenHasInfoButton() throws {
@@ -37925,7 +37926,7 @@ final class FinanceTrackTests: XCTestCase {
         let requiredPhrases = [
             "Where to Start",
             "Connected Accounts",
-            "Manual Accounts",
+            "Account Registers",
             "Using a Monthly Plan",
             "Not Using a Monthly Plan",
             "Plaid",
@@ -38543,7 +38544,7 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Dashboard\", assetName: \"NavDashboard\")"))
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Weekly\", assetName: \"NavWeekly\")"))
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Activity\", assetName: \"NavActivity\")"))
-        XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Manual Accounts\", assetName: \"AccountsArtwork\")"))
+        XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Account Registers\", assetName: \"AccountsArtwork\")"))
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Settings\", assetName: \"NavSettings\")"))
     }
 
@@ -38593,7 +38594,7 @@ final class FinanceTrackTests: XCTestCase {
     func testAccountOptionsAndManualAccountsNowUseDistinctArtwork() throws {
         XCTAssertEqual(FavoriteDestinationID.account.imageAssetName, "AccountOptionsArtwork")
         let appSource = try Self.financeTrackAppSource()
-        XCTAssertTrue(appSource.contains("TabBarIconRenderer.label(\"Manual Accounts\", assetName: \"AccountsArtwork\")"), "the Manual Accounts tab must keep its existing artwork, completely unchanged by this rename")
+        XCTAssertTrue(appSource.contains("TabBarIconRenderer.label(\"Account Registers\", assetName: \"AccountsArtwork\")"), "the Manual Accounts tab must keep its existing artwork, completely unchanged by this rename")
         XCTAssertNotEqual(FavoriteDestinationID.account.imageAssetName, "AccountsArtwork", "Account Options must no longer share the Manual Accounts tab's artwork")
         XCTAssertNotEqual(FavoriteDestinationID.account.imageAssetName, FavoriteDestinationID.connectedAccounts.imageAssetName, "Account Options must never use the Connected Accounts artwork")
     }
@@ -38777,7 +38778,7 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Dashboard\", assetName: \"NavDashboard\")"))
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Weekly\", assetName: \"NavWeekly\")"))
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Activity\", assetName: \"NavActivity\")"))
-        XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Manual Accounts\", assetName: \"AccountsArtwork\")"))
+        XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Account Registers\", assetName: \"AccountsArtwork\")"))
         XCTAssertTrue(source.contains("TabBarIconRenderer.label(\"Settings\", assetName: \"NavSettings\")"))
         // Confirms the prior, broken direct approach is gone.
         XCTAssertFalse(source.contains("Label(\"Dashboard\", image:"))

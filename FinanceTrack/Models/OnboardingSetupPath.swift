@@ -17,7 +17,7 @@ enum OnboardingSetupPath: String, CaseIterable, Identifiable {
         switch self {
         case .connectedOnly: return "Just a Connected Account"
         case .connectedAndMonthlyPlan: return "Connected Account + Monthly Plan"
-        case .monthlyPlanAndManual: return "Monthly Plan + Manual Account"
+        case .monthlyPlanAndManual: return "Monthly Plan + Account Register"
         case .monthlyPlanOnly: return "Just a Monthly Plan"
         case .none: return "None of these"
         }
@@ -60,7 +60,7 @@ enum OnboardingSetupPath: String, CaseIterable, Identifiable {
         case .monthlyPlanAndManual:
             return [
                 "Go to Settings → Monthly Plan and add your income, recurring bills, and a savings goal.",
-                "Go to the Manual Accounts tab and add an account (checking, savings, credit card — whatever you want to track).",
+                "Go to the Account Registers tab and add an account (checking, savings, credit card — whatever you want to track).",
                 "Log each expense by hand from that account, using the + button on the Dashboard or from the account itself.",
             ]
         case .monthlyPlanOnly:

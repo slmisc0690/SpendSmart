@@ -78,12 +78,12 @@ struct UsersGuideView: View {
 
                     guideCard(
                         icon: "creditcard.fill",
-                        title: "3. Manual Accounts — how they work",
+                        title: "3. Account Registers — how they work",
                         body: """
-                            A Manual Account is one you track entirely by hand — no bank connection \
-                            needed. Add one from the Manual Accounts tab. Good examples: a checking \
-                            account at a bank you don't want to connect, cash, or a loan you're \
-                            paying down.
+                            An Account Register is one you track entirely by hand — no bank \
+                            connection needed. Add one from the Account Registers tab. Good \
+                            examples: a checking account at a bank you don't want to connect, cash, \
+                            or a loan you're paying down.
 
                             Once created, you add entries to it yourself: an Expense (money out), a \
                             Deposit (money in), a Refund, or a Transfer to/from another account. Each \
@@ -95,9 +95,9 @@ struct UsersGuideView: View {
                             counted twice (once as "a bill you're expected to pay" and again as "a \
                             purchase you made"). If it's not a bill, it counts as normal spending. \
                             "Pay Bills" is a fast, one-tap way to pay several bills from your Monthly \
-                            Plan at once from a Manual Account's register.
+                            Plan at once from an Account Register.
 
-                            Manual Account data lives on your device and can also back up to the \
+                            Account Register data lives on your device and can also back up to the \
                             cloud tied to your sign-in, so it's recoverable if you get a new phone.
                             """
                     )
