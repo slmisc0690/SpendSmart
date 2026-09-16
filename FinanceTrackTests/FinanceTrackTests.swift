@@ -14486,10 +14486,14 @@ final class FinanceTrackTests: XCTestCase {
         var refreshResult: Result<ConnectedAccountRefreshResult, Error>
         var syncTransactionsResult: Result<PlaidSyncResult, Error> = .success(PlaidSyncResult(added: [], modified: [], removedExternalIds: []))
         var syncBalancesResult: Result<[PlaidAccountBalance], Error> = .success([])
+        var acknowledgeTransactionsSyncResult: Result<Void, Error> = .success(())
         private(set) var refreshConnectedAccountCallCount = 0
         private(set) var syncTransactionsCallCount = 0
         private(set) var syncBalancesCallCount = 0
         private(set) var lastSyncTransactionsConnectionId: String?
+        private(set) var acknowledgeTransactionsSyncCallCount = 0
+        private(set) var lastAcknowledgedConnectionId: String?
+        private(set) var lastAcknowledgedSyncToken: String?
 
         init(refreshResult: Result<ConnectedAccountRefreshResult, Error>) {
             self.refreshResult = refreshResult
@@ -14515,6 +14519,12 @@ final class FinanceTrackTests: XCTestCase {
         func listConnections() async throws -> [PlaidConnectionStatus] { fatalError("not used in this test") }
         func disconnectAccount(connectionId: String) async throws { fatalError("not used in this test") }
         func debugResetCursor(connectionId: String) async throws { fatalError("not used in this test") }
+        func acknowledgeTransactionsSync(connectionId: String, syncToken: String) async throws {
+            acknowledgeTransactionsSyncCallCount += 1
+            lastAcknowledgedConnectionId = connectionId
+            lastAcknowledgedSyncToken = syncToken
+            try acknowledgeTransactionsSyncResult.get()
+        }
     }
 
     @MainActor
@@ -14729,6 +14739,76 @@ final class FinanceTrackTests: XCTestCase {
         _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
 
         XCTAssertEqual(manager.connections.first?.cachedBalances?["checking-1"]?.currentBalance, 500, "an empty accountBalances array must leave the existing cache completely untouched")
+    }
+
+    // MARK: - Client-confirmed delivery watermark (ack-transactions-sync)
+    //
+    // Real Production incident, 2026-09-16: the server used to advance its delivery watermark
+    // (plaid_items.last_transactions_ack_at) the instant sync-transactions SENT its response,
+    // whether or not this device ever actually received or persisted it — silently and
+    // permanently hiding real transactions from Activity with no self-healing path. The fix moves
+    // the watermark advance into a separate acknowledgeTransactionsSync call this device makes
+    // ONLY after a successful local import/save. These tests pin that ordering and its
+    // best-effort failure handling.
+
+    @MainActor
+    func testPullSyncedTransactionsAcknowledgesSyncTokenAfterSuccessfulImport() async throws {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(added: [makePlaidDTO(id: "new-txn-1")], modified: [], removedExternalIds: [], syncToken: "2026-09-16T11:24:32.000Z")
+        )
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(fake.acknowledgeTransactionsSyncCallCount, 1, "a successful import must be acknowledged exactly once, never skipped and never double-acked")
+        XCTAssertEqual(fake.lastAcknowledgedConnectionId, "conn-1")
+        XCTAssertEqual(fake.lastAcknowledgedSyncToken, "2026-09-16T11:24:32.000Z", "the exact server-provided token must be echoed back verbatim, never recomputed on-device")
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsSkipsAcknowledgementWhenSyncTokenIsNil() async throws {
+        // A backend build that predates this fix simply omits sync_token — nothing to ack yet,
+        // and this must never crash or send a bogus/empty token.
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(PlaidSyncResult(added: [], modified: [], removedExternalIds: [], syncToken: nil))
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(fake.acknowledgeTransactionsSyncCallCount, 0, "there is nothing to acknowledge when the backend didn't provide a token")
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsSucceedsEvenWhenAcknowledgementFails() async throws {
+        // The whole point of splitting the ack into its own call: if IT fails (network drop right
+        // after a successful save), nothing is lost — the watermark simply stays where it was, and
+        // the next pull safely re-requests the same already-idempotent-to-import batch. This must
+        // never surface as a failure of the pull itself, which already succeeded.
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(added: [makePlaidDTO(id: "new-txn-1")], modified: [], removedExternalIds: [], syncToken: "2026-09-16T11:24:32.000Z")
+        )
+        fake.acknowledgeTransactionsSyncResult = .failure(PlaidBackendError.server(status: 500, message: "boom"))
+
+        let outcome = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(outcome.insertedCount, 1, "an acknowledgement failure must never roll back or hide an already-successful import")
+        let imported = try context.fetch(FetchDescriptor<FinanceTransaction>()).filter { $0.externalTransactionId == "new-txn-1" }
+        XCTAssertEqual(imported.count, 1)
     }
 
     private final class FakeTriggerCountingPlaidBackendService: PlaidBackendService {

@@ -39,16 +39,27 @@ struct PlaidSyncResult {
     /// `[]` so every pre-existing call site (test or production) that predates this field keeps
     /// compiling unchanged.
     let accountBalances: [PlaidAccountBalance]
+    /// The server's own snapshot instant for this response — echoed back to
+    /// `PlaidBackendService.acknowledgeTransactionsSync` ONLY after this batch has actually been
+    /// persisted locally (see `PlaidConnectionManager.pullSyncedTransactions`). Nil only for a
+    /// test double that predates this field; `SupabasePlaidBackendService` always populates it.
+    /// See `ack-transactions-sync/index.ts`'s own header for the full rationale — this is the
+    /// client-confirmed-delivery fix for a real data-loss bug found 2026-09-16, where the server
+    /// used to mark a batch "delivered" the instant it sent the response, whether or not the
+    /// client ever actually saved it.
+    let syncToken: String?
 
     init(
         added: [PlaidTransactionDTO],
         modified: [PlaidTransactionDTO],
         removedExternalIds: [String],
-        accountBalances: [PlaidAccountBalance] = []
+        accountBalances: [PlaidAccountBalance] = [],
+        syncToken: String? = nil
     ) {
         self.added = added
         self.modified = modified
         self.removedExternalIds = removedExternalIds
         self.accountBalances = accountBalances
+        self.syncToken = syncToken
     }
 }

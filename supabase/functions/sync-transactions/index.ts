@@ -19,13 +19,16 @@
 // Plaid-call volume) and THEN this function (to actually receive the result) — see that method's
 // own updated doc comment.
 //
-// WATERMARK, NOT CURSOR: `last_transactions_ack_at` tracks what has already been DELIVERED to the
-// owning iPhone client, entirely distinct from `plaid_items.cursor` (Plaid's own opaque bookmark,
-// used only by the Item-sync engine). A null watermark means "nothing yet acknowledged" — every
-// currently-mirrored row for this Item's accounts is returned, matching a fresh Item's fully
-// backfilled history. The watermark advances to the exact instant the query for this response was
-// issued (captured before any query, so nothing that arrives DURING this handler's own execution
-// can be silently skipped by a race between "read" and "mark as delivered").
+// WATERMARK, NOT CURSOR: `last_transactions_ack_at` tracks what has already been CONFIRMED SAVED
+// by the owning iPhone client, entirely distinct from `plaid_items.cursor` (Plaid's own opaque
+// bookmark, used only by the Item-sync engine). A null watermark means "nothing yet acknowledged"
+// — every currently-mirrored row for this Item's accounts is returned, matching a fresh Item's
+// fully backfilled history. This function itself only READS the watermark and returns a
+// `sync_token` (the exact instant its own query snapshot was taken, captured before any query so
+// nothing that arrives DURING this handler's own execution can be silently skipped) — it does NOT
+// advance the watermark. That happens in the separate `ack-transactions-sync` function, called by
+// the client only after it has confirmed the data in this response was actually persisted — see
+// that function's own header for why (a real data-loss bug this split was built to close).
 //
 // AUTOMATIC CACHED-BALANCE REFRESH (Phase: webhook-triggered balance refresh): the SAME watermark
 // also gates whether this response includes an `accounts` array. syncItemTransactionsForItem now
@@ -269,18 +272,16 @@ Deno.serve(async (req) => {
       category_guess: null as string | null,
     }));
 
-    // Best-effort — matches this endpoint's own pre-existing tolerance for a failed bookkeeping
-    // write (the previous implementation similarly never hard-failed the response over a failed
-    // cursor update). A failure here only means the SAME batch may be redelivered on the next
-    // pull, which the iOS client's own upsert-by-external-id import already handles idempotently —
-    // never data loss, never a duplicate.
-    const { error: watermarkUpdateError } = await supabase
-      .from("plaid_items")
-      .update({ last_transactions_ack_at: queryStartedAtIso, updated_at: queryStartedAtIso })
-      .eq("id", item.id)
-      .eq("user_id", userId);
-    console.log("[sync-transactions] watermark advanced:", !watermarkUpdateError);
-
+    // CLIENT-CONFIRMED DELIVERY WATERMARK (fixed 2026-09-16) — this function used to advance
+    // `last_transactions_ack_at` itself, right here, the instant it sent its response. That meant
+    // a batch could be marked "delivered" even if the iOS client never actually received the
+    // response or failed to persist it locally — permanently hiding real transactions from the
+    // Activity screen with no self-healing path (a real Production incident; see
+    // `ack-transactions-sync/index.ts`'s own header for the full account). This function now ONLY
+    // returns `sync_token` (`queryStartedAtIso`, below) — the watermark itself is advanced by a
+    // separate, explicit `ack-transactions-sync` call the client makes AFTER it has confirmed the
+    // data was actually saved on-device. See that function's header for why a separate call, and
+    // for the monotonic-forward guard that makes it safe to skip/retry.
     logPlaidOperation({
       operation: "sync-transactions",
       outcome: "success",
@@ -298,6 +299,10 @@ Deno.serve(async (req) => {
       next_cursor: null,
       modified_count: 0,
       removed_count: removedTransactionIds.length,
+      // See this file's own "CLIENT-CONFIRMED DELIVERY WATERMARK" comment above — the client
+      // echoes this back to `ack-transactions-sync` only once it has confirmed everything in this
+      // response was actually persisted.
+      sync_token: queryStartedAtIso,
       // Same sanitized per-account shape sync-balances/refresh-connected-account already send —
       // never access_token, never other Items' data. Money-valued fields as STRINGS (same
       // reasoning as `transactions[].amount` above).

@@ -128,6 +128,20 @@ protocol PlaidBackendService {
     /// linked institution, so there's no longer an implicit "the" connection to sync.
     func syncTransactions(connectionId: String) async throws -> PlaidSyncResult
 
+    /// Confirms to the backend that everything in a prior `syncTransactions` response — up through
+    /// that response's own `PlaidSyncResult.syncToken` — has actually been persisted on-device.
+    /// This is what advances the server's delivery watermark (`plaid_items.last_transactions_ack_at`);
+    /// `syncTransactions` itself no longer does, precisely so a batch can never be marked
+    /// "delivered" before the client has confirmed it was actually saved. See
+    /// `ack-transactions-sync/index.ts`'s own header for the real Production data-loss incident
+    /// (2026-09-16) this split fixes. Call this ONLY after `PlaidTransactionImportService.applySync`
+    /// has returned successfully (its `ModelContext.save()` succeeded) — never before, and never
+    /// speculatively. Deliberately best-effort at the call site (see
+    /// `PlaidConnectionManager.pullSyncedTransactions`): if this call itself fails, nothing is
+    /// lost — the watermark simply stays put, and the next `syncTransactions` call safely
+    /// re-delivers the same (already-idempotent-to-import) batch.
+    func acknowledgeTransactionsSync(connectionId: String, syncToken: String) async throws
+
     /// Asks the backend to force a REAL, immediate Item-level `/transactions/sync` attempt against
     /// Plaid for ONE linked institution, right now — the explicit-user-action counterpart to the
     /// webhook-driven background sync that otherwise keeps the server-side mirror current. Callers
@@ -197,6 +211,13 @@ extension PlaidBackendService {
     /// unchanged. `SupabasePlaidBackendService` overrides this with the real network call; a test
     /// double that DOES care (e.g. to assert it was called) can override it too.
     func triggerItemTransactionSync(connectionId: String) async throws {}
+
+    /// Default no-op so every existing test double that predates the client-confirmed-delivery
+    /// watermark fix (see this method's own doc comment on the protocol) keeps compiling
+    /// unchanged. `SupabasePlaidBackendService` overrides this with the real network call; a test
+    /// double that DOES care (e.g. to assert it was called, or to simulate it failing) can
+    /// override it too.
+    func acknowledgeTransactionsSync(connectionId: String, syncToken: String) async throws {}
 }
 
 enum PlaidBackendError: FriendlyError {
@@ -359,8 +380,20 @@ struct SupabasePlaidBackendService: PlaidBackendService {
             added: response.transactions.map(\.asPlaidTransactionDTO),
             modified: response.modifiedTransactions.map(\.asPlaidTransactionDTO),
             removedExternalIds: response.removedTransactionIds,
-            accountBalances: response.accounts.map { $0.asPlaidAccountBalance() }
+            accountBalances: response.accounts.map { $0.asPlaidAccountBalance() },
+            syncToken: response.syncToken
         )
+    }
+
+    func acknowledgeTransactionsSync(connectionId: String, syncToken: String) async throws {
+        struct Body: Encodable { let connection_id: String; let sync_token: String }
+        let response: AckTransactionsSyncResponse = try await post(
+            "ack-transactions-sync",
+            body: Body(connection_id: connectionId, sync_token: syncToken)
+        )
+        #if DEBUG
+        print("[PlaidBackend] transactions sync acknowledged, watermark advanced: \(response.advanced)")
+        #endif
     }
 
     func syncBalances(connectionId: String) async throws -> [PlaidAccountBalance] {
@@ -727,11 +760,18 @@ private struct SyncTransactionsResponse: Decodable {
     /// phase — reuses `BackendAccountBalanceDTO`, the exact same per-account shape `sync-balances`
     /// already decodes, so no new decoding logic exists for this data.
     let accounts: [BackendAccountBalanceDTO]
+    /// See `PlaidSyncResult.syncToken`'s own doc comment — `decodeIfPresent` so an older backend
+    /// build that predates the client-confirmed-delivery watermark fix (which omits this field)
+    /// still decodes; `PlaidConnectionManager.pullSyncedTransactions` simply skips the
+    /// acknowledgement step when it's nil, exactly as if the ack call itself had failed (safe,
+    /// self-correcting on a later pull once the backend catches up).
+    let syncToken: String?
     enum CodingKeys: String, CodingKey {
         case transactions, nextCursor = "next_cursor"
         case modifiedTransactions = "modified_transactions"
         case removedTransactionIds = "removed_transaction_ids"
         case accounts
+        case syncToken = "sync_token"
     }
 
     init(from decoder: Decoder) throws {
@@ -743,11 +783,17 @@ private struct SyncTransactionsResponse: Decodable {
         removedTransactionIds = try container.decodeIfPresent([String].self, forKey: .removedTransactionIds) ?? []
         nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
         accounts = try container.decodeIfPresent([BackendAccountBalanceDTO].self, forKey: .accounts) ?? []
+        syncToken = try container.decodeIfPresent(String.self, forKey: .syncToken)
     }
 }
 
 private struct ResetCursorResponse: Decodable {
     let reset: Bool
+}
+
+private struct AckTransactionsSyncResponse: Decodable {
+    let acknowledged: Bool
+    let advanced: Bool
 }
 
 /// The raw JSON shape `sync-transactions` returns (snake_case, matching the backend). Kept
