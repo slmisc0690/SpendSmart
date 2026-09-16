@@ -17,6 +17,19 @@ struct ImportedTransactionsReviewView: View {
     @Environment(PrivacyModeManager.self) private var privacyMode
     @Query(sort: \FinanceTransaction.date, order: .reverse) private var allTransactions: [FinanceTransaction]
 
+    /// PERFORMANCE FIX (2026-09-16) — this used to be a plain computed property, so SwiftUI ran
+    /// its full O(imported × manual) matching pass — referenced from TWO places in this view's
+    /// body (`content` and `possibleMatchesSection`) — on EVERY render, not just when the
+    /// underlying transactions actually changed. With a few hundred imported transactions across
+    /// several Connected accounts, that's tens of thousands of match-score calls per render, all
+    /// synchronous on the main thread — the multi-second freeze reported on-device opening this
+    /// screen. Computed ONCE here via `.task(id:)`, only when the transaction set actually
+    /// changes, and yielded periodically (`Task.yield()`) so the main thread stays responsive to
+    /// touch/animation input throughout instead of one long unbroken blocking stretch. Stays
+    /// `@MainActor`-only (never `Task.detached`) — SwiftData's `FinanceTransaction` model objects
+    /// are not safe to read from a background actor.
+    @State private var possibleMatches: [(imported: FinanceTransaction, best: TransactionMatcher.MatchCandidate)] = []
+
     // Deliberately NOT filtered by `isExcludedFromReports` — every Plaid-sourced transaction has
     // that flag set true by design (see PlaidTransactionImportService), so filtering on it would
     // hide everything this screen exists to show.
@@ -28,11 +41,18 @@ struct ImportedTransactionsReviewView: View {
         allTransactions.filter { $0.source == .manual }
     }
 
-    private var possibleMatches: [(imported: FinanceTransaction, best: TransactionMatcher.MatchCandidate)] {
-        importedTransactions.compactMap { imported in
-            guard let best = TransactionMatcher.findPossibleMatches(for: imported, in: manualTransactions).first else { return nil }
-            return (imported, best)
+    /// See `possibleMatches`' own header — the actual matching work, run once per transaction-set
+    /// change rather than on every render.
+    private func recomputePossibleMatches() async {
+        let imported = importedTransactions
+        let manual = manualTransactions
+        var matches: [(imported: FinanceTransaction, best: TransactionMatcher.MatchCandidate)] = []
+        for (index, transaction) in imported.enumerated() {
+            guard let best = TransactionMatcher.findPossibleMatches(for: transaction, in: manual).first else { continue }
+            matches.append((transaction, best))
+            if index % 25 == 0 { await Task.yield() }
         }
+        possibleMatches = matches
     }
 
     var body: some View {
@@ -55,6 +75,7 @@ struct ImportedTransactionsReviewView: View {
             }
             .task { logPersistedCount() }
             .onChange(of: importedTransactions.count) { _, _ in logPersistedCount() }
+            .task(id: allTransactions.count) { await recomputePossibleMatches() }
         }
         .preferredColorScheme(.dark)
     }

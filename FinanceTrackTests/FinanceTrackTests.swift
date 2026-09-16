@@ -16235,6 +16235,22 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("ConnectedTransactionRow"), "Connected rows must use the new minimal presentation")
     }
 
+    // Real on-device report, 2026-09-16: this screen locked up for a long time opening with
+    // several hundred imported transactions across multiple Connected accounts. Root cause:
+    // `possibleMatches` was a plain computed property referenced from two places in the view body,
+    // so its full O(imported x manual) matching pass ran twice, on the main thread, on every
+    // single render — not just when the transaction set actually changed.
+    func testImportedTransactionsReviewViewComputesPossibleMatchesOnceNotOnEveryRender() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/ImportedTransactionsReviewView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("@State private var possibleMatches"), "must be cached state, never a plain computed property recomputed on every render")
+        XCTAssertTrue(source.contains(".task(id: allTransactions.count)"), "must only recompute when the underlying transaction set actually changes")
+        XCTAssertTrue(source.contains("await Task.yield()"), "must yield periodically so the main thread stays responsive during the matching pass, instead of one long unbroken blocking stretch")
+    }
+
     func testDashboardMoreActionOpensActivityWithSelectedTab() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
