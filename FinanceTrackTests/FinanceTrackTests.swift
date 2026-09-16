@@ -8996,7 +8996,7 @@ final class FinanceTrackTests: XCTestCase {
         // AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — per-week Actual now routes through the
         // canonical `weeklyActualSpending` (which itself calls `weeklySpent` for the Manual half —
         // see that function's own header), never `monthlyActualSpending`/`monthlySpent`.
-        XCTAssertTrue(section.contains("BudgetCalculator.weeklyActualSpending(transactions, in: clipped, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)"))
+        XCTAssertTrue(section.contains("BudgetCalculator.weeklyActualSpending(transactions, in: clipped, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)"))
         XCTAssertFalse(section.contains("BudgetCalculator.monthlyActualSpending(transactions, in: clipped"), "per-week Actual must never use the monthly eligibility flag")
         XCTAssertFalse(section.contains("BudgetCalculator.monthlySpent(transactions, in: clipped"), "per-week Actual must never use the monthly eligibility flag")
     }
@@ -37118,7 +37118,9 @@ final class FinanceTrackTests: XCTestCase {
 
     func testTransferTypeLabels() {
         XCTAssertEqual(TransactionType.transferWithdrawal.label, "Transfer WD")
-        XCTAssertEqual(TransactionType.transferDeposit.label, "Transfer Dep")
+        // TRANSFER SIMPLIFICATION — permanently renamed per Scott's explicit request; see
+        // `testTransferDepositLabelIsPermanentlyTransferToChecking` for the dedicated test.
+        XCTAssertEqual(TransactionType.transferDeposit.label, "Transfer to Checking")
     }
 
     func testTransferTypesNeverCountAsSpendingByDefault() {
@@ -37138,14 +37140,17 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(BudgetCalculator.weeklySpent([countedOff], in: interval), 0)
     }
 
-    /// A Transfer Dep entry behaves like a refund (negative contribution, i.e. reduces spending)
-    /// when its toggle is on, symmetric with Transfer WD's expense-like behavior.
+    /// TRANSFER SIMPLIFICATION — a Transfer Dep ("Transfer to Checking") entry is now excluded
+    /// from Monthly spending UNCONDITIONALLY, regardless of the per-entry toggle — it's the sole
+    /// remaining deposit-direction transfer concept (Transfer WD removed from the picker), so it
+    /// no longer behaves like a refund reducing spending. Supersedes this test's old name/premise;
+    /// kept under the original name since other tests may still reference it by search.
     @MainActor
     func testTransferDepositRespectsPerEntryMonthlyToggleAndSubtracts() {
         let interval = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
         let countedOn = FinanceTransaction(amount: 30, date: day(2026, 8, 3), type: .transferDeposit, source: .manual, countsTowardMonthlySpending: true)
         let countedOff = FinanceTransaction(amount: 30, date: day(2026, 8, 3), type: .transferDeposit, source: .manual, countsTowardMonthlySpending: false)
-        XCTAssertEqual(BudgetCalculator.monthlySpent([countedOn], in: interval), -30)
+        XCTAssertEqual(BudgetCalculator.monthlySpent([countedOn], in: interval), 0)
         XCTAssertEqual(BudgetCalculator.monthlySpent([countedOff], in: interval), 0)
     }
 
@@ -37293,6 +37298,251 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([], in: month), 0)
     }
 
+    /// NET SAVINGS — Scott's own explicit example: deposit $1,000 into savings, then withdraw $500
+    /// from it the same month, nets to $500 "Saved," never double-counting or ignoring the
+    /// withdrawal leg.
+    func testSavedViaTransferCalculatorNetsWithdrawalFromManualSavingsAccountAgainstDeposit() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let deposit = FinanceTransaction(amount: 1000, date: day(2026, 8, 3), type: .transferToSavings, account: checking, transferCounterpartyAccount: savings)
+        let withdrawal = FinanceTransaction(amount: 500, date: day(2026, 8, 10), type: .transferWithdrawal, account: savings, transferCounterpartyAccount: checking)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([deposit, withdrawal], in: month), 500)
+    }
+
+    /// The deposit-direction counterpart: a `.transferDeposit` entered on the RECEIVING account's
+    /// own register (e.g. Checking) whose counterparty (the side money left FROM) is a Savings
+    /// account must net the same as a `.transferWithdrawal` entered on the Savings account itself —
+    /// same real-world transfer, opposite register it happened to be logged from.
+    func testSavedViaTransferCalculatorNetsTransferDepositSourcedFromSavingsAccount() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let withdrawalLoggedAsDeposit = FinanceTransaction(amount: 300, date: day(2026, 8, 12), type: .transferDeposit, account: checking, transferCounterpartyAccount: savings)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([withdrawalLoggedAsDeposit], in: month), 0)
+    }
+
+    /// A withdrawal FROM a Connected/Plaid Savings account is identified via the caller-supplied
+    /// `savingsPlaidAccountIds` (Plaid's own reported `subtype`), the same mechanism
+    /// `AddExpenseView`'s own "Transfer To Savings" destination picker already uses for a Connected
+    /// Savings destination — never a second, diverging definition.
+    func testSavedViaTransferCalculatorNetsWithdrawalFromConnectedSavingsAccount() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let deposit = FinanceTransaction(amount: 1000, date: day(2026, 8, 3), type: .transferToSavings, account: checking, transferCounterpartyAccount: savings)
+        let withdrawal = FinanceTransaction(amount: 400, date: day(2026, 8, 15), type: .transferDeposit, account: checking, transferCounterpartyPlaidAccountId: "plaid-savings-1")
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([deposit, withdrawal], in: month, savingsPlaidAccountIds: ["plaid-savings-1"]), 600)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([deposit, withdrawal], in: month, savingsPlaidAccountIds: []), 1000, "an unresolved/unknown Plaid account id must never be assumed to be Savings")
+    }
+
+    /// A transfer that has nothing to do with Savings (Checking <-> Cash, say) must never affect
+    /// "Saved" in either direction.
+    func testSavedViaTransferCalculatorIgnoresTransfersNotInvolvingASavingsAccount() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let checking = Account(name: "Checking", type: .checking)
+        let cash = Account(name: "Cash", type: .cash)
+        let withdrawal = FinanceTransaction(amount: 250, date: day(2026, 8, 4), type: .transferWithdrawal, account: checking, transferCounterpartyAccount: cash)
+        let deposit = FinanceTransaction(amount: 250, date: day(2026, 8, 4), type: .transferDeposit, account: cash, transferCounterpartyAccount: checking)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([withdrawal, deposit], in: month), 0)
+    }
+
+    /// Per Scott's explicit product decision: a month with only a withdrawal from savings (no
+    /// offsetting deposit that same month) floors "Saved" at $0 rather than showing negative.
+    func testSavedViaTransferCalculatorFloorsNetAtZeroWhenWithdrawalsExceedDeposits() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let withdrawal = FinanceTransaction(amount: 500, date: day(2026, 8, 10), type: .transferWithdrawal, account: savings, transferCounterpartyAccount: checking)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([withdrawal], in: month), 0)
+    }
+
+    /// A withdrawal from savings dated in a DIFFERENT month than a deposit must not net against
+    /// it — each month's "Saved" is computed independently, matching every other calculator's
+    /// month-boundary convention in this app.
+    func testSavedViaTransferCalculatorDoesNotNetWithdrawalAgainstAPriorMonthsDeposit() {
+        let august = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let september = DateInterval(start: day(2026, 9, 1), end: day(2026, 10, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let augustDeposit = FinanceTransaction(amount: 1000, date: day(2026, 8, 3), type: .transferToSavings, account: checking, transferCounterpartyAccount: savings)
+        let septemberWithdrawal = FinanceTransaction(amount: 500, date: day(2026, 9, 5), type: .transferWithdrawal, account: savings, transferCounterpartyAccount: checking)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([augustDeposit, septemberWithdrawal], in: august), 1000)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([augustDeposit, septemberWithdrawal], in: september), 0)
+    }
+
+    /// An excluded-from-reports withdrawal from savings must not reduce "Saved," matching the
+    /// existing exclusion behavior for the deposit side.
+    func testSavedViaTransferCalculatorExcludesWithdrawalMarkedExcludedFromReports() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let deposit = FinanceTransaction(amount: 1000, date: day(2026, 8, 3), type: .transferToSavings, account: checking, transferCounterpartyAccount: savings)
+        let excludedWithdrawal = FinanceTransaction(amount: 500, date: day(2026, 8, 10), type: .transferWithdrawal, isExcludedFromReports: true, account: savings, transferCounterpartyAccount: checking)
+        XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([deposit, excludedWithdrawal], in: month), 1000)
+    }
+
+    // MARK: - Dashboard "Saved" net-withdrawal wiring (source-scan)
+
+    /// The Dashboard's own "Saved" Quick Stat must feed `SavedViaTransferCalculator` the resolved
+    /// Connected-account Savings ids so a withdrawal FROM a Connected Savings account nets exactly
+    /// like a Manual Savings withdrawal already does — never a second, Dashboard-only definition of
+    /// "Saved."
+    func testDashboardPassesSavingsPlaidAccountIdsToSavedViaTransferCalculator() throws {
+        let source = try Self.dashboardViewSource()
+        XCTAssertTrue(source.contains("SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval, savingsPlaidAccountIds: savingsPlaidAccountIds)"))
+        XCTAssertTrue(source.contains("ConnectedAccountOptionPresenter.options(for: plaidConnection.connections)"))
+    }
+
+    // MARK: - BudgetCalculator savings-transfer structural exclusion
+
+    /// Scott's own reported symptom: Transfer To Savings correctly never counted, but the
+    /// matching Transfer Dep bringing money back OUT of Savings silently reduced Monthly Remaining
+    /// (a `.transferDeposit` behaves like a refund) because the generic "Counts Toward Monthly
+    /// Spending" toggle defaults on. A Savings-account leg must be excluded unconditionally, same
+    /// as `.transferToSavings`, regardless of that toggle.
+    func testBudgetCalculatorExcludesTransferDepositFromSavingsFromMonthlySpendingRegardlessOfToggle() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let withdrawalBackToChecking = FinanceTransaction(
+            amount: 500, date: day(2026, 8, 10), type: .transferDeposit,
+            countsTowardMonthlySpending: true,
+            account: checking, transferCounterpartyAccount: savings
+        )
+        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawalBackToChecking], in: month), 0)
+        XCTAssertFalse(BudgetCalculator.isCounted(withdrawalBackToChecking, includePending: true, context: .monthly))
+    }
+
+    /// TRANSFER SIMPLIFICATION — `.transferDeposit` ("Transfer to Checking") is now the ONLY
+    /// deposit-direction transfer concept (Transfer WD removed from the picker), so it must be
+    /// excluded from spending UNCONDITIONALLY — regardless of the per-entry toggle AND regardless
+    /// of whether either account is actually typed Savings. Scott's own reported bug: a $1,000+
+    /// Transfer to Checking between two ordinary accounts was counted as a large negative
+    /// "spending" delta, making Weekly Remaining show MORE than the limit instead of less.
+    func testBudgetCalculatorExcludesTransferDepositUnconditionallyEvenWithoutASavingsAccount() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let checking = Account(name: "Checking", type: .checking)
+        let creditCard = Account(name: "Citi Card", type: .creditCard)
+        let bigTransfer = FinanceTransaction(
+            amount: 2300, date: day(2026, 8, 10), type: .transferDeposit,
+            countsTowardMonthlySpending: true,
+            account: checking, transferCounterpartyAccount: creditCard
+        )
+        XCTAssertEqual(BudgetCalculator.monthlySpent([bigTransfer], in: month), 0)
+        XCTAssertFalse(BudgetCalculator.isCounted(bigTransfer, includePending: true, context: .monthly))
+    }
+
+    /// The mirror direction: a `.transferWithdrawal` entered directly on the Savings account's own
+    /// register must be equally excluded, regardless of the toggle.
+    func testBudgetCalculatorExcludesTransferWithdrawalFromSavingsFromWeeklySpendingRegardlessOfToggle() {
+        let week = DateInterval(start: day(2026, 8, 1), end: day(2026, 8, 8))
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let withdrawal = FinanceTransaction(
+            amount: 200, date: day(2026, 8, 3), type: .transferWithdrawal,
+            countsTowardWeeklyBudget: true,
+            account: savings, transferCounterpartyAccount: checking
+        )
+        XCTAssertEqual(BudgetCalculator.weeklySpent([withdrawal], in: week), 0)
+        XCTAssertFalse(BudgetCalculator.isCounted(withdrawal, includePending: true, context: .weekly))
+    }
+
+    /// A `.transferDeposit` with a Connected/Plaid counterparty is excluded the same way,
+    /// regardless of whether that account's id resolves into `savingsPlaidAccountIds` — unlike
+    /// the legacy `.transferWithdrawal` path, `.transferDeposit`'s exclusion no longer depends on
+    /// savings-account detection at all (see `testBudgetCalculatorExcludesTransferDepositUnconditionallyEvenWithoutASavingsAccount`).
+    func testBudgetCalculatorExcludesTransferDepositFromConnectedSavingsWhenIdResolved() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let checking = Account(name: "Checking", type: .checking)
+        let withdrawal = FinanceTransaction(
+            amount: 300, date: day(2026, 8, 12), type: .transferDeposit,
+            countsTowardMonthlySpending: true,
+            account: checking, transferCounterpartyPlaidAccountId: "plaid-savings-1"
+        )
+        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawal], in: month, savingsPlaidAccountIds: ["plaid-savings-1"]), 0)
+        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawal], in: month, savingsPlaidAccountIds: []), 0)
+    }
+
+    /// A plain transfer with no Savings account on either leg (Checking to Cash) must keep
+    /// respecting the per-entry toggle exactly as before — this fix must never become a blanket
+    /// "no transfer ever counts" rule.
+    func testBudgetCalculatorStillRespectsToggleForNonSavingsTransfer() {
+        let month = DateInterval(start: day(2026, 8, 1), end: day(2026, 9, 1))
+        let checking = Account(name: "Checking", type: .checking)
+        let cash = Account(name: "Cash", type: .cash)
+        let withdrawal = FinanceTransaction(
+            amount: 100, date: day(2026, 8, 4), type: .transferWithdrawal,
+            countsTowardMonthlySpending: true,
+            account: checking, transferCounterpartyAccount: cash
+        )
+        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawal], in: month), 100)
+        let withdrawalToggleOff = FinanceTransaction(
+            amount: 100, date: day(2026, 8, 4), type: .transferWithdrawal,
+            countsTowardMonthlySpending: false,
+            account: checking, transferCounterpartyAccount: cash
+        )
+        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawalToggleOff], in: month), 0)
+    }
+
+    /// The Dashboard must actually pass its resolved Connected-Savings ids into both the Quick
+    /// Stats spending properties and the shared Monthly Plan summary, for full parity with the
+    /// "Saved" fix.
+    func testDashboardPassesSavingsPlaidAccountIdsToSpendingCalculators() throws {
+        let source = try Self.dashboardViewSource()
+        XCTAssertTrue(source.contains("BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)"))
+        XCTAssertTrue(source.contains("BudgetCalculator.monthlyActualSpending(transactions, in: monthInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)"))
+        XCTAssertTrue(source.contains("savingsPlaidAccountIds: savingsPlaidAccountIds"))
+    }
+
+    // MARK: - Transfer type simplification (Transfer WD removed, Transfer Dep renamed)
+
+    /// `.transferDeposit`'s display label is now permanently "Transfer to Checking" — a flat
+    /// rename, never conditional on which accounts are actually involved (Scott's own explicit
+    /// correction after an earlier, over-engineered savings-only version).
+    func testTransferDepositLabelIsPermanentlyTransferToChecking() {
+        XCTAssertEqual(TransactionType.transferDeposit.label, "Transfer to Checking")
+    }
+
+    /// Every other type's label is unchanged by this rename — in particular
+    /// `.transferWithdrawal` keeps its own existing label (it's removed from the picker, not
+    /// relabeled — see the picker test below) and `.transferToSavings` is untouched.
+    func testOtherTransactionTypeLabelsUnchangedByTransferDepositRename() {
+        XCTAssertEqual(TransactionType.transferWithdrawal.label, "Transfer WD")
+        XCTAssertEqual(TransactionType.transferToSavings.label, "Transfer To Savings")
+        XCTAssertEqual(TransactionType.expense.label, "Expense")
+        XCTAssertEqual(TransactionType.refund.label, "Refund")
+        XCTAssertEqual(TransactionType.income.label, "Deposit")
+    }
+
+    /// "Transfer WD" must no longer be offered as a choice in a Manual Account entry's Type
+    /// picker — Scott's explicit request, since it fully overlapped "Transfer to Savings"/
+    /// "Transfer to Checking" for every real use he had.
+    func testAddExpenseViewNoLongerOffersTransferWithdrawalInPicker() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let range = source.range(of: "var types: [TransactionType] = [") else {
+            return XCTFail("the availableTypes array literal was not found")
+        }
+        let literalLine = String(source[range.lowerBound...].prefix(through: source[range.lowerBound...].firstIndex(of: "\n") ?? source.endIndex))
+        XCTAssertFalse(literalLine.contains(".transferWithdrawal"), "Transfer WD must not be an offered choice")
+        XCTAssertTrue(literalLine.contains(".transferDeposit"), "Transfer Dep (now labeled Transfer to Checking) must still be offered")
+    }
+
+    /// `.transferWithdrawal` is NOT removed from `TransactionType` itself — any transaction
+    /// already saved with it (before this change) must keep decoding, displaying, and
+    /// calculating exactly as before; only the picker choice was removed, never the type.
+    func testTransferWithdrawalTypeStillDecodesAndCalculatesForHistoricalData() {
+        XCTAssertEqual(TransactionType(rawValue: "transferWithdrawal"), .transferWithdrawal)
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let historicalWithdrawal = FinanceTransaction(amount: 100, type: .transferWithdrawal, account: savings, transferCounterpartyAccount: checking)
+        let month = DateInterval(start: historicalWithdrawal.date, end: historicalWithdrawal.date.addingTimeInterval(1))
+        // Still correctly excluded from Monthly spending per the savings-transfer structural
+        // exclusion fix (BudgetCalculator) — that fix keys off the type/account, not the label,
+        // so removing the picker choice must never regress it.
+        XCTAssertEqual(BudgetCalculator.monthlySpent([historicalWithdrawal], in: month), 0)
+    }
+
     // MARK: - AddExpenseView Transfer To Savings wiring (source-scan)
 
     func testAddExpenseViewOffersTransferToSavingsOnlyWhenSavingsAccountExists() throws {
@@ -37301,7 +37551,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var availableTypes: [TransactionType]") else {
             XCTFail("availableTypes not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(400))
+        let section = String(source[range.lowerBound...].prefix(800))
         XCTAssertTrue(section.contains("if hasSavingsAccount { types.append(.transferToSavings) }"))
     }
 
@@ -37357,7 +37607,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var optionsControls") else {
             XCTFail("optionsControls not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(1100))
+        let section = String(source[range.lowerBound...].prefix(1400))
         XCTAssertTrue(section.contains("if type != .income && type != .transferToSavings"))
     }
 
@@ -37509,13 +37759,17 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(scoped.contains("DatePicker(\"Date\""), "Date must share the same row/card as Type")
     }
 
+    /// TRANSFER SIMPLIFICATION — Transfer WD was removed from the picker per Scott's explicit
+    /// request (see `testAddExpenseViewNoLongerOffersTransferWithdrawalInPicker`); only Transfer
+    /// Dep ("Transfer to Checking") remains offered, still Manual-Account-flow only.
     func testAddExpenseViewOffersTransferTypesInManualAccountFlowOnly() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
         guard let range = source.range(of: "private var availableTypes") else {
             XCTFail("availableTypes not found"); return
         }
-        let scoped = String(source[range.lowerBound...].prefix(400))
-        XCTAssertTrue(scoped.contains(".transferWithdrawal, .transferDeposit"), "Transfer WD/Dep must be offered as Type choices in the Manual Account flow")
+        let scoped = String(source[range.lowerBound...].prefix(800))
+        XCTAssertTrue(scoped.contains(".transferDeposit"), "Transfer Dep (Transfer to Checking) must be offered as a Type choice in the Manual Account flow")
+        XCTAssertTrue(scoped.contains("guard isManualAccountEntry else { return [.expense, .refund, .income] }"), "transfer types must stay Manual-Account-flow only")
     }
 
     func testAddExpenseViewShowsFromToDropdownsForTransferTypes() throws {
@@ -41123,7 +41377,7 @@ final class FinanceTrackTests: XCTestCase {
     func testDashboardChecksForDueScheduledTransfersOnLaunchAndForeground() throws {
         let source = try Self.dashboardViewSource()
         XCTAssertTrue(source.contains("postDueScheduledTransfersIfNeeded()"))
-        XCTAssertTrue(source.contains("ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext)"))
+        XCTAssertTrue(source.contains("ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext, savingsPlaidAccountIds: savingsPlaidAccountIds)"))
     }
 
     // MARK: - ScheduledTransfer Connected/Plaid account support

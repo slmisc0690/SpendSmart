@@ -193,11 +193,11 @@ struct DashboardView: View {
     }
 
     private var spentThisWeek: Decimal {
-        BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+        BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     private var spentThisMonth: Decimal {
-        BudgetCalculator.monthlyActualSpending(transactions, in: monthInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+        BudgetCalculator.monthlyActualSpending(transactions, in: monthInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// URGENT REGRESSION FIX — computed live via the same shared `effectivePlannedWeeklySpending`
@@ -229,11 +229,23 @@ struct DashboardView: View {
         SavingsCalculator.totalSavingsToDate(savingsEntries)
     }
 
-    /// SAVED-TRACKING — the "Saved" Quick Stat's own value: the current month's total of
-    /// `.transferToSavings` Manual Account entries, entirely independent of `savedThisMonth` above
-    /// (which totals manually-logged `SavingsEntry` rows instead).
+    /// SAVED-TRACKING — the "Saved" Quick Stat's own value: the current month's NET total of
+    /// transfers into vs. out of Savings (see `SavedViaTransferCalculator`'s own header), entirely
+    /// independent of `savedThisMonth` above (which totals manually-logged `SavingsEntry` rows
+    /// instead). `savingsPlaidAccountIds` resolves which Connected accounts count as "Savings" the
+    /// exact same way `AddExpenseView`'s own "Transfer To Savings" destination picker does — via
+    /// Plaid's own reported `subtype`, read from this view's already-cached `plaidConnection`
+    /// (never a new fetch/backend call).
+    private var savingsPlaidAccountIds: Set<String> {
+        Set(
+            ConnectedAccountOptionPresenter.options(for: plaidConnection.connections)
+                .filter { $0.subtype?.lowercased() == "savings" }
+                .map(\.id)
+        )
+    }
+
     private var savedViaTransferThisMonth: Decimal {
-        SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval)
+        SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// QUICK STATS CUSTOMIZATION — the single source of truth for which Quick Stats show, read
@@ -312,7 +324,7 @@ struct DashboardView: View {
     /// local-only (a plain SwiftData write, no network) — never `async`, unlike the Plaid call
     /// beside it.
     private func postDueScheduledTransfersIfNeeded() {
-        ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext)
+        ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// ACCOUNT REGISTER AUTO DEPOSIT — every eligible Connected deposit still awaiting a decision.
@@ -406,7 +418,8 @@ struct DashboardView: View {
             includePending: includePending,
             warningThreshold: settings?.warningThreshold ?? 0.70,
             autoTrackedAccountIds: autoTrackedAccountIds,
-            excludedTransactionIDs: excludedTransactionIDs
+            excludedTransactionIDs: excludedTransactionIDs,
+            savingsPlaidAccountIds: savingsPlaidAccountIds
         )
     }
 
@@ -476,7 +489,8 @@ struct DashboardView: View {
             includePending: includePending,
             warningThreshold: settings?.warningThreshold ?? 0.70,
             autoTrackedAccountIds: autoTrackedAccountIds,
-            excludedTransactionIDs: excludedTransactionIDs
+            excludedTransactionIDs: excludedTransactionIDs,
+            savingsPlaidAccountIds: savingsPlaidAccountIds
         )
     }
 

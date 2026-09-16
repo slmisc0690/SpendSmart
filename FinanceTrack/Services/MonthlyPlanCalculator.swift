@@ -307,7 +307,8 @@ enum MonthlyPlanCalculator {
         includePending: Bool,
         warningThreshold: Double,
         autoTrackedAccountIds: Set<String> = [],
-        excludedTransactionIDs: Set<UUID> = []
+        excludedTransactionIDs: Set<UUID> = [],
+        savingsPlaidAccountIds: Set<String> = []
     ) -> Summary {
         let income = estimatedMonthlyIncome(incomeSources, in: month)
         let fixedExpenses = estimatedMonthlyFixedExpenses(recurringExpenses, in: month)
@@ -340,8 +341,8 @@ enum MonthlyPlanCalculator {
         // is left defined and untouched for any existing direct caller, just no longer used here.
         let recommendedWeekly = effectivePlannedWeeklySpending(override: planSettings?.plannedWeeklySpendingOverride, flexibleSpendingAvailable: flexible)
 
-        let spentThisMonth = BudgetCalculator.monthlyActualSpending(transactions, in: month, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
-        let spentThisWeek = BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+        let spentThisMonth = BudgetCalculator.monthlyActualSpending(transactions, in: month, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
+        let spentThisWeek = BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
 
         let projectedSavings = projectedMonthlySavings(income: income, fixedExpenses: fixedExpenses, actualSpentThisMonth: spentThisMonth)
         let status = monthlyPlanStatus(projectedSavings: projectedSavings, savingsGoal: savingsGoal)
@@ -354,7 +355,7 @@ enum MonthlyPlanCalculator {
                 // `countsTowardMonthlySpending`, a different flag) plus Auto-Tracked Spending for
                 // this same `autoTrackedAccountIds` selection — so Monthly Plan, Dashboard, and
                 // Weekly Budget can never disagree about what counts as this week's spending.
-                spent = BudgetCalculator.weeklyActualSpending(transactions, in: clipped, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+                spent = BudgetCalculator.weeklyActualSpending(transactions, in: clipped, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
             } else {
                 spent = 0
             }
