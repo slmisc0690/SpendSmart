@@ -113,6 +113,17 @@ struct AccountSettingsView: View {
                 biometricAuth.isFaceIDRequired = settings.requireFaceID
                 accountRegisterAutoDepositEnabled = settings.accountRegisterAutoDepositEnabled ?? false
                 accountRegisterAutoDepositAccountIds = settings.accountRegisterAutoDepositAccountIds ?? []
+                // DATE FLOOR SELF-HEAL (incident fix, 2026-09-17) — an install that turned the
+                // toggle on before `accountRegisterAutoDepositEnabledAt` existed has it `nil`,
+                // which `AccountRegisterAutoDepositService.pendingDeposits` treats as "nothing
+                // eligible yet" (the safe direction, never "no floor" — see that field's own
+                // header for the incident this closes). Stamping it here converges to a real
+                // timestamp on the very next time this screen loads, without ever reopening the
+                // old unbounded-history bug in the meantime.
+                if accountRegisterAutoDepositEnabled, settings.accountRegisterAutoDepositEnabledAt == nil {
+                    settings.accountRegisterAutoDepositEnabledAt = .now
+                    settings.updatedAt = .now
+                }
             }
             .sheet(isPresented: $isPresentingAccountRelatedOptions) {
                 AccountRelatedOptionsView()
@@ -434,6 +445,16 @@ struct AccountSettingsView: View {
                             set: { newValue in
                                 accountRegisterAutoDepositEnabled = newValue
                                 settings.accountRegisterAutoDepositEnabled = newValue
+                                // DATE FLOOR (incident fix, 2026-09-17) — re-stamped every
+                                // off→on transition, INCLUDING the very first one, so a later
+                                // re-enable never resurrects an old backlog either. See
+                                // `BudgetSettings.accountRegisterAutoDepositEnabledAt`'s own
+                                // header for the real $50,000 incident this closes. Deliberately
+                                // NOT cleared on turning the toggle off — only a genuine off→on
+                                // transition should ever move this forward.
+                                if newValue {
+                                    settings.accountRegisterAutoDepositEnabledAt = .now
+                                }
                                 settings.updatedAt = .now
                             }
                         )

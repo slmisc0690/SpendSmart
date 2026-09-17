@@ -39,10 +39,16 @@ enum AccountRegisterAutoDepositService {
     /// into a posted row before it settles (see `PlaidTransactionImportService`'s own
     /// pending-to-posted re-keying), so a deposit is only ever offered for review once it's posted,
     /// avoiding ever having to reconcile an already-confirmed entry after the fact.
-    static func isEligibleDeposit(_ transaction: FinanceTransaction, connections: [PlaidConnection]) -> Bool {
+    /// `enabledAt` is the DATE FLOOR — see `BudgetSettings.accountRegisterAutoDepositEnabledAt`'s
+    /// own header for the real incident that made this mandatory: without it, this check matched
+    /// every eligible deposit ever, going back through an account's FULL history. `nil` means "the
+    /// feature hasn't actually been turned on with a recorded start time yet" and is treated as
+    /// "nothing is eligible" — the safe direction — never as "no floor."
+    static func isEligibleDeposit(_ transaction: FinanceTransaction, connections: [PlaidConnection], enabledAt: Date?) -> Bool {
         guard transaction.source == .plaid, transaction.type == .creditCardPayment, !transaction.isPending else {
             return false
         }
+        guard let enabledAt, transaction.date >= enabledAt else { return false }
         guard let accountId = transaction.plaidAccountId else { return false }
         for connection in connections {
             if let cached = connection.cachedBalances?[accountId] {
@@ -66,8 +72,9 @@ enum AccountRegisterAutoDepositService {
         guard !(settings.accountRegisterAutoDepositAccountIds ?? []).isEmpty else { return [] }
         let alreadyImported = RegisterImportService.alreadyImportedSourceIds(in: allTransactions)
         let alreadyReviewed = Set(settings.accountRegisterAutoDepositReviewedTransactionIds ?? [])
+        let enabledAt = settings.accountRegisterAutoDepositEnabledAt
         return allTransactions.filter {
-            isEligibleDeposit($0, connections: connections)
+            isEligibleDeposit($0, connections: connections, enabledAt: enabledAt)
                 && !alreadyImported.contains($0.id)
                 && !alreadyReviewed.contains($0.id)
         }

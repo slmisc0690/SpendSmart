@@ -40038,20 +40038,20 @@ final class FinanceTrackTests: XCTestCase {
         let connections = [makeDepositoryConnection()]
 
         let deposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: account)
-        XCTAssertTrue(AccountRegisterAutoDepositService.isEligibleDeposit(deposit, connections: connections), "a posted, depository-account credit is a real deposit")
+        XCTAssertTrue(AccountRegisterAutoDepositService.isEligibleDeposit(deposit, connections: connections, enabledAt: .distantPast), "a posted, depository-account credit is a real deposit")
 
         let pending = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: true, plaidAccountId: "plaid-checking-1", account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(pending, connections: connections), "a still-pending transaction must never auto-deposit")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(pending, connections: connections, enabledAt: .distantPast), "a still-pending transaction must never auto-deposit")
 
         let expense = FinanceTransaction(amount: 50, date: .now, type: .expense, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(expense, connections: connections), "an ordinary expense is never a deposit")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(expense, connections: connections, enabledAt: .distantPast), "an ordinary expense is never a deposit")
 
         let creditCardConnections = [makeDepositoryConnection(accountId: "plaid-credit-1", type: "credit")]
         let cardPayment = FinanceTransaction(amount: 200, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-credit-1", account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(cardPayment, connections: creditCardConnections), "a genuine credit card payment (credit-type account) must never be treated as a deposit")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(cardPayment, connections: creditCardConnections, enabledAt: .distantPast), "a genuine credit card payment (credit-type account) must never be treated as a deposit")
 
         let manualEntry = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .manual, isPending: false, account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(manualEntry, connections: connections), "only Connected (Plaid) transactions are ever eligible")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(manualEntry, connections: connections, enabledAt: .distantPast), "only Connected (Plaid) transactions are ever eligible")
     }
 
     /// The master toggle being off must leave every account and transaction completely untouched
@@ -40092,7 +40092,7 @@ final class FinanceTrackTests: XCTestCase {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
         context.insert(checking)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         context.insert(settings)
         let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, note: "", isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)
@@ -40127,7 +40127,7 @@ final class FinanceTrackTests: XCTestCase {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
         context.insert(checking)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         context.insert(settings)
         let sourceDeposit = FinanceTransaction(amount: 100, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)
@@ -40149,13 +40149,79 @@ final class FinanceTrackTests: XCTestCase {
     @MainActor
     func testPendingDepositsExcludesAlreadyManuallyImportedDeposit() throws {
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         let alreadyImported = FinanceTransaction(amount: 500, date: .now, type: .income, source: .manual, account: checking, importedFromTransactionId: sourceDeposit.id)
 
         let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [sourceDeposit, alreadyImported], connections: [makeDepositoryConnection()], settings: settings)
 
         XCTAssertTrue(pending.isEmpty, "a transaction already imported by the manual flow must never be offered for review")
+    }
+
+    // MARK: - DATE FLOOR (real incident, 2026-09-17)
+    //
+    // With no date floor at all, pendingDeposits matched every eligible deposit ever, going back
+    // through an account's FULL history. Combined with a one-time full Plaid resync, this
+    // surfaced months of old paychecks (back to June) as "pending review" all at once, and
+    // all-defaulted-to-checked in the review screen meant a single "Done" tap added $50,000 that
+    // was never intended. `accountRegisterAutoDepositEnabledAt` closes this: only a deposit dated
+    // on or after the feature's own recorded start time is ever eligible.
+
+    /// The exact incident scenario: a real paycheck from before Auto Deposit was ever turned on
+    /// must never be offered, no matter how it later gets (re)synced into local storage.
+    @MainActor
+    func testPendingDepositsExcludesADepositDatedBeforeAutoDepositWasEnabled() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let enabledAt = day(2026, 9, 15)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: enabledAt)
+        let juneDeposit = FinanceTransaction(amount: 2500, date: day(2026, 6, 15), type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [juneDeposit], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertTrue(pending.isEmpty, "a deposit dated before the feature was turned on must never be offered, regardless of when it happens to sync locally")
+    }
+
+    /// The boundary and the normal case: a deposit dated exactly at (or after) the enabled
+    /// instant is still offered — the floor excludes the past, never the present.
+    @MainActor
+    func testPendingDepositsIncludesADepositDatedOnOrAfterAutoDepositWasEnabled() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let enabledAt = day(2026, 9, 15)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: enabledAt)
+        let onBoundary = FinanceTransaction(amount: 500, date: enabledAt, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+        let afterward = FinanceTransaction(amount: 700, date: day(2026, 9, 16), type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [onBoundary, afterward], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertEqual(Set(pending.map(\.id)), [onBoundary.id, afterward.id], "a deposit dated on or after the feature was turned on must still be offered normally")
+    }
+
+    /// An install that enabled the feature before this field existed (`accountRegisterAutoDepositEnabledAt`
+    /// nil) must never fall back to "no floor" — the exact bug that caused the incident. Nil means
+    /// "nothing is eligible yet" until `AccountSettingsView`'s self-heal stamps a real value.
+    @MainActor
+    func testPendingDepositsIsEmptyWhenEnabledAtIsNilEvenThoughToggleIsOn() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let todayDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [todayDeposit], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertTrue(pending.isEmpty, "a missing enabled-at timestamp must never be treated as 'no floor' — that was the incident")
+    }
+
+    /// The other half of the incident: the review screen itself must never default a deposit to
+    /// checked — a deliberate per-item opt-IN, never opt-out, plus a visible running total so
+    /// tapping "Done" is never ambiguous about what it's about to add.
+    func testAccountRegisterDepositReviewViewDefaultsToNothingSelectedWithVisibleTotal() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Dashboard/AccountRegisterDepositReviewView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("_includedIds = State(initialValue: [])"), "must start with nothing selected — a deliberate opt-in, never opt-out")
+        XCTAssertFalse(source.contains("_includedIds = State(initialValue: Set(deposits.map"), "must never default every deposit to checked again")
+        XCTAssertTrue(source.contains("includedTotal"), "must show a running total so 'Done' is never ambiguous about what it adds")
     }
 
     /// Selecting more than one destination register broadcasts the SAME confirmed deposit into
@@ -40168,7 +40234,7 @@ final class FinanceTrackTests: XCTestCase {
         let cash = Account(name: "Cash", type: .checking)
         context.insert(checking)
         context.insert(cash)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id, cash.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id, cash.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         context.insert(settings)
         let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)

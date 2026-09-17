@@ -119,6 +119,24 @@ final class BudgetSettings {
     /// a `BudgetSettings` record before this field existed. Every read site treats `nil` as "nothing
     /// reviewed yet" via `?? []`.
     var accountRegisterAutoDepositReviewedTransactionIds: [UUID]?
+    /// ACCOUNT REGISTER AUTO DEPOSIT — DATE FLOOR (added 2026-09-17, closing a real incident: with
+    /// no date floor at all, `AccountRegisterAutoDepositService.pendingDeposits` matched every
+    /// eligible deposit ever, going back through an account's FULL history — combined with a
+    /// one-time full Plaid resync, this surfaced months of old paychecks (back to June) as
+    /// "pending review" all at once, and all-defaulted-to-checked meant a single "Done" tap added
+    /// $50,000 Scott never intended). Stamped to "now" the moment the master toggle is switched
+    /// ON (see `AccountSettingsView`'s toggle binding) — `pendingDeposits` only ever offers a
+    /// transaction dated ON OR AFTER this instant, never anything from before the feature was
+    /// actually turned on. Re-stamped every time the toggle goes off→on again, so a later
+    /// re-enable never resurrects an old backlog either.
+    ///
+    /// Optional or not, this ALWAYS gates `pendingDeposits` — a `nil` value (an install that
+    /// enabled the feature before this field existed) is treated as "nothing eligible yet" rather
+    /// than "no floor," the safe direction after this incident. `AccountSettingsView.onAppear`
+    /// self-heals a `nil` value to `.now` the first time it's seen if the toggle is already on, so
+    /// this converges to a real timestamp on next launch without ever silently reopening the old
+    /// unbounded-history bug.
+    var accountRegisterAutoDepositEnabledAt: Date?
     /// Whether Spend Sense (local, deterministic financial observations) is enabled. Defaults to
     /// on — Spend Sense never networks or reads/writes Supabase; this only ever governs whether
     /// its local, on-device output is shown.
@@ -163,6 +181,7 @@ final class BudgetSettings {
         accountRegisterAutoDepositEnabled: Bool = false,
         accountRegisterAutoDepositAccountIds: [UUID] = [],
         accountRegisterAutoDepositReviewedTransactionIds: [UUID] = [],
+        accountRegisterAutoDepositEnabledAt: Date? = nil,
         spendSenseEnabled: Bool = true,
         showMonthlySpendingQuickStat: Bool = true,
         showSavedThisMonthQuickStat: Bool = true,
@@ -184,6 +203,7 @@ final class BudgetSettings {
         self.accountRegisterAutoDepositEnabled = accountRegisterAutoDepositEnabled
         self.accountRegisterAutoDepositAccountIds = accountRegisterAutoDepositAccountIds
         self.accountRegisterAutoDepositReviewedTransactionIds = accountRegisterAutoDepositReviewedTransactionIds
+        self.accountRegisterAutoDepositEnabledAt = accountRegisterAutoDepositEnabledAt
         self.spendSenseEnabled = spendSenseEnabled
         self.showMonthlySpendingQuickStat = showMonthlySpendingQuickStat
         self.showSavedThisMonthQuickStat = showSavedThisMonthQuickStat
