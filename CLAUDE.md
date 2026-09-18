@@ -100,10 +100,9 @@ of which are unfinished code:
   **separate, explicitly-requested task** with its own backup-verification and read-only
   post-deploy checks. Never deploy a migration/function to Production in the same turn it was
   written, unless the user's own instructions explicitly say so for that turn.
-- **Backup before editing source**, per the global standing rule — for this repo that means a full
-  working-tree copy (rsync) to `../FinanceTracker Backups/<label>-<timestamp>/`, **excluding**
-  `.git`, `build/` (Xcode's local index cache — huge file count, not real source, rsync will stall
-  copying it), and `*.xcuserstate`. Verify with `diff -rq` (same excludes) before editing.
+- **Backups:** see ~/.claude/CLAUDE.md — git snapshot under `refs/snapshots/`, never a folder
+  copy. This project previously took a full working-tree rsync copy to
+  `../FinanceTracker Backups/<label>-<timestamp>/` before every edit; that convention is retired.
 - **Full Swift build + full test suite, zero new warnings**, before any "done" report. Report the
   *actual* test total from that run, never assume a remembered number. As of **2026-08-21** the
   suite is at **2779 tests** (it was 2719 on 2026-08-15 and 1020 on 2026-07-21 — treat any
