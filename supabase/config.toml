@@ -564,3 +564,14 @@ verify_jwt = false
 # SAVED VIA TRANSFER SHARING — see upsert-saved-via-transfer-summary/index.ts's own header for scope.
 [functions.upsert-saved-via-transfer-summary]
 verify_jwt = false
+
+# MONITOR-USAGE — deliberately the ONE function in this project with verify_jwt = true (the
+# default), unlike every function above. Those all set it false because the gateway's JWT check
+# only understands the legacy JWT-format anon/service_role keys, and this project's own user-facing
+# functions authenticate via requireAuthenticatedUserId instead (see plaid.ts's own note on this).
+# monitor-usage has no per-user session at all — its caller is an external monitor dashboard
+# presenting a plain Supabase API key as `Authorization: Bearer <key>`, which is exactly what
+# gateway-level verify_jwt is for. See monitor-usage/index.ts's own header for its second,
+# independent auth layer (a dedicated X-Monitor-Token secret, checked in code).
+[functions.monitor-usage]
+verify_jwt = true

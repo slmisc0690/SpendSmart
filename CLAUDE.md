@@ -410,6 +410,33 @@ Not yet built (explicitly out of scope until requested):
   authenticated with real `42501` errors, the cron job shows `active: true` in `cron.job`, and an
   actual unattended run was observed in `cron.job_run_details` (not just registration) mutating a
   deliberately-planted evidence row before that row was removed again.
+- **`monitor-usage`** — SpendSmart's read-only aggregate for an external multi-app cost-monitor
+  dashboard (alongside Scan2Cal, LifeVaultPlus, StreamDrop), built against a shared JSON contract
+  none of this project's own code owns. That contract's `ServiceUsage`/`UsageStats` shape is built
+  for call/token-based billing (`calls`, `inputTokens`, etc.) and has no dedicated "billable unit
+  count" field — but Plaid bills per Item per month, not per call, so this endpoint deliberately
+  overloads two fields rather than inventing new ones the shared Swift client wouldn't decode:
+  **`month.calls` means "live Plaid Item count," and `byCategory[].calls` means "row count in that
+  category"** (currently one row: stuck orphans over 24h from `plaid_item_removal_failures`) —
+  neither is ever a request count for this service. The `label` ("Plaid Items"), `billing`
+  (`"per_item_monthly"`), and `category` ("Stuck orphans (over 24h)") strings carry the real
+  meaning the field names cannot; `today` is always `null` (no daily-activity concept exists for a
+  static Item roster) while `month` is always present since the monthly-billing concept always
+  applies, only its `calls` value goes `null` on a read failure. If a future version of the shared
+  contract adds a proper billable-unit-count field, migrate off this overload rather than layering
+  a second one on top of it.
+  Per-Item `created_at`/age and Plaid product enablement are deliberately NOT reported here — the
+  contract has no per-entity list shape, and forcing them into an unrelated field (`lastRequestAt`
+  for "oldest Item created_at", say) would render one concept as another, which is exactly what
+  this contract's null-vs-zero discipline exists to prevent. Per-Item age belongs on SpendSmart's
+  own Connected Accounts screen instead, not a cost dashboard — not built as part of this endpoint.
+  Auth is two independent layers: gateway-level `verify_jwt = true` (the one function in this
+  project set that way — see `supabase/config.toml`'s own note on why every other function sets it
+  `false`) plus a dedicated `MONITOR_USAGE_TOKEN` secret checked via `X-Monitor-Token` with a
+  SHA-256-digest constant-time comparison, fail-closed if unset. Empirically confirmed on Preview:
+  both the legacy JWT-format anon key and the newer `sb_publishable_...` key pass the gateway check
+  and correctly reach this function's own token check — the `sb_publishable_` gateway-incompatibility
+  noted elsewhere in this file for `requireAuthenticatedUserId`-based functions does not apply here.
 
 ## Testing conventions
 
