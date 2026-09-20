@@ -406,10 +406,17 @@ Not yet built (explicitly out of scope until requested):
   never had a window where it could fire against a target that wasn't there yet. The auth secret is
   a value dedicated to this one function, never the platform's own service-role/secret key (which is
   write-only once set and could not have been independently placed into Vault or tested end-to-end).
-  Verified live on both Preview and Production: RLS + explicit revoke/grant block anon and
-  authenticated with real `42501` errors, the cron job shows `active: true` in `cron.job`, and an
-  actual unattended run was observed in `cron.job_run_details` (not just registration) mutating a
-  deliberately-planted evidence row before that row was removed again.
+  Verified on Preview: RLS + explicit revoke/grant block anon and authenticated with real `42501`
+  errors, the cron job shows `active: true` in `cron.job`, and an unattended run was observed in
+  `cron.job_run_details` mutating a deliberately-planted evidence row before that row was removed.
+  **On Production only RLS/grants and the cron registration were verified at deploy time — an
+  unattended end-to-end run was never observed there, and the retry was in fact non-functional from
+  its 2026-09-06 deploy until 2026-09-20:** the function was found deployed with `verify_jwt = true`
+  (no `config.toml` entry existed to say otherwise), so the gateway rejected every pg_cron call —
+  whose bearer is the dedicated secret, not a Supabase JWT — with 401
+  `UNAUTHORIZED_INVALID_JWT_FORMAT` before the function's code ran. Fixed 2026-09-20 (see Session
+  Log). **`cron.job_run_details` showing `succeeded` only means the HTTP request was enqueued by
+  `net.http_post` — the real result is the status code in `net._http_response`; check that.**
 - **`monitor-usage`** — SpendSmart's read-only aggregate for an external multi-app cost-monitor
   dashboard (alongside Scan2Cal, LifeVaultPlus, StreamDrop), built against a shared JSON contract
   none of this project's own code owns. That contract's `ServiceUsage`/`UsageStats` shape is built
@@ -459,6 +466,26 @@ Not yet built (explicitly out of scope until requested):
   manifest cannot be accessed" error (hit and fixed during Phase 8F, 2026-07-21).
 
 ## Session Log
+
+### 2026-09-20 — retry-plaid-item-removals found non-functional on Production; fixed
+- **Finding:** the live function (v2, deployed 2026-09-06) had `verify_jwt = true`. The pg_cron/pg_net
+  caller (migration 0030) presents a dedicated bearer secret, not a Supabase-signed JWT, so the
+  gateway rejected it before the function ran. All 6 retained `net._http_response` rows (hourly,
+  09:00–14:00 UTC that day) were 401 `UNAUTHORIZED_INVALID_JWT_FORMAT`. pg_net keeps only a few
+  hours of responses, so earlier attempts could not be inspected; the retry is presumed to have been
+  non-functional for the whole of v2's life, i.e. from deploy until this fix.
+- **Why it went unnoticed:** `cron.job_run_details` reported every run as `succeeded` (it only records
+  that `net.http_post` enqueued the request), and `plaid_item_removal_failures` was empty, so nothing
+  ever needed retrying. No item was stranded, but the safety net would not have caught one.
+- **Fix:** `config.toml` entry `[functions.retry-plaid-item-removals] verify_jwt = false` (commit
+  `6b0a4c1`), then a redeploy of that one function (v3). Function source, database, cron schedule,
+  Vault secrets and the function secret were not touched; the other 33 functions were confirmed
+  unchanged (`verify_jwt`, version, updated_at).
+- **Verified:** live `verify_jwt` is now `false`; one manual `trigger_retry_plaid_item_removals()`
+  produced a 200 with `{"revoked":0,"still_failing":0,"skipped":0}` — which also proves the Vault key
+  matches `RETRY_PLAID_ITEM_REMOVALS_SECRET`. `plaid_item_removal_failures` still 0 rows. The first
+  natural scheduled tick after the fix had not yet been observed when this was written.
+- **Lesson:** to verify a pg_cron→pg_net job, read `net._http_response`, never `cron.job_run_details`.
 
 ### 2026-09-06 — Plaid Item leak closure + first background scheduler, deployed to Production
 - Root cause: `delete-account` had two paths (environment mismatch; swallowed `/item/remove`
