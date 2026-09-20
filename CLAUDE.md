@@ -382,6 +382,34 @@ Not yet built (explicitly out of scope until requested):
   values both on `onAppear` and whenever either edit sheet's `isPresented` flips back to `false`,
   since `SettingsView` stays mounted underneath its own sheets and nothing else would trigger a
   refresh.
+- **Plaid Item leak closure + this project's first background scheduler** (migrations 0029/0030,
+  2026-09-06): `delete-account` had two paths that deleted a `plaid_items` row without confirming
+  Plaid was ever told to revoke it (an Item's `environment` not matching the server's active
+  `PLAID_ENV`, and a swallowed `/item/remove` failure) — a real Item left in that state keeps
+  billing forever with zero trace anywhere in this system. `plaid_item_removal_failures`
+  (migration 0029) is a self-emptying queue (steady-state size should be zero) that the orphan-insert
+  in `delete-account` writes to as a **hard precondition**: if that insert itself fails, the entire
+  deletion aborts rather than let an un-revoked Item disappear untracked.
+  `retry-plaid-item-removals` is the sole consumer — retries `/item/remove` hourly for 24h then
+  daily indefinitely (`isRetryDue`), deletes the row on success, treats Plaid's `ITEM_NOT_FOUND` as
+  success too (covers a crash between Plaid's own successful revoke and this table's row-delete, so
+  a row is never stuck retrying forever against an Item already gone).
+  **Migration 0030 introduces this project's FIRST background job scheduler** (`pg_cron` + `pg_net`)
+  — deliberately avoided until now (see migration 0028's own header). It fires
+  `retry-plaid-item-removals-hourly` (`0 * * * *`) via `public.trigger_retry_plaid_item_removals()`,
+  which reads its target URL and auth key from Supabase Vault (`retry_plaid_item_removals_url` /
+  `retry_plaid_item_removals_auth_key`) — **the schedule does nothing until both Vault secrets and
+  the matching `RETRY_PLAID_ITEM_REMOVALS_SECRET` Edge Function secret exist in that environment**;
+  with either missing it logs a warning and no-ops rather than failing loudly or calling out with a
+  garbage Authorization header. This is why the Production deployment order mattered: secret + Vault
+  entries first, then both Edge Functions, then migration 0029, then 0030 last — so the schedule
+  never had a window where it could fire against a target that wasn't there yet. The auth secret is
+  a value dedicated to this one function, never the platform's own service-role/secret key (which is
+  write-only once set and could not have been independently placed into Vault or tested end-to-end).
+  Verified live on both Preview and Production: RLS + explicit revoke/grant block anon and
+  authenticated with real `42501` errors, the cron job shows `active: true` in `cron.job`, and an
+  actual unattended run was observed in `cron.job_run_details` (not just registration) mutating a
+  deliberately-planted evidence row before that row was removed again.
 
 ## Testing conventions
 
@@ -404,6 +432,31 @@ Not yet built (explicitly out of scope until requested):
   manifest cannot be accessed" error (hit and fixed during Phase 8F, 2026-07-21).
 
 ## Session Log
+
+### 2026-09-06 — Plaid Item leak closure + first background scheduler, deployed to Production
+- Root cause: `delete-account` had two paths (environment mismatch; swallowed `/item/remove`
+  failure) that deleted a `plaid_items` row without confirming Plaid ever revoked it — a still-
+  billing Item could become permanently untracked. Closed via migration 0029
+  (`plaid_item_removal_failures`, a self-emptying orphan queue, RLS + explicit revoke/grant) and a
+  `delete-account` rewrite making the orphan-insert a hard precondition (its own failure aborts the
+  whole deletion, never a best-effort step). See the new Architecture landmark above for the full
+  design and the reasoning behind the Production deployment order.
+- Built `retry-plaid-item-removals` (migration 0030's `pg_cron`/`pg_net` schedule, this project's
+  first background scheduler) as the sole consumer, and a dedicated `RETRY_PLAID_ITEM_REMOVALS_SECRET`
+  rather than reusing the platform's own service-role key.
+- Verified in stages on Preview first (all three `delete-account` outcomes proven individually with
+  throwaway test data; a real Plaid Sandbox Item used to prove the success path still causes Plaid
+  itself, not just this database, to report the Item gone; an autonomous cron tick observed via
+  `cron.job_run_details` mutating a deliberately-planted evidence row, not just registered).
+- Deployed to Production in the order the cron dependency required: `RETRY_PLAID_ITEM_REMOVALS_SECRET`
+  + its two Vault entries set first (fresh value, distinct from Preview's) → both Edge Functions
+  deployed → migration 0029 then 0030 applied (0030 creates the schedule, so it had to be last).
+  Verified live on Production: RLS/grant genuinely blocks anon (`401`/`42501`) and authenticated
+  (`403`/`42501` — tested via one throwaway auth user created and deleted directly through the Admin
+  API, never through `delete-account`, and never involving any of the 4 real Production Items); the
+  cron job is registered and `active`; `plaid_item_removal_failures` is empty (0 rows);
+  `plaid_items` unchanged at 4 rows. **`delete-account` itself was never invoked against Production
+  during this work**, per explicit instruction.
 
 ### 2026-08-18/21 — Week-by-Week parity, user_profiles backfill, onboarding flow, Face ID grace
 ### period, Dashboard/Settings UX polish (large multi-topic session)

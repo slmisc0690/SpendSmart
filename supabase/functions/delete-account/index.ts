@@ -40,38 +40,65 @@ Deno.serve(async (req) => {
   }
 
   try {
-    // Revoke every Plaid connection this user has before deleting the rows — best-effort per
-    // item, so one already-invalid token never blocks the rest of account deletion.
+    // Revoke every Plaid connection this user has before deleting the rows — a revoke failure
+    // never blocks the REST of account deletion (one broken bank connection must never trap a
+    // user who wants to leave), but ITEM-LEAK CLOSURE requires that a row is never deleted below
+    // without EITHER a confirmed successful /item/remove here, OR a durable orphan record in
+    // plaid_item_removal_failures (see that migration's own header). The orphan-insert is a HARD
+    // PRECONDITION for an un-revoked item, never best-effort — see the throw inside the loop.
     const { data: items, error: fetchError } = await supabase
       .from("plaid_items")
-      .select("access_token, environment")
+      .select("item_id, access_token, environment")
       .eq("user_id", userId);
     if (fetchError) throw fetchError;
 
     let revokedCount = 0;
-    let skippedCount = 0;
+    let orphanedCount = 0;
 
     // Read once — an Item created under a different Plaid environment than the one this server is
     // currently active under must never have its access_token sent to the CURRENT host (see
-    // assertItemEnvironmentMatches's doc comment). Account deletion itself must still proceed
-    // regardless — a mismatched item is skipped here (not revoked at Plaid) exactly like an
-    // already-failed revoke is: best-effort, logged, non-fatal to the rest of this function.
+    // assertItemEnvironmentMatches's doc comment).
     const { environment: activeEnvironment } = loadPlaidCredentials();
 
     for (const item of items ?? []) {
+      let revoked = false;
+      let reason: "environment_mismatch" | "revoke_failed" | null = null;
+
       if (item.environment !== activeEnvironment) {
         logSafeError(
-          "delete-account: skipped revoking a Plaid item created under a different environment",
+          "delete-account: cannot revoke a Plaid item created under a different environment",
           new SafeError(`item environment="${item.environment ?? "unknown"}" active="${activeEnvironment}"`),
         );
-        skippedCount += 1;
-        continue;
+        reason = "environment_mismatch";
+      } else {
+        try {
+          await plaidFetch("/item/remove", { access_token: item.access_token });
+          revoked = true;
+          revokedCount += 1;
+        } catch (revokeError) {
+          logSafeError("delete-account: failed to revoke a Plaid item", revokeError);
+          reason = "revoke_failed";
+        }
       }
-      try {
-        await plaidFetch("/item/remove", { access_token: item.access_token });
-        revokedCount += 1;
-      } catch (revokeError) {
-        logSafeError("delete-account: failed to revoke a Plaid item", revokeError);
+
+      if (!revoked) {
+        // OUTCOME 2/3 — this item was neither revoked nor is it about to be. Record it BEFORE
+        // this loop is allowed to continue toward deleting plaid_items below; if this insert
+        // itself fails, abort the ENTIRE request (outcome 3) rather than let the row disappear
+        // with zero record anywhere of an Item that may still be billing.
+        const { error: orphanInsertError } = await supabase.from("plaid_item_removal_failures").insert({
+          item_id: item.item_id,
+          access_token: item.access_token,
+          environment: item.environment,
+          reason,
+        });
+        if (orphanInsertError) {
+          logSafeError("delete-account: failed to record an un-revoked Plaid item; aborting deletion", orphanInsertError);
+          throw new SafeError(
+            "Could not confirm your connected accounts were safely disconnected. Nothing was deleted — please try again.",
+          );
+        }
+        orphanedCount += 1;
       }
     }
 
@@ -92,13 +119,16 @@ Deno.serve(async (req) => {
       environment: activeEnvironment,
       accountCount: (items ?? []).length,
     });
-    console.log("[delete-account] plaid items revoked:", revokedCount, "skipped (environment mismatch):", skippedCount);
+    console.log("[delete-account] plaid items revoked:", revokedCount, "orphaned (recorded, not revoked):", orphanedCount);
 
     return jsonResponse({ deleted: true });
   } catch (error) {
     logSafeError("delete-account failed", error);
     if (error instanceof UnauthorizedError) {
       return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    if (error instanceof SafeError) {
+      return jsonResponse({ error: error.message }, 500);
     }
     return jsonResponse({ error: "Failed to delete account" }, 500);
   }
