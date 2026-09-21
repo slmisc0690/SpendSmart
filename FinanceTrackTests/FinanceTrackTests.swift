@@ -50,8 +50,8 @@ final class FinanceTrackTests: XCTestCase {
         let interval = DateRangeHelper.currentWeekRange()
         let checking = Account(name: "Checking", type: .checking)
         let card = Account(name: "Card", type: .creditCard)
-        let expense = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Groceries", account: checking)
-        let payment = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(7200), type: .creditCardPayment, note: "Card Payment", account: checking, transferDestinationAccount: card)
+        let expense = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Groceries")
+        let payment = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(7200), type: .creditCardPayment, note: "Card Payment", transferDestinationAccount: card)
 
         let spent = BudgetCalculator.weeklySpent([expense, payment], in: interval)
 
@@ -82,8 +82,8 @@ final class FinanceTrackTests: XCTestCase {
     func testRefundsReduceWeeklySpending() {
         let interval = DateRangeHelper.currentWeekRange()
         let checking = Account(name: "Checking", type: .checking)
-        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Shoes", account: checking)
-        let refund = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Shoes refund", account: checking)
+        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Shoes")
+        let refund = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Shoes refund")
 
         let spent = BudgetCalculator.weeklySpent([expense, refund], in: interval)
 
@@ -93,7 +93,7 @@ final class FinanceTrackTests: XCTestCase {
     func testPendingTransactionsExcludedWhenSettingDisabled() {
         let interval = DateRangeHelper.currentWeekRange()
         let checking = Account(name: "Checking", type: .checking)
-        let pendingExpense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Coffee", isPending: true, account: checking)
+        let pendingExpense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Coffee", isPending: true)
 
         let spentIncludingPending = BudgetCalculator.weeklySpent([pendingExpense], in: interval, includePending: true)
         let spentExcludingPending = BudgetCalculator.weeklySpent([pendingExpense], in: interval, includePending: false)
@@ -108,8 +108,8 @@ final class FinanceTrackTests: XCTestCase {
         let interval = DateRangeHelper.currentMonthRange()
         let checking = Account(name: "Checking", type: .checking)
         let card = Account(name: "Card", type: .creditCard)
-        let expense = FinanceTransaction(amount: 75, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Dinner", account: checking)
-        let payment = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(7200), type: .creditCardPayment, note: "Card Payment", account: checking, transferDestinationAccount: card)
+        let expense = FinanceTransaction(amount: 75, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Dinner")
+        let payment = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(7200), type: .creditCardPayment, note: "Card Payment", transferDestinationAccount: card)
 
         let spent = BudgetCalculator.monthlySpent([expense, payment], in: interval)
 
@@ -1049,8 +1049,8 @@ final class FinanceTrackTests: XCTestCase {
         let checking = Account(name: "Checking", type: .checking)
         let card = Account(name: "Card", type: .creditCard)
         let groceries = Category(name: "Groceries")
-        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Trader Joe's", account: checking, category: groceries)
-        let payment = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(7200), type: .creditCardPayment, note: "Payment", account: checking, category: groceries, transferDestinationAccount: card)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Trader Joe's", category: groceries)
+        let payment = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(7200), type: .creditCardPayment, note: "Payment", category: groceries, transferDestinationAccount: card)
 
         let totals = BudgetCalculator.categoryTotals([expense, payment], in: interval, context: .weekly)
 
@@ -1085,8 +1085,8 @@ final class FinanceTrackTests: XCTestCase {
         let interval = DateRangeHelper.currentWeekRange()
         let checking = Account(name: "Checking", type: .checking)
         let shopping = Category(name: "Shopping")
-        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Shoes", account: checking, category: shopping)
-        let refund = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Shoes refund", account: checking, category: shopping)
+        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Shoes", category: shopping)
+        let refund = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Shoes refund", category: shopping)
 
         let totals = BudgetCalculator.categoryTotals([expense, refund], in: interval, context: .weekly)
 
@@ -1097,7 +1097,7 @@ final class FinanceTrackTests: XCTestCase {
         let interval = DateRangeHelper.currentWeekRange()
         let checking = Account(name: "Checking", type: .checking)
         let dining = Category(name: "Dining")
-        let pendingExpense = FinanceTransaction(amount: 25, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Coffee", isPending: true, account: checking, category: dining)
+        let pendingExpense = FinanceTransaction(amount: 25, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Coffee", isPending: true, category: dining)
 
         let totalsIncluding = BudgetCalculator.categoryTotals([pendingExpense], in: interval, includePending: true, context: .weekly)
         let totalsExcluding = BudgetCalculator.categoryTotals([pendingExpense], in: interval, includePending: false, context: .weekly)
@@ -1150,8 +1150,8 @@ final class FinanceTrackTests: XCTestCase {
     func testMonthlySpendingSubtractsRefunds() {
         let interval = DateRangeHelper.currentMonthRange()
         let checking = Account(name: "Checking", type: .checking)
-        let expense = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Flight", account: checking)
-        let refund = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Flight refund", account: checking)
+        let expense = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Flight")
+        let refund = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Flight refund")
 
         let spent = BudgetCalculator.monthlySpent([expense, refund], in: interval)
 
@@ -1161,7 +1161,7 @@ final class FinanceTrackTests: XCTestCase {
     func testPendingTransactionsExcludedFromMonthlySpendingWhenSettingDisabled() {
         let interval = DateRangeHelper.currentMonthRange()
         let checking = Account(name: "Checking", type: .checking)
-        let pendingExpense = FinanceTransaction(amount: 60, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Pending charge", isPending: true, account: checking)
+        let pendingExpense = FinanceTransaction(amount: 60, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Pending charge", isPending: true)
 
         let spentIncluding = BudgetCalculator.monthlySpent([pendingExpense], in: interval, includePending: true)
         let spentExcluding = BudgetCalculator.monthlySpent([pendingExpense], in: interval, includePending: false)
@@ -1173,9 +1173,9 @@ final class FinanceTrackTests: XCTestCase {
     func testTransactionsOutsideSelectedMonthAreExcluded() {
         let interval = DateRangeHelper.currentMonthRange()
         let checking = Account(name: "Checking", type: .checking)
-        let beforeMonth = FinanceTransaction(amount: 500, date: interval.start.addingTimeInterval(-3600), type: .expense, note: "Last month", account: checking)
-        let afterMonth = FinanceTransaction(amount: 500, date: interval.end.addingTimeInterval(3600), type: .expense, note: "Next month", account: checking)
-        let insideMonth = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, note: "This month", account: checking)
+        let beforeMonth = FinanceTransaction(amount: 500, date: interval.start.addingTimeInterval(-3600), type: .expense, note: "Last month")
+        let afterMonth = FinanceTransaction(amount: 500, date: interval.end.addingTimeInterval(3600), type: .expense, note: "Next month")
+        let insideMonth = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, note: "This month")
 
         let spent = BudgetCalculator.monthlySpent([beforeMonth, afterMonth, insideMonth], in: interval)
 
@@ -1188,8 +1188,8 @@ final class FinanceTrackTests: XCTestCase {
         let interval = DateRangeHelper.currentMonthRange()
         let checking = Account(name: "Checking", type: .checking)
         let travel = Category(name: "Travel")
-        let expense = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Flight", account: checking, category: travel)
-        let refund = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Flight refund", account: checking, category: travel)
+        let expense = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Flight", category: travel)
+        let refund = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Flight refund", category: travel)
 
         let totals = BudgetCalculator.categoryTotals([expense, refund], in: interval, context: .monthly)
 
@@ -1199,12 +1199,14 @@ final class FinanceTrackTests: XCTestCase {
     func testMonthlyAccountTotalsSubtractRefunds() {
         let interval = DateRangeHelper.currentMonthRange()
         let checking = Account(name: "Checking", type: .checking)
-        let expense = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Flight", account: checking)
-        let refund = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Flight refund", account: checking)
+        let expense = FinanceTransaction(amount: 200, date: interval.start.addingTimeInterval(3600), type: .expense, note: "Flight")
+        let refund = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(7200), type: .refund, note: "Flight refund")
 
         let totals = BudgetCalculator.accountTotals([expense, refund], in: interval, context: .monthly)
 
-        XCTAssertEqual(totals.first?.total, 150)
+        // SPENDING SPEC — register entries never count, so per-register totals are always empty.
+        XCTAssertEqual(BudgetCalculator.monthlySpent([expense, refund], in: interval), 150)
+        XCTAssertTrue(totals.isEmpty)
     }
 
     // MARK: - Monthly goal
@@ -1234,8 +1236,8 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(clipped?.start, monthInterval.start)
 
         let checking = Account(name: "Checking", type: .checking)
-        let beforeMonth = FinanceTransaction(amount: 100, date: weekBeforeMonthStart.addingTimeInterval(3600), type: .expense, note: "Before month", account: checking)
-        let insideMonth = FinanceTransaction(amount: 40, date: monthInterval.start.addingTimeInterval(3600), type: .expense, note: "Inside month", account: checking)
+        let beforeMonth = FinanceTransaction(amount: 100, date: weekBeforeMonthStart.addingTimeInterval(3600), type: .expense, note: "Before month")
+        let insideMonth = FinanceTransaction(amount: 40, date: monthInterval.start.addingTimeInterval(3600), type: .expense, note: "Inside month")
 
         let spentInClippedWeek = BudgetCalculator.monthlySpent([beforeMonth, insideMonth], in: clipped!)
 
@@ -10884,7 +10886,7 @@ final class FinanceTrackTests: XCTestCase {
         let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
         let gas = Category(name: "Gas", isDefault: true)
         let interval = DateRangeHelper.currentMonthRange()
-        let fillUp = FinanceTransaction(amount: 45, date: interval.start.addingTimeInterval(3600), type: .expense, account: checking, category: gas)
+        let fillUp = FinanceTransaction(amount: 45, date: interval.start.addingTimeInterval(3600), type: .expense, category: gas)
 
         let context = makeInsightsContext(transactions: [fillUp])
         let answer = SpendSmartQueryEngine.answer(for: .categorySpendingAmount("Gas"), context: context)
@@ -10896,7 +10898,7 @@ final class FinanceTrackTests: XCTestCase {
         let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
         let week = DateRangeHelper.currentWeekRange()
         let groceries = Category(name: "Groceries", isDefault: true)
-        let transaction = FinanceTransaction(amount: 60, date: week.start.addingTimeInterval(3600), type: .expense, account: checking, category: groceries)
+        let transaction = FinanceTransaction(amount: 60, date: week.start.addingTimeInterval(3600), type: .expense, category: groceries)
 
         let context = makeInsightsContext(transactions: [transaction])
         let answer = SpendSmartQueryEngine.answer(for: .thisWeekSpending, context: context)
@@ -10910,7 +10912,7 @@ final class FinanceTrackTests: XCTestCase {
         let checking = Account(name: "Checking", type: .checking, currentBalance: 1000)
         let month = DateRangeHelper.currentMonthRange()
         let dining = Category(name: "Food", isDefault: true)
-        let transaction = FinanceTransaction(amount: 25, date: month.start.addingTimeInterval(3600), type: .expense, account: checking, category: dining)
+        let transaction = FinanceTransaction(amount: 25, date: month.start.addingTimeInterval(3600), type: .expense, category: dining)
 
         let context = makeInsightsContext(transactions: [transaction])
         let answer = SpendSmartQueryEngine.answer(for: .thisMonthSpending, context: context)
@@ -11062,7 +11064,7 @@ final class FinanceTrackTests: XCTestCase {
         let account = Account(name: "Checking", type: .checking, currentBalance: 5000)
         let now = day(2026, 8, 15)
         let week = DateRangeHelper.weekRangeContaining(now, weekStartsOnSunday: true)
-        let transaction = FinanceTransaction(amount: 500, date: now, type: .expense, source: .manual, note: "Groceries", account: account)
+        let transaction = FinanceTransaction(amount: 500, date: now, type: .expense, source: .manual, note: "Groceries")
 
         let expectedSpent = BudgetCalculator.weeklyActualSpending([transaction], in: week, includePending: true)
         let expectedRemaining = BudgetCalculator.remaining(limit: 450, spent: expectedSpent)
@@ -11140,7 +11142,7 @@ final class FinanceTrackTests: XCTestCase {
         let groceries = Category(name: "Groceries")
         let now = day(2026, 8, 15)
         let month = DateRangeHelper.monthRangeContaining(now)
-        let transaction = FinanceTransaction(amount: 120, date: now, type: .expense, source: .manual, note: "Whole Foods", account: account, category: groceries)
+        let transaction = FinanceTransaction(amount: 120, date: now, type: .expense, source: .manual, note: "Whole Foods", category: groceries)
 
         let expected = BudgetCalculator.categoryTotals([transaction], in: month, includePending: true, context: .monthly)
         let toolContext = makeAskSpendSmartContext(transactions: [transaction], accounts: [account], now: now)
@@ -12120,8 +12122,8 @@ final class FinanceTrackTests: XCTestCase {
     private func makeAllDomainsFixtureContext(now: Date) -> AskSpendSmartToolContext {
         let checking = Account(name: "Checking", type: .checking, currentBalance: 500)
         let dining = Category(name: "Dining")
-        let coffee = FinanceTransaction(amount: 34.75, date: day(2026, 8, 23), type: .expense, source: .manual, note: "Coffee Shop", account: checking)
-        let dinner = FinanceTransaction(amount: 40, date: day(2026, 8, 10), type: .expense, source: .manual, note: "Dinner", account: checking, category: dining)
+        let coffee = FinanceTransaction(amount: 34.75, date: day(2026, 8, 23), type: .expense, source: .manual, note: "Coffee Shop")
+        let dinner = FinanceTransaction(amount: 40, date: day(2026, 8, 10), type: .expense, source: .manual, note: "Dinner", category: dining)
         let income = [IncomeSource(name: "Paycheck", amount: 5000, frequency: .monthly, timing: .beginningMonth)]
         let bills = [RecurringExpense(name: "Rent", amount: 1500, frequency: .monthly, timing: .beginningMonth)]
         let planSettings = MonthlyPlanSettings(monthlySavingsGoal: 500)
@@ -12166,7 +12168,7 @@ final class FinanceTrackTests: XCTestCase {
     func testEndToEndWeekly() async throws {
         let now = day(2026, 8, 15)
         let account = Account(name: "Checking", type: .checking)
-        let coffee = FinanceTransaction(amount: 315.42, date: now, type: .expense, source: .manual, account: account)
+        let coffee = FinanceTransaction(amount: 315.42, date: now, type: .expense, source: .manual)
         let budgetSettings = BudgetSettings(weeklySpendingLimit: 500)
         let context = makeAskSpendSmartContext(transactions: [coffee], accounts: [account], budgetSettings: budgetSettings, now: now)
         let plan = SpendAIQueryPlan(domain: .weekly, operation: .status)
@@ -12467,7 +12469,7 @@ final class FinanceTrackTests: XCTestCase {
         // pure-math helpers in isolation.
         let account = Account(name: "Checking", type: .checking)
         let now = Calendar.current.date(from: DateComponents(year: 2026, month: 8, day: 28)) ?? .now
-        let expense = FinanceTransaction(amount: 720.76, date: now, type: .expense, source: .manual, account: account)
+        let expense = FinanceTransaction(amount: 720.76, date: now, type: .expense, source: .manual)
         let budgetSettings = BudgetSettings(weeklySpendingLimit: 500)
         let context = AskSpendSmartToolContext(
             transactions: [expense], accounts: [account], plaidConnections: [],
@@ -16838,7 +16840,7 @@ final class FinanceTrackTests: XCTestCase {
     func testIncludedExpenseAffectsMonthlyTotal() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account)
+        let expense = FinanceTransaction(amount: 50, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true)
 
         let total = BudgetCalculator.monthlySpent([expense], in: interval)
         XCTAssertEqual(total, 50)
@@ -16856,7 +16858,7 @@ final class FinanceTrackTests: XCTestCase {
     func testExpenseCanCountWeeklyButNotMonthly() {
         let interval = DateRangeHelper.currentWeekRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: false, account: account)
+        let expense = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: false)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([expense], in: interval), 30)
         XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: DateRangeHelper.currentMonthRange()), 0)
@@ -16876,7 +16878,7 @@ final class FinanceTrackTests: XCTestCase {
         let weekInterval = DateRangeHelper.weekRangeContaining(now)
         let monthInterval = DateRangeHelper.monthRangeContaining(now)
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 30, date: now, type: .expense, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true, account: account)
+        let expense = FinanceTransaction(amount: 30, date: now, type: .expense, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([expense], in: weekInterval), 0)
         XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: monthInterval), 30)
@@ -16889,7 +16891,7 @@ final class FinanceTrackTests: XCTestCase {
         let weekInterval = DateRangeHelper.weekRangeContaining(now)
         let monthInterval = DateRangeHelper.monthRangeContaining(now)
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 30, date: now, type: .expense, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: true, account: account)
+        let expense = FinanceTransaction(amount: 30, date: now, type: .expense, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: true)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([expense], in: weekInterval), 30)
         XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: monthInterval), 30)
@@ -16907,7 +16909,7 @@ final class FinanceTrackTests: XCTestCase {
     func testDeletingIncludedExpenseReducesMonthlyTotalWhenSimulatedByRemoval() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true)
 
         XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: interval), 40)
         // Simulates deletion: the transaction is simply no longer in the collection passed in —
@@ -16944,7 +16946,7 @@ final class FinanceTrackTests: XCTestCase {
     func testMonthlyIncludedRefundReducesMonthlySpending() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let refund = FinanceTransaction(amount: 25, date: interval.start.addingTimeInterval(3600), type: .refund, countsTowardMonthlySpending: true, account: account)
+        let refund = FinanceTransaction(amount: 25, date: interval.start.addingTimeInterval(3600), type: .refund, countsTowardMonthlySpending: true)
 
         XCTAssertEqual(BudgetCalculator.monthlySpent([refund], in: interval), -25)
     }
@@ -16960,7 +16962,7 @@ final class FinanceTrackTests: XCTestCase {
     func testWeeklyIncludedRefundReducesWeeklySpending() {
         let interval = DateRangeHelper.currentWeekRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let refund = FinanceTransaction(amount: 15, date: interval.start.addingTimeInterval(3600), type: .refund, countsTowardWeeklyBudget: true, account: account)
+        let refund = FinanceTransaction(amount: 15, date: interval.start.addingTimeInterval(3600), type: .refund, countsTowardWeeklyBudget: true)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([refund], in: interval), -15)
     }
@@ -16980,7 +16982,7 @@ final class FinanceTrackTests: XCTestCase {
         let weekInterval = DateRangeHelper.weekRangeContaining(now)
         let monthInterval = DateRangeHelper.monthRangeContaining(now)
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let refund = FinanceTransaction(amount: 40, date: now, type: .refund, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true, account: account)
+        let refund = FinanceTransaction(amount: 40, date: now, type: .refund, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([refund], in: weekInterval), 0)
         XCTAssertEqual(BudgetCalculator.monthlySpent([refund], in: monthInterval), -40)
@@ -16990,7 +16992,7 @@ final class FinanceTrackTests: XCTestCase {
         let weekInterval = DateRangeHelper.currentWeekRange()
         let monthInterval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let refund = FinanceTransaction(amount: 40, date: weekInterval.start.addingTimeInterval(3600), type: .refund, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: false, account: account)
+        let refund = FinanceTransaction(amount: 40, date: weekInterval.start.addingTimeInterval(3600), type: .refund, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: false)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([refund], in: weekInterval), -40)
         XCTAssertEqual(BudgetCalculator.monthlySpent([refund], in: monthInterval), 0)
@@ -17037,35 +17039,35 @@ final class FinanceTrackTests: XCTestCase {
     func testMonthlyAccountTotalsMatchMonthlyTotalBehaviorForRefunds() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account)
-        let includedRefund = FinanceTransaction(amount: 20, date: interval.start.addingTimeInterval(7200), type: .refund, countsTowardMonthlySpending: true, account: account)
-        let excludedRefund = FinanceTransaction(amount: 999, date: interval.start.addingTimeInterval(10800), type: .refund, countsTowardMonthlySpending: false, account: account)
+        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true)
+        let includedRefund = FinanceTransaction(amount: 20, date: interval.start.addingTimeInterval(7200), type: .refund, countsTowardMonthlySpending: true)
+        let excludedRefund = FinanceTransaction(amount: 999, date: interval.start.addingTimeInterval(10800), type: .refund, countsTowardMonthlySpending: false)
 
         let monthlyTotal = BudgetCalculator.monthlySpent([expense, includedRefund, excludedRefund], in: interval)
-        let accountTotal = BudgetCalculator.accountTotals([expense, includedRefund, excludedRefund], in: interval, context: .monthly).first?.total
+        let accountTotals = BudgetCalculator.accountTotals([expense, includedRefund, excludedRefund], in: interval, context: .monthly)
 
         XCTAssertEqual(monthlyTotal, 80)
-        XCTAssertEqual(accountTotal, monthlyTotal, "The account breakdown must agree exactly with the monthly ring total")
+        XCTAssertTrue(accountTotals.isEmpty, "Register entries never count, so there are no per-register totals")
     }
 
     func testWeeklyAccountTotalsMatchWeeklyTotalBehaviorForRefunds() {
         let interval = DateRangeHelper.currentWeekRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardWeeklyBudget: true, account: account)
-        let includedRefund = FinanceTransaction(amount: 20, date: interval.start.addingTimeInterval(7200), type: .refund, countsTowardWeeklyBudget: true, account: account)
-        let excludedRefund = FinanceTransaction(amount: 999, date: interval.start.addingTimeInterval(10800), type: .refund, countsTowardWeeklyBudget: false, account: account)
+        let expense = FinanceTransaction(amount: 100, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardWeeklyBudget: true)
+        let includedRefund = FinanceTransaction(amount: 20, date: interval.start.addingTimeInterval(7200), type: .refund, countsTowardWeeklyBudget: true)
+        let excludedRefund = FinanceTransaction(amount: 999, date: interval.start.addingTimeInterval(10800), type: .refund, countsTowardWeeklyBudget: false)
 
         let weeklyTotal = BudgetCalculator.weeklySpent([expense, includedRefund, excludedRefund], in: interval)
-        let accountTotal = BudgetCalculator.accountTotals([expense, includedRefund, excludedRefund], in: interval, context: .weekly).first?.total
+        let accountTotals = BudgetCalculator.accountTotals([expense, includedRefund, excludedRefund], in: interval, context: .weekly)
 
         XCTAssertEqual(weeklyTotal, 80)
-        XCTAssertEqual(accountTotal, weeklyTotal, "The account breakdown must agree exactly with the weekly ring total")
+        XCTAssertTrue(accountTotals.isEmpty, "Register entries never count, so there are no per-register totals")
     }
 
     func testIsCountedReturnsCorrectAnswerForEachContextForRefunds() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let monthOnlyRefund = FinanceTransaction(amount: 10, date: interval.start.addingTimeInterval(3600), type: .refund, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true, account: account)
+        let monthOnlyRefund = FinanceTransaction(amount: 10, date: interval.start.addingTimeInterval(3600), type: .refund, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: true)
 
         XCTAssertTrue(BudgetCalculator.isCounted(monthOnlyRefund, includePending: true, context: .monthly))
         XCTAssertFalse(BudgetCalculator.isCounted(monthOnlyRefund, includePending: true, context: .weekly))
@@ -17308,7 +17310,7 @@ final class FinanceTrackTests: XCTestCase {
     func testIncludedUncategorizedExpenseAffectsMonthlyTotal() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
-        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account, category: nil)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, category: nil)
 
         XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: interval), 40)
     }
@@ -17325,8 +17327,8 @@ final class FinanceTrackTests: XCTestCase {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
         let groceries = Category(name: "Groceries")
-        let categorized = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account, category: groceries)
-        let uncategorized = FinanceTransaction(amount: 20, date: interval.start.addingTimeInterval(7200), type: .expense, countsTowardMonthlySpending: true, account: account, category: nil)
+        let categorized = FinanceTransaction(amount: 30, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, category: groceries)
+        let uncategorized = FinanceTransaction(amount: 20, date: interval.start.addingTimeInterval(7200), type: .expense, countsTowardMonthlySpending: true, category: nil)
 
         let totals = BudgetCalculator.categoryTotals([categorized, uncategorized], in: interval, context: .monthly)
         let monthlyTotal = BudgetCalculator.monthlySpent([categorized, uncategorized], in: interval)
@@ -17341,7 +17343,7 @@ final class FinanceTrackTests: XCTestCase {
     func testSpendSmartQueryEngineHandlesUncategorizedTransactionsSafely() {
         let account = Account(name: "Checking", type: .checking, currentBalance: 0)
         let month = DateRangeHelper.currentMonthRange()
-        let uncategorized = FinanceTransaction(amount: 15, date: month.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account, category: nil)
+        let uncategorized = FinanceTransaction(amount: 15, date: month.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, category: nil)
 
         let amount = SpendSmartQueryEngine.transactionCategoryAmount(categoryName: "Uncategorized", transactions: [uncategorized], in: month, includePending: true)
         XCTAssertEqual(amount, 15, "A nil-category transaction must be findable under the Uncategorized label without crashing")
@@ -17359,7 +17361,7 @@ final class FinanceTrackTests: XCTestCase {
 
         // Mirrors AddExpenseView.init(preselectedAccount:) seeding from the account's own default.
         let monthlyFlagFromForm = account.defaultCountsTowardMonthlySpending
-        let expense = FinanceTransaction(amount: 2, date: .now, type: .expense, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: monthlyFlagFromForm, account: account)
+        let expense = FinanceTransaction(amount: 2, date: .now, type: .expense, countsTowardWeeklyBudget: true, countsTowardMonthlySpending: monthlyFlagFromForm)
         context.insert(expense)
         try! context.save()
 
@@ -21500,26 +21502,24 @@ final class FinanceTrackTests: XCTestCase {
     func testHidingFromRecentActivityDoesNotAlterWeeklySpendingEligibility() {
         let interval = DateRangeHelper.currentWeekRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
-        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, account: account)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense)
         XCTAssertEqual(BudgetCalculator.weeklySpent([expense], in: interval), 40)
     }
 
     func testHidingFromRecentActivityDoesNotAlterMonthlySpendingEligibility() {
         let interval = DateRangeHelper.currentMonthRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
-        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense, account: account)
+        let expense = FinanceTransaction(amount: 40, date: interval.start.addingTimeInterval(3600), type: .expense)
         XCTAssertEqual(BudgetCalculator.monthlySpent([expense], in: interval), 40)
     }
 
     @MainActor
     func testHidingFromRecentActivityDoesNotAlterBudgetSpendSenseSignals() {
         let settings = makeBudgetSettings(weeklyLimit: 100)
-        let hiddenAccount = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
         let expense = FinanceTransaction(
             amount: 90,
             date: DateRangeHelper.weekRangeContaining(FinanceTrackTests.budgetSignalFixedNow, weekStartsOnSunday: true).start.addingTimeInterval(3600 * 12),
-            type: .expense,
-            account: hiddenAccount
+            type: .expense
         )
         let context = makeBudgetSignalContext(transactions: [expense], budgetSettings: settings)
         let signals = BudgetSignalEngine().generateSignals(context: context)
@@ -21543,8 +21543,8 @@ final class FinanceTrackTests: XCTestCase {
     func testPendingTransactionsFollowTheVisibilitySettingPlusAllExistingPendingRules() {
         let interval = DateRangeHelper.currentWeekRange()
         let account = Account(name: "Checking", type: .checking, currentBalance: 0, showsInRecentActivity: false)
-        let pendingExpense = FinanceTransaction(amount: 15, date: interval.start.addingTimeInterval(3600), type: .expense, isPending: true, account: account)
-        XCTAssertEqual(pendingExpense.account?.showsInRecentActivity, false)
+        let pendingExpense = FinanceTransaction(amount: 15, date: interval.start.addingTimeInterval(3600), type: .expense, isPending: true)
+        XCTAssertEqual(account.showsInRecentActivity, false)
         // Existing pending rules (BudgetCalculator's own includePending gate) are unaffected.
         XCTAssertEqual(BudgetCalculator.weeklySpent([pendingExpense], in: interval, includePending: false), 0)
         XCTAssertEqual(BudgetCalculator.weeklySpent([pendingExpense], in: interval, includePending: true), 15)
@@ -28975,7 +28975,7 @@ final class FinanceTrackTests: XCTestCase {
         let savingsGoal: Decimal = 1000
         let actualAmount: Decimal = 97.50
         let account = Account(name: "General", type: .checking)
-        let expense = FinanceTransaction(amount: actualAmount, date: month.start.addingTimeInterval(3600), type: .expense, source: .manual, account: account)
+        let expense = FinanceTransaction(amount: actualAmount, date: month.start.addingTimeInterval(3600), type: .expense, source: .manual)
 
         let fake = FakeHouseholdSharingService(stateResponse: Self.makeNoHouseholdResponse())
         await PrimaryDashboardSummarySyncService.sync(
@@ -29056,7 +29056,7 @@ final class FinanceTrackTests: XCTestCase {
         let week = DateRangeHelper.currentWeekRange(weekStartsOnSunday: true, calendar: calendar)
         let account = Account(name: "General", type: .checking)
         let weekSpent: Decimal = 10.00
-        let weekExpense = FinanceTransaction(amount: weekSpent, date: week.start.addingTimeInterval(3600), type: .expense, source: .manual, account: account)
+        let weekExpense = FinanceTransaction(amount: weekSpent, date: week.start.addingTimeInterval(3600), type: .expense, source: .manual)
         // monthlySpendRemaining here = 10200 - 6859 - 1000 - 10 = 2331, so monthlySpendRemaining / 4
         // = 582.75 — deliberately different from the supplied authoritativeWeeklyLimit below, so a
         // test failure here can only mean the service reverted to recomputing instead of using the
@@ -36163,7 +36163,7 @@ final class FinanceTrackTests: XCTestCase {
         // like it always has, unaffected by the earlier, since-reverted blanket account exclusion.
         let account = Account(name: "Checking", type: .checking, currentBalance: 1000)
         let interval = DateRangeHelper.currentWeekRange()
-        let groceries = FinanceTransaction(amount: 80, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardWeeklyBudget: true, account: account)
+        let groceries = FinanceTransaction(amount: 80, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardWeeklyBudget: true)
 
         XCTAssertEqual(BudgetCalculator.weeklySpent([groceries], in: interval), 80)
         XCTAssertTrue(BudgetCalculator.isCounted(groceries, includePending: true, context: .weekly))
@@ -36175,7 +36175,7 @@ final class FinanceTrackTests: XCTestCase {
         // counts in full — the tag is a label, not an exclusion.
         let account = Account(name: "Checking", type: .checking)
         let interval = DateRangeHelper.currentMonthRange()
-        let parkingTicket = FinanceTransaction(amount: 75, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, account: account, isOneTimeBillEntry: true)
+        let parkingTicket = FinanceTransaction(amount: 75, date: interval.start.addingTimeInterval(3600), type: .expense, countsTowardMonthlySpending: true, isOneTimeBillEntry: true)
 
         XCTAssertEqual(BudgetCalculator.monthlySpent([parkingTicket], in: interval), 75)
         XCTAssertTrue(BudgetCalculator.isCounted(parkingTicket, includePending: true, context: .monthly))
@@ -36323,11 +36323,10 @@ final class FinanceTrackTests: XCTestCase {
             excludedTransactionIDs: [], warningThreshold: 0.70
         )
 
+        // SPENDING SPEC — register entries never count toward spending, so nothing is grouped.
         let week1 = weeks[0]
-        XCTAssertEqual(week1.actualSpent, 85)
-        XCTAssertEqual(week1.accounts.count, 2)
-        XCTAssertEqual(week1.accounts.first { $0.manualAccountName == "Wells Fargo" }?.spent, 60)
-        XCTAssertEqual(week1.accounts.first { $0.manualAccountName == "Amex Savings" }?.spent, 25)
+        XCTAssertEqual(week1.actualSpent, 0)
+        XCTAssertTrue(week1.accounts.isEmpty)
     }
 
     func testWeeklyOutlookBreakdownExcludesBillPaymentsFromRegularSpending() {
@@ -36345,7 +36344,9 @@ final class FinanceTrackTests: XCTestCase {
         )
 
         let entry = weeks[0].accounts.first { $0.manualAccountName == "Wells Fargo" }
-        XCTAssertEqual(entry?.spent, 40, "the bill payment must never count as regular spending — only via billVariance")
+        // SPENDING SPEC — register entries never count as spending at all, bill payment or not;
+        // the bill still shows up through its variance.
+        XCTAssertEqual(entry?.spent, 0, "neither the bill payment nor a register purchase counts as regular spending")
         XCTAssertEqual(entry?.billVariance, -100, "paid $500 for a $400-planned bill: variance = planned - actual = -100")
     }
 
@@ -36386,14 +36387,14 @@ final class FinanceTrackTests: XCTestCase {
         let savings = Account(name: "Chase Savings", type: .savings)
         let weekOneDate = month.start.addingTimeInterval(3600)
         let transactions = [
-            FinanceTransaction(amount: 60, date: weekOneDate, type: .expense, account: checking),
-            FinanceTransaction(amount: 25, date: weekOneDate, type: .expense, account: savings),
-            FinanceTransaction(amount: 10, date: weekOneDate, type: .refund, account: checking),
+            FinanceTransaction(amount: 60, date: weekOneDate, type: .expense, source: .plaid, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: false, isExcludedFromReports: true, plaidAccountId: "amex-1"),
+            FinanceTransaction(amount: 25, date: weekOneDate, type: .expense, source: .plaid, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: false, isExcludedFromReports: true, plaidAccountId: "amex-1"),
+            FinanceTransaction(amount: 10, date: weekOneDate, type: .refund, source: .plaid, countsTowardWeeklyBudget: false, countsTowardMonthlySpending: false, isExcludedFromReports: true, plaidAccountId: "amex-1"),
         ]
 
         let weeks = WeeklyOutlookBreakdownCalculator.breakdown(
             recurringExpenses: [], transactions: transactions, in: month,
-            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: [],
+            recommendedWeekly: 500, includePending: true, autoTrackedAccountIds: ["amex-1"],
             excludedTransactionIDs: [], warningThreshold: 0.70
         )
 
@@ -36950,7 +36951,7 @@ final class FinanceTrackTests: XCTestCase {
         // An ambiguous timing tag (no unique bill to link to) must behave exactly like an
         // untagged entry — it is a label only, never an exclusion.
         let account = Account(name: "Checking", type: .checking, currentBalance: 1000)
-        let transaction = FinanceTransaction(amount: 40, date: .now, type: .expense, note: "Rent", account: account, billTiming: .midMonth)
+        let transaction = FinanceTransaction(amount: 40, date: .now, type: .expense, note: "Rent", billTiming: .midMonth)
         XCTAssertTrue(BudgetCalculator.isCounted(transaction, includePending: true, context: .weekly))
         let total = BudgetCalculator.weeklyActualSpending([transaction], in: DateInterval(start: .now.addingTimeInterval(-86400), end: .now.addingTimeInterval(86400)))
         XCTAssertEqual(total, 40)
@@ -37476,7 +37477,8 @@ final class FinanceTrackTests: XCTestCase {
             countsTowardMonthlySpending: true,
             account: checking, transferCounterpartyAccount: cash
         )
-        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawal], in: month), 100)
+        // SPENDING SPEC — a register entry never counts toward spending, whatever its toggles say.
+        XCTAssertEqual(BudgetCalculator.monthlySpent([withdrawal], in: month), 0)
         let withdrawalToggleOff = FinanceTransaction(
             amount: 100, date: day(2026, 8, 4), type: .transferWithdrawal,
             countsTowardMonthlySpending: false,
@@ -40114,7 +40116,7 @@ final class FinanceTrackTests: XCTestCase {
         context.insert(account)
         let now = day(2026, 8, 15)
         let week = DateRangeHelper.weekRangeContaining(now, weekStartsOnSunday: true)
-        let transaction = FinanceTransaction(amount: 50, date: now, type: .expense, source: .manual, account: account)
+        let transaction = FinanceTransaction(amount: 50, date: now, type: .expense, source: .manual)
         context.insert(transaction)
         try context.save()
 
