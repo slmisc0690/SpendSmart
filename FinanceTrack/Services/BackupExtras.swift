@@ -102,13 +102,16 @@ struct BackupExtras: Codable, Equatable {
     var onboarding: [OnboardingDTO]
     /// Connected-account display names, keyed by their full `UserDefaults` key.
     var connectedAccountAliases: [String: String]
+    /// Remembered Add Expense option choices per account and type, keyed by their full `UserDefaults` key.
+    var transactionEntryPreferences: [String: Data]
 
     init(
         transactions: [TransactionExtra] = [], accounts: [AccountExtra] = [],
         incomeSources: [IncomeSourceExtra] = [], budgetSettings: [BudgetSettingsExtra] = [],
         savingsEntries: [SavingsEntryDTO] = [], scheduledTransfers: [ScheduledTransferDTO] = [],
         favorites: [FavoritesDTO] = [], quickStats: [QuickStatsDTO] = [], onboarding: [OnboardingDTO] = [],
-        connectedAccountAliases: [String: String] = [:]
+        connectedAccountAliases: [String: String] = [:],
+        transactionEntryPreferences: [String: Data] = [:]
     ) {
         self.transactions = transactions
         self.accounts = accounts
@@ -120,6 +123,7 @@ struct BackupExtras: Codable, Equatable {
         self.quickStats = quickStats
         self.onboarding = onboarding
         self.connectedAccountAliases = connectedAccountAliases
+        self.transactionEntryPreferences = transactionEntryPreferences
     }
 
     init(from decoder: Decoder) throws {
@@ -134,6 +138,7 @@ struct BackupExtras: Codable, Equatable {
         quickStats = try c.decodeIfPresent([QuickStatsDTO].self, forKey: .quickStats) ?? []
         onboarding = try c.decodeIfPresent([OnboardingDTO].self, forKey: .onboarding) ?? []
         connectedAccountAliases = try c.decodeIfPresent([String: String].self, forKey: .connectedAccountAliases) ?? [:]
+        transactionEntryPreferences = try c.decodeIfPresent([String: Data].self, forKey: .transactionEntryPreferences) ?? [:]
     }
 }
 
@@ -210,6 +215,11 @@ extension SpendSmartBackupService {
         }
         extras.connectedAccountAliases = defaults.dictionaryRepresentation().reduce(into: [:]) { result, entry in
             if entry.key.hasPrefix(ConnectedAccountAliasStore.keyPrefix), let value = entry.value as? String {
+                result[entry.key] = value
+            }
+        }
+        extras.transactionEntryPreferences = defaults.dictionaryRepresentation().reduce(into: [:]) { result, entry in
+            if entry.key.hasPrefix(TransactionPreferenceStore.keyPrefix), let value = entry.value as? Data {
                 result[entry.key] = value
             }
         }
@@ -305,6 +315,12 @@ extension SpendSmartBackupService {
             defaults.removeObject(forKey: key)
         }
         for (key, value) in extras.connectedAccountAliases where key.hasPrefix(ConnectedAccountAliasStore.keyPrefix) {
+            defaults.set(value, forKey: key)
+        }
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(TransactionPreferenceStore.keyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+        for (key, value) in extras.transactionEntryPreferences where key.hasPrefix(TransactionPreferenceStore.keyPrefix) {
             defaults.set(value, forKey: key)
         }
 

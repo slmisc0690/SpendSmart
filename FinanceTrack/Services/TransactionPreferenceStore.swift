@@ -20,7 +20,7 @@ struct TransactionEntryPreferences: Codable, Equatable {
 /// name, `hashValue`, object identity, or array position, so two accounts sharing a name (or
 /// renamed later) never collide or lose their independent preferences.
 struct TransactionPreferenceStore {
-    private static let keyPrefix = "transactionEntry.preferences.v1"
+    static let keyPrefix = "transactionEntry.preferences.v1"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {

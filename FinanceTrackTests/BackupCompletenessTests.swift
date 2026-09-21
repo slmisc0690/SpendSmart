@@ -19,7 +19,10 @@ final class BackupCompletenessTests: XCTestCase {
 
     private let aliasKey = "\(ConnectedAccountAliasStore.keyPrefix).test-backup-account"
 
+    private let preferenceKey = "\(TransactionPreferenceStore.keyPrefix).test-backup-account.expense"
+
     override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: preferenceKey)
         UserDefaults.standard.removeObject(forKey: aliasKey)
         super.tearDown()
     }
@@ -50,10 +53,12 @@ final class BackupCompletenessTests: XCTestCase {
         source.insert(QuickStatsSettings(hiddenRawIDs: ["savedThisMonth"]))
         source.insert(OnboardingSettings(hasCompletedOnboarding: true, selectedPathRawValue: "plan"))
         UserDefaults.standard.set("Wells Savings", forKey: aliasKey)
+        UserDefaults.standard.set(Data("remembered".utf8), forKey: preferenceKey)
         try source.save()
 
         let data = try SpendSmartBackupService.encode(try SpendSmartBackupService.fetchAndMakeDocument(context: source))
         UserDefaults.standard.removeObject(forKey: aliasKey)
+        UserDefaults.standard.removeObject(forKey: preferenceKey)
 
         let target = try makeContext()
         try SpendSmartBackupService.restore(try SpendSmartBackupService.decode(data), into: target)
@@ -81,6 +86,7 @@ final class BackupCompletenessTests: XCTestCase {
         XCTAssertEqual(try target.fetch(FetchDescriptor<QuickStatsSettings>()).first?.hiddenRawIDs, ["savedThisMonth"])
         XCTAssertEqual(try target.fetch(FetchDescriptor<OnboardingSettings>()).first?.hasCompletedOnboarding, true)
         XCTAssertEqual(UserDefaults.standard.string(forKey: aliasKey), "Wells Savings")
+        XCTAssertEqual(UserDefaults.standard.data(forKey: preferenceKey), Data("remembered".utf8))
     }
 
     func testExclusionIsRematchedByBankIdWhenTheLocalIdChanged() throws {
