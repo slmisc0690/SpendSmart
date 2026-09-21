@@ -34,7 +34,8 @@ struct StatCard: View {
                 Text(subtitle)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
                     .foregroundStyle(Theme.textTertiary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(Theme.Spacing.md)

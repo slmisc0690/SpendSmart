@@ -83,6 +83,17 @@ final class SpendingFixesTests: XCTestCase {
         XCTAssertEqual(BudgetCalculator.weeklyActualSpending([toSavings], in: week), 0)
     }
 
+    // MARK: Quick Stat subtitles wrap
+
+    func testStatCardSubtitleWrapsInsteadOfTruncating() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("FinanceTrack/Views/Components/StatCard.swift"), encoding: .utf8)
+        guard let range = source.range(of: "Text(subtitle)") else { return XCTFail("subtitle text not found") }
+        let block = String(source[range.lowerBound...].prefix(300))
+        XCTAssertTrue(block.contains(".lineLimit(2)"))
+        XCTAssertFalse(block.contains(".lineLimit(1)"))
+    }
+
     // MARK: 4. Auto Deposit is gone
 
     func testAutoDepositHasNoSettingsSwitchOrDashboardPrompt() throws {
