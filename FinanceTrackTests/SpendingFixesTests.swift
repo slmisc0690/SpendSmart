@@ -112,6 +112,16 @@ final class SpendingFixesTests: XCTestCase {
         XCTAssertTrue(source.contains("amount: savedThisMonth + monthlySpendRemaining(summary: summary),"))
     }
 
+    // MARK: Calculate Transactions account picker
+
+    func testCalculateTransactionsPickerStaysAvailableInExcludedModeWithAllAccountsOption() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("FinanceTrack/Views/Settings/CalculateTransactionsView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("Text(\"All Accounts\").tag(Self.allAccountsID)"))
+        XCTAssertTrue(source.contains("showsAllAccountsInExcludedMode"))
+        XCTAssertFalse(source.contains("All Accounts — Excluded"), "the fixed label that replaced the picker must be gone")
+    }
+
     // MARK: Quick Stat subtitles wrap
 
     func testStatCardSubtitleWrapsInsteadOfTruncating() throws {
