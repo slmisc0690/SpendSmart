@@ -49,6 +49,11 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSFaceIDUsageDescription: "SpendSmart uses Face ID to protect access to your financial data."
+        # SPENDAI VOICE INPUT — SpendAI listens for your question by default when it opens; these
+        # two are the system's one-time permission prompts for that (microphone capture + on-device
+        # speech-to-text). A denial is never fatal — SpendAI silently falls back to the keyboard.
+        NSMicrophoneUsageDescription: "SpendSmart uses your microphone so you can ask SpendAI a question by voice."
+        NSSpeechRecognitionUsageDescription: "SpendSmart uses on-device speech recognition to turn your spoken question into text for SpendAI."
         # Password-reset / email-confirmation deep link callback — see
         # AuthenticationService.resetPassword's redirectTo and SupabaseConfig. A custom scheme for
         # now (no web domain to host an apple-app-site-association file yet); swappable to a real

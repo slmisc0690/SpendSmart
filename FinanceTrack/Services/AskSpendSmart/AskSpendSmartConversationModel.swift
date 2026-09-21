@@ -21,9 +21,12 @@ final class AskSpendSmartConversationModel {
     /// caller's already-fetched SwiftData snapshot, via `AskSpendSmartServiceFactory`.
     private var service: (any AskSpendSmartServicing)?
 
-    init(availability: AskSpendSmartAvailability, service: (any AskSpendSmartServicing)?) {
+    /// `initialMessages` seeds a restored conversation (see `AskSpendSmartConversationStore`) —
+    /// defaults to empty so every existing call site keeps starting a genuinely fresh conversation.
+    init(availability: AskSpendSmartAvailability, service: (any AskSpendSmartServicing)?, initialMessages: [AskSpendSmartMessage] = []) {
         self.availability = availability
         self.service = service
+        self.messages = initialMessages
     }
 
     var canSend: Bool {

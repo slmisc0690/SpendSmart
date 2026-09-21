@@ -21,6 +21,11 @@ struct AskSpendSmartView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(PlaidConnectionManager.self) private var plaidConnection
+    @Environment(AuthenticationService.self) private var authService
+
+    /// SESSION HISTORY — persists this conversation across app launches for the current calendar
+    /// day only (Scott's explicit request); see `AskSpendSmartConversationStore`'s own header.
+    private let conversationStore = AskSpendSmartConversationStore()
 
     /// PHASE 2 — APP-WIDE ACCESS: which screen this presentation was opened from, a lightweight
     /// hint only (see `AskSpendSmartScreenContext`'s own header) — never restricts which tools are
@@ -30,6 +35,17 @@ struct AskSpendSmartView: View {
 
     @State private var conversationModel: AskSpendSmartConversationModel?
     @State private var inputText = ""
+
+    /// VOICE-FIRST OPEN — SpendAI defaults to listening for your question every time it opens
+    /// (Scott's explicit request); `.keyboard` is both the fallback when permission is denied and
+    /// the mode every SUBSEQUENT message in the conversation uses once the first question has been
+    /// asked (voice-first only applies to how a session STARTS, not the whole conversation).
+    private enum SpendAIInputMode {
+        case voice
+        case keyboard
+    }
+    @State private var inputMode: SpendAIInputMode = .keyboard
+    @State private var voiceInput = SpendAIVoiceInputService()
 
     private static let examplePrompts = [
         "How much have I spent on restaurants this month?",
@@ -62,11 +78,12 @@ struct AskSpendSmartView: View {
                 if let conversationModel, !conversationModel.messages.isEmpty {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
-                            startNewConversation()
+                            startNewConversation(restoring: false)
+                            Task { await beginVoiceModeIfPossible() }
                         } label: {
                             Image(systemName: "square.and.pencil")
                         }
-                        .accessibilityLabel("New Conversation")
+                        .accessibilityLabel("Clear Conversation")
                     }
                 }
             }
@@ -74,10 +91,54 @@ struct AskSpendSmartView: View {
         }
         .preferredColorScheme(.dark)
         .task {
-            if conversationModel == nil {
-                startNewConversation()
+            guard conversationModel == nil else { return }
+            startNewConversation(restoring: true)
+            // Voice-first only applies to a genuinely fresh conversation — restoring an earlier
+            // history you're coming back to read is shown in keyboard mode first, never grabbing
+            // the microphone the instant you open it to review past answers. Asking a NEW question
+            // (by typing, or via the bottom "Ask another question" prompt once one exists) still
+            // resumes voice for the next turn, same as any other answer.
+            if conversationModel?.messages.isEmpty == true {
+                await beginVoiceModeIfPossible()
             }
         }
+        .onDisappear {
+            voiceInput.stopListening()
+        }
+    }
+
+    /// Checks (never re-prompts beyond iOS's own one-time system dialog) whether voice input is
+    /// usable, then either starts listening immediately or falls back to `.keyboard` — silently,
+    /// per Scott's explicit choice: a denied/restricted permission is never an error state the
+    /// user has to dismiss, SpendAI just opens exactly like it always has.
+    @MainActor
+    private func beginVoiceModeIfPossible() async {
+        var state = voiceInput.currentPermissionState()
+        if state == .notDetermined {
+            state = await voiceInput.requestPermissionIfNeeded()
+        }
+        guard state == .authorized, let conversationModel else {
+            inputMode = .keyboard
+            return
+        }
+        startVoiceListening(conversationModel)
+    }
+
+    /// ASK-ANOTHER-QUESTION — the single place voice listening is (re)started, used both for the
+    /// very first question and for every subsequent one once an answer arrives (`send(_:)`, below)
+    /// — Scott's explicit request that voice stays available turn after turn, not just on open.
+    private func startVoiceListening(_ conversationModel: AskSpendSmartConversationModel) {
+        inputMode = .voice
+        voiceInput.startListening { [weak conversationModel] transcript in
+            guard let conversationModel else { return }
+            inputText = transcript
+            send(conversationModel)
+        }
+    }
+
+    private func switchToKeyboardInput() {
+        voiceInput.stopListening()
+        inputMode = .keyboard
     }
 
     // MARK: - Header
@@ -102,6 +163,53 @@ struct AskSpendSmartView: View {
 
     @ViewBuilder
     private func conversationBody(_ conversationModel: AskSpendSmartConversationModel) -> some View {
+        // FULL-SCREEN ONLY AT THE VERY START — once there's at least one exchange, the chat
+        // history stays visible and voice mode instead shows as a compact bar under the last
+        // answer (`voiceInputBar`, in `keyboardConversationBody` below) so asking a follow-up by
+        // voice never hides what you already asked.
+        if inputMode == .voice && conversationModel.messages.isEmpty {
+            voiceListeningView
+        } else {
+            keyboardConversationBody(conversationModel)
+        }
+    }
+
+    /// VOICE-FIRST OPEN — shown only for a genuinely fresh conversation, before the first question
+    /// is asked. Tapping "Keyboard" cancels listening and drops straight into the exact same
+    /// `keyboardConversationBody` every existing user already sees; auto-submit (3s of silence —
+    /// see `SpendAIVoiceInputService`) routes through `startVoiceListening`'s closure to the same
+    /// `send(_:)` every other submission path already uses, never a second send implementation.
+    private var voiceListeningView: some View {
+        VStack(spacing: Theme.Spacing.lg) {
+            Spacer()
+            Image(systemName: "waveform")
+                .font(.system(size: 48, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .symbolEffect(.variableColor.iterative, isActive: voiceInput.isListening)
+            Text("What would you like to do?")
+                .font(Theme.headlineFont)
+                .foregroundStyle(Theme.textPrimary)
+            Text(voiceInput.transcript.isEmpty ? "Listening…" : voiceInput.transcript)
+                .font(Theme.bodyFont)
+                .foregroundStyle(voiceInput.transcript.isEmpty ? Theme.textTertiary : Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, Theme.Spacing.xl)
+                .animation(.default, value: voiceInput.transcript)
+            Spacer()
+            Button {
+                switchToKeyboardInput()
+            } label: {
+                Label("Keyboard", systemImage: "keyboard")
+                    .font(Theme.bodyFont)
+                    .foregroundStyle(Theme.accent)
+            }
+            .padding(.bottom, Theme.Spacing.xl)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func keyboardConversationBody(_ conversationModel: AskSpendSmartConversationModel) -> some View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -133,7 +241,54 @@ struct AskSpendSmartView: View {
             .onTapGesture { dismissKeyboard() }
             .scrollDismissesKeyboard(.interactively)
         }
-        inputBar(conversationModel)
+        if inputMode == .voice {
+            voiceInputBar(conversationModel)
+        } else {
+            inputBar(conversationModel)
+        }
+    }
+
+    /// ASK-ANOTHER-QUESTION — the compact, docked-at-bottom counterpart to `voiceListeningView`,
+    /// shown under the existing chat history once at least one exchange has happened (Scott's
+    /// explicit request: after SpendAI answers, voice stays available for a follow-up without
+    /// losing sight of what was already asked). Sized bigger per Scott's own feedback (it read as
+    /// too small), and the whole label area is now a real tappable `Button` — restarting listening
+    /// if it isn't already active for any reason — rather than inert text that did nothing when
+    /// tapped. "Keyboard" behaves identically to the full-screen version.
+    private func voiceInputBar(_ conversationModel: AskSpendSmartConversationModel) -> some View {
+        HStack(spacing: Theme.Spacing.md) {
+            Button {
+                guard !voiceInput.isListening, voiceInput.currentPermissionState() == .authorized else { return }
+                startVoiceListening(conversationModel)
+            } label: {
+                HStack(spacing: Theme.Spacing.md) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .symbolEffect(.variableColor.iterative, isActive: voiceInput.isListening)
+                    Text(voiceInput.transcript.isEmpty ? "Ask another question…" : voiceInput.transcript)
+                        .font(Theme.headlineFont)
+                        .foregroundStyle(voiceInput.transcript.isEmpty ? Theme.textSecondary : Theme.textPrimary)
+                        .lineLimit(2)
+                        .animation(.default, value: voiceInput.transcript)
+                    Spacer(minLength: Theme.Spacing.sm)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                switchToKeyboardInput()
+            } label: {
+                Image(systemName: "keyboard")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+            .accessibilityLabel("Keyboard")
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+        .padding(.vertical, Theme.Spacing.md)
+        .frame(minHeight: 64)
     }
 
     private var emptyStateGuidance: some View {
@@ -160,8 +315,27 @@ struct AskSpendSmartView: View {
             TextField("Ask SpendAI a question", text: $inputText, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
-                .padding(Theme.Spacing.sm)
+                .padding(.vertical, Theme.Spacing.sm)
+                .padding(.leading, Theme.Spacing.sm)
+                .padding(.trailing, 36)
                 .background(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).fill(Theme.cardSurface))
+                // VOICE FROM THE KEYBOARD — a mic icon docked inside the trailing edge of the SAME
+                // text-entry box (Scott's own explicit placement), always available regardless of
+                // whether you've typed anything, so you're never stuck on keyboard-only once
+                // you've switched away from voice.
+                .overlay(alignment: .trailing) {
+                    Button {
+                        guard voiceInput.currentPermissionState() == .authorized else { return }
+                        inputText = ""
+                        startVoiceListening(conversationModel)
+                    } label: {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .padding(.trailing, Theme.Spacing.sm)
+                    .accessibilityLabel("Ask by voice")
+                }
                 .foregroundStyle(Theme.textPrimary)
                 .disabled(!conversationModel.canSend)
                 .onSubmit { send(conversationModel) }
@@ -201,13 +375,26 @@ struct AskSpendSmartView: View {
         )
     }
 
+    /// ASK-ANOTHER-QUESTION + SESSION HISTORY — after the answer arrives, this is the ONE place
+    /// that (1) persists the updated conversation (`AskSpendSmartConversationStore`, current
+    /// calendar day only) and (2) resumes voice listening for a follow-up if the permission is
+    /// still authorized — both the typed-question path (`inputBar`) and the voice-question path
+    /// (`startVoiceListening`'s auto-submit closure) route through this single function, so neither
+    /// persistence nor voice-resume needs a second implementation.
     private func send(_ conversationModel: AskSpendSmartConversationModel) {
         guard canSubmit(conversationModel) else { return }
         let text = inputText
         inputText = ""
         dismissKeyboard()
+        inputMode = .keyboard
         let freshContext = currentToolContext()
-        Task { await conversationModel.send(text, context: freshContext) }
+        Task {
+            await conversationModel.send(text, context: freshContext)
+            conversationStore.save(conversationModel.messages, userId: authService.currentUserId)
+            if voiceInput.currentPermissionState() == .authorized {
+                startVoiceListening(conversationModel)
+            }
+        }
     }
 
     // MARK: - Unavailable
@@ -235,12 +422,25 @@ struct AskSpendSmartView: View {
 
     // MARK: - Actions
 
+    /// `restoring: true` (the initial `.task`) loads today's saved conversation, if any — see
+    /// `AskSpendSmartConversationStore`'s own header for exactly when that is/isn't available.
+    /// `restoring: false` (the toolbar "Clear Conversation" button) explicitly wipes the stored
+    /// conversation and starts genuinely empty — these are deliberately different, since restoring
+    /// on every open would make "Clear Conversation" a no-op.
     @MainActor
-    private func startNewConversation() {
+    private func startNewConversation(restoring: Bool) {
         let context = currentToolContext()
         let availability = AskSpendSmartServiceFactory.currentAvailability()
         let service = AskSpendSmartServiceFactory.makeService(toolContext: context, screenContext: screenContext)
-        conversationModel = AskSpendSmartConversationModel(availability: availability, service: service)
+        let initialMessages: [AskSpendSmartMessage]
+        if restoring {
+            initialMessages = conversationStore.load(userId: authService.currentUserId)
+        } else {
+            conversationStore.clear(userId: authService.currentUserId)
+            initialMessages = []
+        }
+        conversationModel = AskSpendSmartConversationModel(availability: availability, service: service, initialMessages: initialMessages)
+        inputMode = .keyboard
     }
 
     private func dismissKeyboard() {

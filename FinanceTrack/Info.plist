@@ -33,6 +33,10 @@
 	<string>1</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>SpendSmart uses Face ID to protect access to your financial data.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SpendSmart uses your microphone so you can ask SpendAI a question by voice.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>SpendSmart uses on-device speech recognition to turn your spoken question into text for SpendAI.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

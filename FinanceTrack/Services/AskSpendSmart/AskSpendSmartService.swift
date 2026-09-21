@@ -1,9 +1,11 @@
 import Foundation
 
-/// One message in an Ask SpendSmart conversation, for on-screen display only — never persisted to
-/// SwiftData or sent anywhere beyond this device/the on-device model itself.
-struct AskSpendSmartMessage: Identifiable, Equatable, Sendable {
-    enum Role: Equatable, Sendable {
+/// One message in an Ask SpendSmart conversation — never sent to a backend or the cloud (see
+/// `AskSpendSmartConversationStore`'s own header), never persisted to SwiftData. `Codable` so
+/// `AskSpendSmartConversationStore` can persist a conversation to `UserDefaults` across app
+/// launches for the current calendar day only (Scott's explicit request), never for longer.
+struct AskSpendSmartMessage: Identifiable, Equatable, Sendable, Codable {
+    enum Role: String, Equatable, Sendable, Codable {
         case user
         case assistant
     }
