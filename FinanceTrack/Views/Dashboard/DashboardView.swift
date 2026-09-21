@@ -205,14 +205,14 @@ struct DashboardView: View {
     /// mode's own value (Flexible Spending Available ÷ 4) is still a real, positive weekly amount
     /// whenever Flexible Spending Available is positive — it is never $0 merely because no custom
     /// override was ever entered.
-    private var weeklyLimit: Decimal {
-        plannedWeeklySpendingForOutlook
+    private func weeklyLimit(summary: MonthlyPlanCalculator.Summary) -> Decimal {
+        plannedWeeklySpendingForOutlook(summary: summary)
     }
 
-    private var status: SpendingStatus {
+    private func status(summary: MonthlyPlanCalculator.Summary) -> SpendingStatus {
         BudgetCalculator.status(
             spent: spentThisWeek,
-            limit: weeklyLimit,
+            limit: weeklyLimit(summary: summary),
             warningThreshold: settings?.warningThreshold ?? 0.70
         )
     }
@@ -384,14 +384,19 @@ struct DashboardView: View {
         await Task.yield()
         guard !Task.isCancelled else { return }
         guard !isSecondary else { return }
+        // This runs once per sync trigger (foreground/load), not per redraw — a single fresh
+        // `monthlyPlanSummary` computation here is correct and cheap, unlike the body-render path
+        // this same value is snapshotted for elsewhere in this file (see that snapshot's own
+        // PERFORMANCE comment).
+        let summary = monthlyPlanSummary
         await PrimaryDashboardSummarySyncService.sync(
             transactions: transactions,
             incomeSources: incomeSources,
             recurringExpenses: recurringExpenses,
             planSettings: monthlyPlanSettingsList.first,
-            authoritativeWeeklyLimit: weeklyLimit,
-            monthlyOutlookBudgeted: plannedMonthlySpendingForOutlook,
-            currentWeekIndex: currentWeekComparisonIndexForUpload,
+            authoritativeWeeklyLimit: weeklyLimit(summary: summary),
+            monthlyOutlookBudgeted: plannedMonthlySpendingForOutlook(summary: summary),
+            currentWeekIndex: currentWeekComparisonIndexForUpload(summary: summary),
             weekInterval: weekInterval,
             monthInterval: monthInterval,
             weekStartsOnSunday: settings?.weekStartsOnSunday ?? true,
@@ -523,8 +528,19 @@ struct DashboardView: View {
 
     /// income − corrected Fixed Bills − savings goal − buffer, BEFORE Bill Payment Variance —
     /// same shape as `MonthlyPlanView.correctedFlexibleSpendingAvailable`.
-    private var correctedPlannedFlexibleSpendingAvailableForOutlook: Decimal {
-        monthlyPlanSummary.estimatedMonthlyIncome - correctedFixedBillsTotalForOutlook - monthlyPlanSummary.monthlySavingsGoal - monthlyPlanSummary.bufferAmount
+    ///
+    /// PERFORMANCE — TAKES `summary` AS A PARAMETER, NEVER RE-READS `monthlyPlanSummary`: this
+    /// whole chain (through `monthlySpendRemaining` below) used to read the `monthlyPlanSummary`
+    /// computed property directly, which re-ran `MonthlyPlanCalculator.summary(...)` — 6 full
+    /// O(n) scans of `transactions` — on every single access. With 10+ call sites across this
+    /// view's `body`, one screen redraw could trigger 60-100+ full transaction-history scans,
+    /// which is what produced the reported Dashboard scroll stutter (confirmed via a dedicated
+    /// investigation before this change). `body` now computes `monthlyPlanSummary` exactly ONCE
+    /// per redraw and threads that single snapshot down through every function in this chain —
+    /// the arithmetic itself is completely unchanged, this only removes the redundant repetition.
+    /// Never reintroduce a bare `monthlyPlanSummary` read inside this chain.
+    private func correctedPlannedFlexibleSpendingAvailableForOutlook(summary: MonthlyPlanCalculator.Summary) -> Decimal {
+        summary.estimatedMonthlyIncome - correctedFixedBillsTotalForOutlook - summary.monthlySavingsGoal - summary.bufferAmount
     }
 
     /// The corrected baseline PLUS Bill Payment Variance (planned vs. actual, per bill actually
@@ -533,23 +549,23 @@ struct DashboardView: View {
     /// `monthlyPlanSummary.flexibleSpendingAvailable` directly. Nothing paid differently than
     /// planned this month ⇒ this equals `correctedPlannedFlexibleSpendingAvailableForOutlook`
     /// exactly, matching Monthly Plan's own displayed figure.
-    private var correctedFlexibleSpendingAvailableForOutlook: Decimal {
-        correctedPlannedFlexibleSpendingAvailableForOutlook + MonthlyPlanCalculator.billPaymentVariance(
+    private func correctedFlexibleSpendingAvailableForOutlook(summary: MonthlyPlanCalculator.Summary) -> Decimal {
+        correctedPlannedFlexibleSpendingAvailableForOutlook(summary: summary) + MonthlyPlanCalculator.billPaymentVariance(
             recurringExpenses: recurringExpenses,
             transactions: transactions,
             in: monthInterval
         )
     }
 
-    private var plannedWeeklySpendingForOutlook: Decimal {
+    private func plannedWeeklySpendingForOutlook(summary: MonthlyPlanCalculator.Summary) -> Decimal {
         MonthlyPlanCalculator.effectivePlannedWeeklySpending(
             override: monthlyPlanSettingsList.first?.plannedWeeklySpendingOverride,
-            flexibleSpendingAvailable: correctedFlexibleSpendingAvailableForOutlook
+            flexibleSpendingAvailable: correctedFlexibleSpendingAvailableForOutlook(summary: summary)
         )
     }
 
-    private var plannedMonthlySpendingForOutlook: Decimal {
-        MonthlyPlanCalculator.plannedMonthlySpending(plannedWeeklySpending: plannedWeeklySpendingForOutlook)
+    private func plannedMonthlySpendingForOutlook(summary: MonthlyPlanCalculator.Summary) -> Decimal {
+        MonthlyPlanCalculator.plannedMonthlySpending(plannedWeeklySpending: plannedWeeklySpendingForOutlook(summary: summary))
     }
 
     /// QUICK STATS REDESIGN — Flexible Spending Available minus Planned Monthly Spending
@@ -557,49 +573,57 @@ struct DashboardView: View {
     /// (previously computed inline only within `projectedMonthlySavingsForOutlook` below) so the
     /// new "Projected Available After Spend" Quick Stat can display the SAME already-computed
     /// value that feeds `projectedMonthlySavingsForOutlook`, never a second calculation.
-    private var projectedAvailableAfterSpendForOutlook: Decimal {
+    private func projectedAvailableAfterSpendForOutlook(summary: MonthlyPlanCalculator.Summary) -> Decimal {
         MonthlyPlanCalculator.additionalPlannedSavings(
-            flexibleSpendingAvailable: correctedFlexibleSpendingAvailableForOutlook,
-            plannedMonthlySpending: plannedMonthlySpendingForOutlook
+            flexibleSpendingAvailable: correctedFlexibleSpendingAvailableForOutlook(summary: summary),
+            plannedMonthlySpending: plannedMonthlySpendingForOutlook(summary: summary)
         )
     }
 
-    private var projectedMonthlySavingsForOutlook: Decimal {
+    private func projectedMonthlySavingsForOutlook(summary: MonthlyPlanCalculator.Summary) -> Decimal {
         MonthlyPlanCalculator.projectedSavingsFromPlannedSpending(
-            monthlySavingsGoal: monthlyPlanSummary.monthlySavingsGoal,
-            additionalPlannedSavings: projectedAvailableAfterSpendForOutlook
+            monthlySavingsGoal: summary.monthlySavingsGoal,
+            additionalPlannedSavings: projectedAvailableAfterSpendForOutlook(summary: summary)
         )
     }
 
-    private var projectedStatusForOutlook: SpendingStatus {
-        MonthlyPlanCalculator.monthlyPlanStatus(projectedSavings: projectedMonthlySavingsForOutlook, savingsGoal: monthlyPlanSummary.monthlySavingsGoal)
+    private func projectedStatusForOutlook(summary: MonthlyPlanCalculator.Summary) -> SpendingStatus {
+        MonthlyPlanCalculator.monthlyPlanStatus(projectedSavings: projectedMonthlySavingsForOutlook(summary: summary), savingsGoal: summary.monthlySavingsGoal)
     }
 
-    private var monthlySpendRemaining: Decimal {
+    private func monthlySpendRemaining(summary: MonthlyPlanCalculator.Summary) -> Decimal {
         // FIXED BILLS FORMULA UNIFICATION — `max(0, correctedFlexibleSpendingAvailableForOutlook)`
         // is exactly `monthlySpendingBudget`'s own shape (income − corrected Fixed Bills − savings
         // goal − buffer, clamped at 0) PLUS Bill Payment Variance, which the old
         // `moneyAfterBills`/`monthlySpendingBudget` pipeline never applied at all — see this
         // section's own header above.
-        let spendingBudget = max(0, correctedFlexibleSpendingAvailableForOutlook)
+        let spendingBudget = max(0, correctedFlexibleSpendingAvailableForOutlook(summary: summary))
         return MonthlyPlanCalculator.monthlySpendRemaining(
             monthlySpendingBudget: spendingBudget,
-            actualMonthlySpending: monthlyPlanSummary.actualSpentThisMonth
+            actualMonthlySpending: summary.actualSpentThisMonth
         )
     }
 
     var body: some View {
-        NavigationStack {
+        // PERFORMANCE — SNAPSHOT ONCE PER BODY PASS: computes `monthlyPlanSummary` (6 full O(n)
+        // transaction-history scans) exactly ONCE per redraw and threads this single value down
+        // through every section/function that needs it, instead of each of the 10+ former call
+        // sites independently re-triggering the full calculation. See that property's own
+        // PERFORMANCE comment for the root-cause explanation. Refresh behavior is unchanged: this
+        // is still recomputed fresh on every single redraw, exactly as before — only the
+        // WITHIN-one-redraw repetition is removed, not when/how often it recomputes.
+        let summary = monthlyPlanSummary
+        return NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     header
                     favoritesBarSection
 
-                    weeklyCardSection
-                    quickStatsSection
+                    weeklyCardSection(summary: summary)
+                    quickStatsSection(summary: summary)
                     connectedAccountsSection
                     budgetExclusionsSection
-                    monthlyOutlookAndWeekByWeekSection
+                    monthlyOutlookAndWeekByWeekSection(summary: summary)
                     recentActivitySection
                 }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: favoriteDestinations)
@@ -618,7 +642,7 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $isPresentingMonthlyOutlookBreakdown) {
                 MonthlyOutlookBreakdownView(
-                    weeks: monthlyOutlookBreakdown,
+                    weeks: monthlyOutlookBreakdown(summary: summary),
                     connections: plaidConnection.connections,
                     isPrivacyModeEnabled: privacyMode.isEnabled
                 )
@@ -880,7 +904,7 @@ struct DashboardView: View {
     /// user to set up first. CORRECTION (2026-08-18) — the card is no longer itself a tap target;
     /// see `WeeklyLimitEditView`'s own header for why (it's read-only, nothing to edit there).
     @ViewBuilder
-    private var weeklyCardSection: some View {
+    private func weeklyCardSection(summary: MonthlyPlanCalculator.Summary) -> some View {
         if accountRelatedOptionsLoaded {
             if isSecondary {
                 // USER B DASHBOARD PARITY — reads the Primary's own authoritative, already-computed
@@ -932,10 +956,10 @@ struct DashboardView: View {
             } else {
                 SpendingCardView(
                     spent: spentThisWeek,
-                    limit: weeklyLimit,
-                    status: status,
+                    limit: weeklyLimit(summary: summary),
+                    status: status(summary: summary),
                     weekInterval: weekInterval,
-                    monthlyRemaining: monthlySpendRemaining,
+                    monthlyRemaining: monthlySpendRemaining(summary: summary),
                     isPrivacyModeEnabled: privacyMode.isEnabled
                 )
                 .padding(.horizontal, Theme.Spacing.lg)
@@ -1046,7 +1070,7 @@ struct DashboardView: View {
     /// layout naturally produces the required 3-row shape (2 + 2 + 1) from 5 cards in this order —
     /// no separate row-break logic needed.
     @ViewBuilder
-    private var quickStatsSection: some View {
+    private func quickStatsSection(summary: MonthlyPlanCalculator.Summary) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack {
                 Text("Quick Stats")
@@ -1076,7 +1100,7 @@ struct DashboardView: View {
                         StatCard(
                             title: "Planned Weekly Spending",
                             systemIconName: "calendar",
-                            amount: plannedWeeklySpendingForOutlook,
+                            amount: plannedWeeklySpendingForOutlook(summary: summary),
                             subtitle: isPlannedWeeklySpendingCustomForOutlook ? "Custom" : "Automatic",
                             accentColor: Theme.accent,
                             isPrivacyModeEnabled: privacyMode.isEnabled
@@ -1118,7 +1142,7 @@ struct DashboardView: View {
                         StatCard(
                             title: "Planned Monthly Spending",
                             systemIconName: "calendar.badge.clock",
-                            amount: plannedMonthlySpendingForOutlook,
+                            amount: plannedMonthlySpendingForOutlook(summary: summary),
                             subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
                             accentColor: Theme.accentSecondary,
                             isPrivacyModeEnabled: privacyMode.isEnabled
@@ -1139,7 +1163,7 @@ struct DashboardView: View {
                         StatCard(
                             title: "Projected Available After Spend",
                             systemIconName: "banknote.fill",
-                            amount: projectedAvailableAfterSpendForOutlook,
+                            amount: projectedAvailableAfterSpendForOutlook(summary: summary),
                             subtitle: DateRangeHelper.monthDisplayText(for: monthInterval),
                             accentColor: Theme.statusGood,
                             isPrivacyModeEnabled: privacyMode.isEnabled
@@ -1178,7 +1202,7 @@ struct DashboardView: View {
                     StatCard(
                         title: "Saved",
                         systemIconName: "arrow.turn.down.right",
-                        amount: savedThisMonth + monthlySpendRemaining,
+                        amount: savedThisMonth + monthlySpendRemaining(summary: summary),
                         subtitle: "Saved this month + Monthly Remaining",
                         accentColor: Theme.statusGood,
                         isPrivacyModeEnabled: privacyMode.isEnabled
@@ -1407,6 +1431,8 @@ struct DashboardView: View {
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(Theme.textTertiary)
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -1483,7 +1509,7 @@ struct DashboardView: View {
     /// Primary-pushed `dashboard_summary` aggregate This Week/Monthly Spending already use — never a
     /// second calculator, never raw transactions, never more than the single canonical current week.
     @ViewBuilder
-    private var monthlyOutlookAndWeekByWeekSection: some View {
+    private func monthlyOutlookAndWeekByWeekSection(summary: MonthlyPlanCalculator.Summary) -> some View {
         if accountRelatedOptionsLoaded {
             if isSecondary {
                 if secondaryOutlookAuthorized, dashboardSummaryViewModel != nil {
@@ -1492,8 +1518,8 @@ struct DashboardView: View {
                 // else: Primary hasn't shared Monthly Plan, or shared data hasn't loaded yet —
                 // no fake local $0.00 outlook.
             } else {
-                monthlyOutlookSection
-                weekByWeekSection
+                monthlyOutlookSection(summary: summary)
+                weekByWeekSection(summary: summary)
             }
         }
     }
@@ -1503,12 +1529,12 @@ struct DashboardView: View {
     /// the Monthly Outlook card. Built from the exact same `transactions`/`recurringExpenses`
     /// this view's own `monthlyPlanSummary`/`weeklyComparisons` already read, so the per-account
     /// totals can never disagree with the numbers already on screen.
-    private var monthlyOutlookBreakdown: [WeeklyOutlookBreakdown] {
+    private func monthlyOutlookBreakdown(summary: MonthlyPlanCalculator.Summary) -> [WeeklyOutlookBreakdown] {
         WeeklyOutlookBreakdownCalculator.breakdown(
             recurringExpenses: recurringExpenses,
             transactions: transactions,
             in: monthInterval,
-            recommendedWeekly: plannedWeeklySpendingForOutlook,
+            recommendedWeekly: plannedWeeklySpendingForOutlook(summary: summary),
             includePending: includePending,
             autoTrackedAccountIds: autoTrackedAccountIds,
             excludedTransactionIDs: excludedTransactionIDs,
@@ -1516,15 +1542,15 @@ struct DashboardView: View {
         )
     }
 
-    private var monthlyOutlookSection: some View {
+    private func monthlyOutlookSection(summary: MonthlyPlanCalculator.Summary) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Monthly Outlook")
 
             MonthlyOutlookCard(
-                budgetedMonthlySpend: plannedMonthlySpendingForOutlook,
-                actualMonthlySpend: monthlyPlanSummary.actualSpentThisMonth,
-                projectedSavings: projectedMonthlySavingsForOutlook,
-                status: projectedStatusForOutlook,
+                budgetedMonthlySpend: plannedMonthlySpendingForOutlook(summary: summary),
+                actualMonthlySpend: summary.actualSpentThisMonth,
+                projectedSavings: projectedMonthlySavingsForOutlook(summary: summary),
+                status: projectedStatusForOutlook(summary: summary),
                 isPrivacyModeEnabled: privacyMode.isEnabled
             )
             .contentShape(Rectangle())
@@ -1537,19 +1563,19 @@ struct DashboardView: View {
 
     // MARK: - Week-by-week
 
-    private var weeklyComparisons: [MonthlyPlanCalculator.WeeklyPlanComparison] {
-        monthlyPlanSummary.weeklyComparisons
+    private func weeklyComparisons(summary: MonthlyPlanCalculator.Summary) -> [MonthlyPlanCalculator.WeeklyPlanComparison] {
+        summary.weeklyComparisons
     }
 
     /// Defaults to whichever week contains today; falls back to the first week if today somehow
     /// isn't covered (shouldn't happen — `weeksOverlapping` always spans the full month).
-    private var currentWeekComparisonIndex: Int {
-        weeklyComparisons.firstIndex(where: { $0.weekInterval.contains(.now) }) ?? 0
+    private func currentWeekComparisonIndex(summary: MonthlyPlanCalculator.Summary) -> Int {
+        weeklyComparisons(summary: summary).firstIndex(where: { $0.weekInterval.contains(.now) }) ?? 0
     }
 
-    private var effectiveWeekIndex: Int {
-        guard let selectedWeekIndex, weeklyComparisons.indices.contains(selectedWeekIndex) else {
-            return currentWeekComparisonIndex
+    private func effectiveWeekIndex(summary: MonthlyPlanCalculator.Summary) -> Int {
+        guard let selectedWeekIndex, weeklyComparisons(summary: summary).indices.contains(selectedWeekIndex) else {
+            return currentWeekComparisonIndex(summary: summary)
         }
         return selectedWeekIndex
     }
@@ -1560,33 +1586,36 @@ struct DashboardView: View {
     /// WITHOUT its display-only `?? 0` fallback: when no week actually contains today (shouldn't
     /// happen in practice, but must never be silently guessed), this is `nil` and the upload omits
     /// current-plan-week data entirely rather than defaulting to Week 1.
-    private var currentWeekComparisonIndexForUpload: Int? {
-        weeklyComparisons.firstIndex(where: { $0.weekInterval.contains(.now) })
+    private func currentWeekComparisonIndexForUpload(summary: MonthlyPlanCalculator.Summary) -> Int? {
+        weeklyComparisons(summary: summary).firstIndex(where: { $0.weekInterval.contains(.now) })
     }
 
-    private func weekMenuLabel(for index: Int) -> String {
-        guard weeklyComparisons.indices.contains(index) else { return "" }
-        return "Week \(index + 1): \(DateRangeHelper.weekDisplayText(for: weeklyComparisons[index].weekInterval))"
+    private func weekMenuLabel(for index: Int, summary: MonthlyPlanCalculator.Summary) -> String {
+        let comparisons = weeklyComparisons(summary: summary)
+        guard comparisons.indices.contains(index) else { return "" }
+        return "Week \(index + 1): \(DateRangeHelper.weekDisplayText(for: comparisons[index].weekInterval))"
     }
 
-    private var weekByWeekSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+    private func weekByWeekSection(summary: MonthlyPlanCalculator.Summary) -> some View {
+        let comparisons = weeklyComparisons(summary: summary)
+        let weekIndex = effectiveWeekIndex(summary: summary)
+        return VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack {
                 Text("Week-by-Week")
                     .font(Theme.headlineFont)
                     .foregroundStyle(Theme.textPrimary)
                 Spacer()
                 InfoButton(title: "About Week-by-Week", explanation: Self.weekByWeekInfoExplanation)
-                if weeklyComparisons.count > 1 {
+                if comparisons.count > 1 {
                     Menu {
-                        ForEach(weeklyComparisons.indices, id: \.self) { index in
-                            Button(weekMenuLabel(for: index)) {
+                        ForEach(comparisons.indices, id: \.self) { index in
+                            Button(weekMenuLabel(for: index, summary: summary)) {
                                 selectedWeekIndex = index
                             }
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Text("Week \(effectiveWeekIndex + 1)")
+                            Text("Week \(weekIndex + 1)")
                                 .font(Theme.captionFont)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 10, weight: .semibold))
@@ -1597,8 +1626,8 @@ struct DashboardView: View {
             }
             .padding(.horizontal, Theme.Spacing.lg)
 
-            if weeklyComparisons.indices.contains(effectiveWeekIndex) {
-                WeeklyPlanComparisonRow(comparison: weeklyComparisons[effectiveWeekIndex], weekNumber: effectiveWeekIndex + 1, isPrivacyModeEnabled: privacyMode.isEnabled)
+            if comparisons.indices.contains(weekIndex) {
+                WeeklyPlanComparisonRow(comparison: comparisons[weekIndex], weekNumber: weekIndex + 1, isPrivacyModeEnabled: privacyMode.isEnabled)
                     .padding(.horizontal, Theme.Spacing.lg)
             }
         }
@@ -1607,16 +1636,28 @@ struct DashboardView: View {
     // MARK: - Recent activity
 
     private var recentActivitySection: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+        // PERFORMANCE — SNAPSHOT ONCE PER BODY PASS: `activityTabs`/`effectiveActivityTab`/
+        // `recentTransactions` are plain computed properties with no memoization, each re-running
+        // its own full scan of `transactions` (and, for the first two, `plaidConnection.connections`)
+        // on every access. Referencing them repeatedly below — once per `ForEach` row for
+        // `effectiveActivityTab`, three separate times for `recentTransactions` — reran those scans
+        // redundantly on every single body evaluation. Snapshotting each to a local `let` once here
+        // changes no behavior (still recomputed exactly when the section itself re-renders) while
+        // cutting that redundant work to one pass.
+        let tabs = activityTabs
+        let currentTab = effectiveActivityTab
+        let visibleTransactions = recentTransactions
+
+        return VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Recent Activity")
 
             // Only shown once there's more than one source to choose between — a household with
             // no connected accounts yet never sees a single-option "Manual Transactions" tab.
-            if activityTabs.count > 1 {
+            if tabs.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Theme.Spacing.sm) {
-                        ForEach(activityTabs) { tab in
-                            FilterChip(title: tab.label, isSelected: tab == effectiveActivityTab) {
+                        ForEach(tabs) { tab in
+                            FilterChip(title: tab.label, isSelected: tab == currentTab) {
                                 selectedActivityTab = tab
                             }
                         }
@@ -1625,7 +1666,7 @@ struct DashboardView: View {
                 }
             }
 
-            if recentTransactions.isEmpty {
+            if visibleTransactions.isEmpty {
                 EmptyStateCard(
                     systemIconName: "list.bullet.rectangle.portrait.fill",
                     message: emptyActivityMessage
@@ -1634,9 +1675,9 @@ struct DashboardView: View {
             } else {
                 CardBackground {
                     VStack(spacing: Theme.Spacing.sm) {
-                        ForEach(Array(recentTransactions.enumerated()), id: \.element.id) { index, transaction in
+                        ForEach(Array(visibleTransactions.enumerated()), id: \.element.id) { index, transaction in
                             RecentActivityRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled)
-                            if index < recentTransactions.count - 1 {
+                            if index < visibleTransactions.count - 1 {
                                 Divider().overlay(Theme.cardStroke)
                             }
                         }
@@ -1655,6 +1696,7 @@ struct DashboardView: View {
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .foregroundStyle(Theme.accent)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .center)
