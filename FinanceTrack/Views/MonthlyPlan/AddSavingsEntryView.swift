@@ -10,6 +10,7 @@ import SwiftData
 /// persisting here.
 struct AddSavingsEntryView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
     @Environment(\.dismiss) private var dismiss
 
     @State private var amount: Decimal?
@@ -105,8 +106,7 @@ struct AddSavingsEntryView: View {
         // `SavingsSummarySyncService`'s own header). A fresh fetch, not the (nonexistent in this
         // view) `@Query`, so the just-inserted entry is always included regardless of SwiftData's
         // own `@Query` update timing.
-        let allEntries = (try? modelContext.fetch(FetchDescriptor<SavingsEntry>())) ?? []
-        Task { await SavingsSummarySyncService.sync(entries: allEntries) }
+        Task { await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections) }
         dismiss()
     }
 }

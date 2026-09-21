@@ -89,6 +89,7 @@ struct MonthlyPlanView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
     @Environment(PrivacyModeManager.self) private var privacyMode
     /// CLIENT UI PHASE — read-only here, purely to gate the Savings Goal / Saved This Month
     /// sections away from a Secondary who has fallen through to their own owned `MonthlyPlanView`
@@ -786,8 +787,7 @@ struct MonthlyPlanView: View {
     private func deleteSavingsEntry(_ entry: SavingsEntry) {
         modelContext.delete(entry)
         try? modelContext.save()
-        let remainingEntries = (try? modelContext.fetch(FetchDescriptor<SavingsEntry>())) ?? []
-        Task { await SavingsSummarySyncService.sync(entries: remainingEntries) }
+        Task { await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections) }
     }
 
     /// CLIENT UI PHASE — reconciles the server's Monthly Savings aggregate whenever this Primary's
@@ -797,7 +797,7 @@ struct MonthlyPlanView: View {
     /// savings summary of their own to push, and whose Savings sections are hidden above).
     private func syncSavingsSummaryIfNeeded() async {
         guard !isSecondary else { return }
-        await SavingsSummarySyncService.sync(entries: allSavingsEntries)
+        await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections)
     }
 
     // MARK: - Week-by-week comparison

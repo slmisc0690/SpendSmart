@@ -475,7 +475,8 @@ private struct MonthlySavingsSharingSectionView: View {
     /// no SwiftData dependency of its own (see its own header) — this `@Query` lives here, in the
     /// one Primary-only view that already needs it, and is passed down only as a plain closure via
     /// `setGlobalSharing`'s `onSuccessfullyEnabled` hook.
-    @Query private var savingsEntries: [SavingsEntry]
+    @Environment(\.modelContext) private var modelContext
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     private static let category = "monthlySavings"
 
@@ -493,7 +494,7 @@ private struct MonthlySavingsSharingSectionView: View {
                 ) { newValue in
                     Task {
                         await viewModel.setGlobalSharing(category: Self.category, isShared: newValue) {
-                            await SavingsSummarySyncService.sync(entries: savingsEntries)
+                            await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections)
                         }
                     }
                 }
@@ -518,7 +519,8 @@ private struct SavedViaTransferSharingSectionView: View {
     /// Mirrors `MonthlySavingsSharingSectionView`'s own "reconcile on enable" fix — turning this
     /// toggle ON must itself push the Primary's CURRENT aggregate, not wait for the next unrelated
     /// Dashboard lifecycle trigger.
-    @Query private var transactions: [FinanceTransaction]
+    @Environment(\.modelContext) private var modelContext
+    @Environment(PlaidConnectionManager.self) private var plaidConnection
 
     private static let category = "savedViaTransfer"
 
@@ -536,7 +538,7 @@ private struct SavedViaTransferSharingSectionView: View {
                 ) { newValue in
                     Task {
                         await viewModel.setGlobalSharing(category: Self.category, isShared: newValue) {
-                            await SavedViaTransferSummarySyncService.sync(transactions: transactions)
+                            await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections)
                         }
                     }
                 }

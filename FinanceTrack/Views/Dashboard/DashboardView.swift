@@ -296,7 +296,7 @@ struct DashboardView: View {
         await Task.yield()
         guard !Task.isCancelled else { return }
         guard !isSecondary else { return }
-        await SavingsSummarySyncService.sync(entries: savingsEntries)
+        await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections)
     }
 
     /// WEBHOOK-DRIVEN BACKGROUND TRANSACTION SYNC — PULL-ONLY, PHASE 4: brings in whatever the
@@ -353,7 +353,7 @@ struct DashboardView: View {
         await Task.yield()
         guard !Task.isCancelled else { return }
         guard !isSecondary else { return }
-        await SavedViaTransferSummarySyncService.sync(transactions: transactions)
+        await SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections)
     }
 
     /// USER B DASHBOARD PARITY — pushes this Primary's own authoritative Dashboard aggregate
@@ -1193,6 +1193,7 @@ struct DashboardView: View {
                     SharedSavedViaTransferQuickStatCard(
                         primaryUserId: primaryUserId,
                         monthInterval: monthInterval,
+                        monthlyRemaining: sharedDashboardSummary?.monthlySpendRemaining,
                         isPrivacyModeEnabled: privacyMode.isEnabled
                     )
                 }
@@ -1961,13 +1962,17 @@ private struct SharedSavedThisMonthQuickStatCard: View {
 private struct SharedSavedViaTransferQuickStatCard: View {
     let primaryUserId: UUID
     let monthInterval: DateInterval
+    /// The Primary's shared Monthly Remaining, when their Dashboard summary is available — the Saved
+    /// card is Saved This Month plus this, matching the Primary's own Dashboard.
+    let monthlyRemaining: Decimal?
     let isPrivacyModeEnabled: Bool
 
     @State private var viewModel: SharedSavedViaTransferViewModel
 
-    init(primaryUserId: UUID, monthInterval: DateInterval, isPrivacyModeEnabled: Bool) {
+    init(primaryUserId: UUID, monthInterval: DateInterval, monthlyRemaining: Decimal?, isPrivacyModeEnabled: Bool) {
         self.primaryUserId = primaryUserId
         self.monthInterval = monthInterval
+        self.monthlyRemaining = monthlyRemaining
         self.isPrivacyModeEnabled = isPrivacyModeEnabled
         _viewModel = State(initialValue: SharedSavedViaTransferViewModel(primaryUserId: primaryUserId))
     }
@@ -1985,8 +1990,8 @@ private struct SharedSavedViaTransferQuickStatCard: View {
                 StatCard(
                     title: "Saved",
                     systemIconName: "arrow.turn.down.right",
-                    amount: summary.savedViaTransferThisMonth,
-                    subtitle: "Transferred to Savings \u{2022} \(DateRangeHelper.monthDisplayText(for: monthInterval))",
+                    amount: summary.savedViaTransferThisMonth + (monthlyRemaining ?? 0),
+                    subtitle: "Saved this month + Monthly Remaining",
                     accentColor: Theme.statusGood,
                     isPrivacyModeEnabled: isPrivacyModeEnabled
                 )
