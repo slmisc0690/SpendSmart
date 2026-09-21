@@ -34,6 +34,10 @@ struct CalculateTransactionsView: View {
     /// earlier "include excluded transactions too" interpretation that Scott confirmed was wrong —
     /// see this file's git history/session notes for that correction.
     @State private var excludedTransactionsOnly = false
+    /// NOT-EXCLUDED OPTION — narrows the selected account's list to transactions that are NOT Budget
+    /// Excluded (the ones that count toward the budget), so they can be checked off and added up.
+    /// Mutually exclusive with `excludedTransactionsOnly`.
+    @State private var notExcludedTransactionsOnly = false
     /// The ONE global selection set this whole screen keys off of — stable `FinanceTransaction.id`
     /// membership, never a row index, never scoped to a single account. This is what makes
     /// selections survive an account switch, date-filter change, or Excluded Transactions toggle
@@ -73,6 +77,9 @@ struct CalculateTransactionsView: View {
         if excludedTransactionsOnly {
             let excludedAcrossAccounts = CalculateTransactionsCalculator.excludedOnly(from: viewModel.allEligibleTransactions, excludedIDs: budgetExcludedIDs)
             return CalculateTransactionsCalculator.visibleTransactions(from: excludedAcrossAccounts, dateInterval: dateFilter.interval())
+        } else if notExcludedTransactionsOnly {
+            let notExcluded = CalculateTransactionsCalculator.notExcludedOnly(from: currentAccountAllTransactions, excludedIDs: budgetExcludedIDs)
+            return CalculateTransactionsCalculator.visibleTransactions(from: notExcluded, dateInterval: dateFilter.interval())
         } else {
             return CalculateTransactionsCalculator.visibleTransactions(from: currentAccountAllTransactions, dateInterval: dateFilter.interval())
         }
@@ -150,6 +157,7 @@ struct CalculateTransactionsView: View {
                         accountPickerSection
                         dateFilterSection
                         excludedTransactionsToggleSection
+                        notExcludedTransactionsToggleSection
                         selectionControlsSection
                         transactionListSection
                         if !selectedSummaries.isEmpty {
@@ -322,6 +330,29 @@ struct CalculateTransactionsView: View {
         .padding(.horizontal, Theme.Spacing.lg)
     }
 
+    private var notExcludedTransactionsToggleSection: some View {
+        CardBackground(padding: Theme.Spacing.md) {
+            Toggle(isOn: $notExcludedTransactionsOnly) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Not Excluded Transactions")
+                        .font(Theme.bodyFont)
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("Show only transactions that are not excluded, for the selected account, so you can add them up")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
+            .onChange(of: notExcludedTransactionsOnly) { _, isOn in
+                if isOn { excludedTransactionsOnly = false }
+            }
+            .onChange(of: excludedTransactionsOnly) { _, isOn in
+                if isOn { notExcludedTransactionsOnly = false }
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+    }
+
     // MARK: - Selection controls
 
     /// EXCLUDED-ONLY MODE PHASE — "Clear Account" only makes sense while OFF (the list IS one
@@ -385,7 +416,9 @@ struct CalculateTransactionsView: View {
     private var emptyTransactionsMessage: String {
         excludedTransactionsOnly
             ? "No excluded transactions found for this range."
-            : "No transactions found for this account and range."
+            : (notExcludedTransactionsOnly
+                ? "No non-excluded transactions found for this account and range."
+                : "No transactions found for this account and range.")
     }
 
     /// Mirrors `ExpenseListView.daySection`/Activity's own header+CardBackground structure

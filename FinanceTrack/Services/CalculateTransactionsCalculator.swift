@@ -241,6 +241,13 @@ enum CalculateTransactionsCalculator {
         transactions.filter { excludedIDs.contains($0.id) }
     }
 
+    /// The opposite of `excludedOnly`: only the transactions that are NOT in the Budget Exclusions
+    /// set, i.e. the ones that count toward the budget. Used by the "Not Excluded Transactions"
+    /// option, which narrows the selected account's own list.
+    static func notExcludedOnly(from transactions: [FinanceTransaction], excludedIDs: Set<UUID>) -> [FinanceTransaction] {
+        transactions.filter { !excludedIDs.contains($0.id) }
+    }
+
     /// PERFORMANCE PHASE — the fast path for resolving the full selection set: `transactionsByID`
     /// is `CalculateTransactionsViewModel`'s precomputed `[UUID: FinanceTransaction]` index, so
     /// this costs O(selectedCount) — a dictionary lookup per selected id — never an O(allTransactions)
