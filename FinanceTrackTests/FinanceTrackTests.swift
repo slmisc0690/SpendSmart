@@ -37391,7 +37391,8 @@ final class FinanceTrackTests: XCTestCase {
     /// "Saved."
     func testDashboardPassesSavingsPlaidAccountIdsToSavedViaTransferCalculator() throws {
         let source = try Self.dashboardViewSource()
-        XCTAssertTrue(source.contains("SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval, savingsPlaidAccountIds: savingsPlaidAccountIds)"))
+        XCTAssertTrue(source.contains("SavedViaTransferCalculator.totalSavedThisMonth("))
+        XCTAssertTrue(source.contains("savingsPlaidAccountIds: savingsPlaidAccountIds"))
         XCTAssertTrue(source.contains("ConnectedAccountOptionPresenter.options(for: plaidConnection.connections)"))
     }
 

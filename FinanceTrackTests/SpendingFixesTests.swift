@@ -83,6 +83,35 @@ final class SpendingFixesTests: XCTestCase {
         XCTAssertEqual(BudgetCalculator.weeklyActualSpending([toSavings], in: week), 0)
     }
 
+    // MARK: Saved This Month and Saved
+
+    func testSavedThisMonthCombinesManualSavingsTransfersAndDeposits() {
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let entries = [SavingsEntry(amount: 800, date: inWeek)]
+        let transactions = [
+            FinanceTransaction(amount: 300, date: inWeek, type: .transferToSavings, source: .manual, account: checking),
+            FinanceTransaction(amount: 200, date: inWeek, type: .income, source: .manual, account: savings),
+            FinanceTransaction(amount: 100, date: inWeek, type: .transferDeposit, source: .manual, account: checking, transferCounterpartyAccount: savings),
+        ]
+        XCTAssertEqual(SavedViaTransferCalculator.totalSavedThisMonth(entries: entries, transactions: transactions, in: week), 1200)
+    }
+
+    func testTransferBackToCheckingDeductsFromManualSavings() {
+        let savings = Account(name: "Savings", type: .savings)
+        let checking = Account(name: "Checking", type: .checking)
+        let entries = [SavingsEntry(amount: 800, date: inWeek)]
+        let transactions = [FinanceTransaction(amount: 300, date: inWeek, type: .transferDeposit, source: .manual, account: checking, transferCounterpartyAccount: savings)]
+        XCTAssertEqual(SavedViaTransferCalculator.totalSavedThisMonth(entries: entries, transactions: transactions, in: week), 500)
+        XCTAssertEqual(SavedViaTransferCalculator.totalSavedThisMonth(entries: [], transactions: transactions, in: week), 0, "never below zero")
+    }
+
+    func testSavedTileIsSavedThisMonthPlusMonthlyRemaining() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("FinanceTrack/Views/Dashboard/DashboardView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("amount: savedThisMonth + monthlySpendRemaining,"))
+    }
+
     // MARK: Quick Stat subtitles wrap
 
     func testStatCardSubtitleWrapsInsteadOfTruncating() throws {
