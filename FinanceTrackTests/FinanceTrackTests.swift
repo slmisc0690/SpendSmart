@@ -41364,6 +41364,25 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(account.currentBalance, originalBalance, "preparing/reading the calculator's view model must never touch a real account balance")
     }
 
+    // MARK: - SpendAI Voice Input (voice-first open)
+
+    /// Both Info.plist usage-description strings this feature needs are present — without them
+    /// the app would crash the instant it requests microphone/speech-recognition permission.
+    func testInfoPlistHasSpendAIVoiceInputUsageDescriptions() throws {
+        let projectYML = try Self.monthlySavingsSourceFile("../project.yml")
+        XCTAssertTrue(projectYML.contains("NSMicrophoneUsageDescription"))
+        XCTAssertTrue(projectYML.contains("NSSpeechRecognitionUsageDescription"))
+    }
+
+    /// SpendAI must attempt voice input on every open (Scott's explicit request), never only the
+    /// first time — `beginVoiceModeIfPossible` is called from the same `.task` that starts the
+    /// conversation, which runs fresh every time this view is presented.
+    func testAskSpendSmartViewAttemptsVoiceModeOnEveryOpen() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/AskSpendSmart/AskSpendSmartView.swift")
+        XCTAssertTrue(source.contains("await beginVoiceModeIfPossible()"))
+        XCTAssertTrue(source.contains(".onDisappear {\n            voiceInput.stopListening()"))
+    }
+
     /// A denied/restricted permission must fall back to the keyboard SILENTLY — never an error
     /// state blocking the screen, since this is Scott's explicit choice over showing a
     /// go-to-Settings message.
@@ -41375,6 +41394,66 @@ final class FinanceTrackTests: XCTestCase {
         let section = String(source[range.lowerBound...].prefix(500))
         XCTAssertTrue(section.contains("guard state == .authorized, let conversationModel else {"))
         XCTAssertTrue(section.contains("inputMode = .keyboard"))
+    }
+
+    /// The "Keyboard" bypass button must stop the live audio session (never leave the microphone
+    /// running once the user switches away from voice) before switching modes.
+    func testAskSpendSmartViewKeyboardButtonStopsListeningBeforeSwitchingModes() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/AskSpendSmart/AskSpendSmartView.swift")
+        guard let range = source.range(of: "private func switchToKeyboardInput() {") else {
+            return XCTFail("switchToKeyboardInput not found")
+        }
+        let section = String(source[range.lowerBound...].prefix(150))
+        XCTAssertTrue(section.contains("voiceInput.stopListening()"))
+        XCTAssertTrue(section.contains("inputMode = .keyboard"))
+    }
+
+    /// Auto-submit must route through the exact same `send(_:)` every other submission path
+    /// already uses — never a second, duplicated send implementation for the voice path.
+    func testAskSpendSmartViewVoiceAutoSubmitRoutesThroughExistingSendFunction() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/AskSpendSmart/AskSpendSmartView.swift")
+        guard let range = source.range(of: "voiceInput.startListening { [weak conversationModel] transcript in") else {
+            return XCTFail("voiceInput.startListening call site not found")
+        }
+        let section = String(source[range.lowerBound...].prefix(300))
+        XCTAssertTrue(section.contains("inputText = transcript"))
+        XCTAssertTrue(section.contains("send(conversationModel)"))
+    }
+
+    /// The 3-second silence-after-speech window is Scott's own explicit spec — "ample time to
+    /// think" before auto-submitting, not an instant cutoff.
+    func testSpendAIVoiceInputServiceUsesThreeSecondSilenceWindow() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/AskSpendSmart/SpendAIVoiceInputService.swift")
+        XCTAssertTrue(source.contains("try? await Task.sleep(for: .seconds(3))"))
+    }
+
+    /// The silence timer must never fire on an empty transcript — opening SpendAI and saying
+    /// nothing must never auto-submit a blank question.
+    func testSpendAIVoiceInputServiceNeverAutoSubmitsAnEmptyTranscript() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/AskSpendSmart/SpendAIVoiceInputService.swift")
+        guard let range = source.range(of: "private func resetSilenceTimer() {") else {
+            return XCTFail("resetSilenceTimer not found")
+        }
+        let section = String(source[range.lowerBound...].prefix(500))
+        XCTAssertTrue(section.contains("guard !finalText.isEmpty else { return }"))
+    }
+
+    /// Recognition must stay on-device — this app's own established never-send-data-off-device-
+    /// unnecessarily posture — whenever the recognizer supports it.
+    func testSpendAIVoiceInputServicePrefersOnDeviceRecognition() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/AskSpendSmart/SpendAIVoiceInputService.swift")
+        XCTAssertTrue(source.contains("requiresOnDeviceRecognition = true"))
+    }
+
+    /// A denied/unavailable permission must never crash or silently hang `isListening` in a
+    /// stuck-true state — `startListening` must bail out before touching the audio engine.
+    func testSpendAIVoiceInputServiceStartListeningNoOpsWithoutAuthorization() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/AskSpendSmart/SpendAIVoiceInputService.swift")
+        guard let range = source.range(of: "func startListening(onAutoSubmit: @escaping (String) -> Void) {") else {
+            return XCTFail("startListening not found")
+        }
+        let section = String(source[range.lowerBound...].prefix(200))
+        XCTAssertTrue(section.contains("guard permissionState == .authorized || currentPermissionState() == .authorized else { return }"))
     }
 
     // MARK: - ScheduledTransfer / ScheduledTransferPostingService
@@ -41640,7 +41719,116 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("At least one account must be an Account Register you track in this app."))
     }
 
+    // MARK: - ConnectedAccountAliasStore
 
+    private func makeAliasTestDefaults() -> UserDefaults {
+        let suiteName = "ConnectedAccountAliasStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        return defaults
+    }
+
+    func testConnectedAccountAliasStoreReturnsNilWhenNeverSet() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        XCTAssertNil(store.alias(forAccountId: "plaid-1"))
+    }
+
+    func testConnectedAccountAliasStoreSetAndReadRoundTrips() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        store.setAlias("Wells Fargo Savings", forAccountId: "plaid-1")
+        XCTAssertEqual(store.alias(forAccountId: "plaid-1"), "Wells Fargo Savings")
+    }
+
+    func testConnectedAccountAliasStoreTrimsWhitespace() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        store.setAlias("  Wells Fargo Money Market  ", forAccountId: "plaid-1")
+        XCTAssertEqual(store.alias(forAccountId: "plaid-1"), "Wells Fargo Money Market")
+    }
+
+    /// Setting a blank/whitespace-only alias must CLEAR it back to "no alias," never persist an
+    /// empty string as if it were a real alias.
+    func testConnectedAccountAliasStoreClearsOnBlankOrNil() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        store.setAlias("Wells Fargo Savings", forAccountId: "plaid-1")
+        store.setAlias("   ", forAccountId: "plaid-1")
+        XCTAssertNil(store.alias(forAccountId: "plaid-1"))
+        store.setAlias("Wells Fargo Savings", forAccountId: "plaid-1")
+        store.setAlias(nil, forAccountId: "plaid-1")
+        XCTAssertNil(store.alias(forAccountId: "plaid-1"))
+    }
+
+    func testConnectedAccountAliasStoreDoesNotAffectOtherAccountIds() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        store.setAlias("Wells Fargo Savings", forAccountId: "plaid-1")
+        XCTAssertNil(store.alias(forAccountId: "plaid-2"))
+    }
+
+    func testConnectedAccountAliasStoreResolvedLabelPrefersAliasOverFallback() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        store.setAlias("Wells Fargo Savings", forAccountId: "plaid-1")
+        XCTAssertEqual(store.resolvedLabel(accountId: "plaid-1", fallback: "Wells Fargo \u{00B7}\u{00B7}\u{00B7}5678"), "Wells Fargo Savings")
+    }
+
+    func testConnectedAccountAliasStoreResolvedLabelUsesFallbackWhenNoAlias() {
+        let store = ConnectedAccountAliasStore(defaults: makeAliasTestDefaults())
+        XCTAssertEqual(store.resolvedLabel(accountId: "plaid-1", fallback: "Wells Fargo \u{00B7}\u{00B7}\u{00B7}5678"), "Wells Fargo \u{00B7}\u{00B7}\u{00B7}5678")
+    }
+
+    // MARK: - Connected Account Alias wiring (source-scan)
+
+    /// The highest-leverage injection point — `ConnectedAccountOptionPresenter` feeds the
+    /// transfer pickers (AddExpenseView, ScheduledTransfersView), Dashboard, Activity's "Paid
+    /// With" attribution, Calculate Transactions, and SpendAI's filtering, all at once.
+    func testConnectedAccountOptionPresenterAppliesAlias() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Sync/ConnectedAccountOptionPresenter.swift")
+        XCTAssertTrue(source.contains("aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()"))
+        XCTAssertTrue(source.contains("let label = aliases.resolvedLabel(accountId: entry.accountId, fallback: computedLabel)"))
+    }
+
+    func testActivityTabPresenterAppliesAlias() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Sync/ActivityTabPresenter.swift")
+        XCTAssertTrue(source.contains("aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()"))
+        XCTAssertTrue(source.contains("let label = aliases.resolvedLabel(accountId: accountId, fallback: computedLabel)"))
+    }
+
+    func testConnectedAccountsDashboardPresenterAppliesAlias() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Sync/ConnectedAccountsDashboardPresenter.swift")
+        XCTAssertTrue(source.contains("aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()"))
+        XCTAssertTrue(source.contains("institutionName: aliases.resolvedLabel(accountId: balance.accountId, fallback: connection.institutionName)"))
+    }
+
+    func testConnectedAccountsViewOffersRenameAndAppliesAlias() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/ConnectedAccountsView.swift")
+        XCTAssertTrue(source.contains("accountAliasStore.resolvedLabel(accountId: balance.accountId, fallback: computed)"))
+        XCTAssertTrue(source.contains("\"Rename Account\""))
+        XCTAssertTrue(source.contains("accountAliasStore.setAlias(renameText, forAccountId: accountPendingRename.accountId)"))
+        XCTAssertTrue(source.contains("accountAliasStore.setAlias(nil, forAccountId: accountPendingRename.accountId)"))
+    }
+
+    func testAskSpendSmartToolContextAppliesAliasToAccountBalancesAndSearch() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Services/AskSpendSmart/AskSpendSmartToolContext.swift")
+        XCTAssertTrue(source.contains("ConnectedAccountAliasStore().resolvedLabel(accountId: balance.accountId, fallback: balance.name ?? connection.institutionName)"))
+        XCTAssertTrue(source.contains("ConnectedAccountAliasStore().resolvedLabel(accountId: plaidAccountId, fallback: balance.name ?? connection.institutionName)"))
+    }
+
+    func testSettingsViewAutoCalculateListAppliesAlias() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
+        XCTAssertTrue(source.contains("ConnectedAccountAliasStore().resolvedLabel(accountId: balance.accountId, fallback: computedLabel)"))
+    }
+
+    /// Scott's own reported gap: "there is no pencil" — the Rename UI only ever appeared for a
+    /// connection this session had ALREADY live-refreshed; a connection nobody had tapped Refresh
+    /// on yet showed no per-account rows (and therefore no pencil) at all. This confirms the fix
+    /// seeds from the already-persisted `cachedBalances` instead — no network call needed.
+    func testConnectedAccountsViewSeedsBalancesFromCacheSoRenameIsAlwaysReachable() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/ConnectedAccountsView.swift")
+        XCTAssertTrue(source.contains(".task { seedCachedBalancesIfNeeded() }"))
+        guard let range = source.range(of: "private func seedCachedBalancesIfNeeded() {") else {
+            return XCTFail("seedCachedBalancesIfNeeded not found")
+        }
+        let section = String(source[range.lowerBound...].prefix(700))
+        XCTAssertTrue(section.contains("guard balancesByConnectionId[connection.id] == nil, let cached = connection.cachedBalances, !cached.isEmpty else { continue }"), "must never overwrite a connection this session already live-refreshed")
+    }
 }
 
 /// Mirrors the decision rule `refreshPlaidAccounts` (supabase/functions/_shared/plaid.ts) applies
