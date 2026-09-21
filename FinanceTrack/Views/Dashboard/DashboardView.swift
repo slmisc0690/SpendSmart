@@ -217,8 +217,15 @@ struct DashboardView: View {
         )
     }
 
+    /// Everything saved this month: savings added by hand, plus register Transfer To Savings and
+    /// deposits into savings, minus transfers back to checking.
     private var savedThisMonth: Decimal {
-        SavingsCalculator.savedThisMonth(savingsEntries, in: monthInterval)
+        SavedViaTransferCalculator.totalSavedThisMonth(
+            entries: savingsEntries,
+            transactions: transactions,
+            in: monthInterval,
+            savingsPlaidAccountIds: savingsPlaidAccountIds
+        )
     }
 
     private var totalSavingsToDate: Decimal {
@@ -238,10 +245,6 @@ struct DashboardView: View {
                 .filter { $0.subtype?.lowercased() == "savings" }
                 .map(\.id)
         )
-    }
-
-    private var savedViaTransferThisMonth: Decimal {
-        SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// QUICK STATS CUSTOMIZATION — the single source of truth for which Quick Stats show, read
@@ -1175,8 +1178,8 @@ struct DashboardView: View {
                     StatCard(
                         title: "Saved",
                         systemIconName: "arrow.turn.down.right",
-                        amount: savedViaTransferThisMonth,
-                        subtitle: "Transferred to Savings \u{2022} \(DateRangeHelper.monthDisplayText(for: monthInterval))",
+                        amount: savedThisMonth + monthlySpendRemaining,
+                        subtitle: "Saved this month + Monthly Remaining",
                         accentColor: Theme.statusGood,
                         isPrivacyModeEnabled: privacyMode.isEnabled
                     )
@@ -1431,9 +1434,9 @@ struct DashboardView: View {
 
         • Projected Available After Spend — if you stick exactly to your Planned Monthly Spending for the rest of the month, this is how much would be left over on top of that.
 
-        • Saved This Month — money you've logged as savings this month, using Monthly Plan's "Add to Savings."
+        • Saved This Month — everything you've saved this month: savings you added by hand in Monthly Plan ("Savings Added Manually"), plus Transfer To Savings and Deposit to Savings entries in your Account Registers, minus any Transfer to Checking from savings.
 
-        • Saved — money you've moved into a Savings account this month using the "Transfer To Savings" entry type in an Account Register (for example, moving $200 from Checking to Savings). This never changes your Monthly Remaining or Projected Available — it's tracked separately, purely so you can see at a glance how much you've actually put into savings, distinct from "Saved This Month," which tracks manually-logged savings entries instead.
+        • Saved — Saved This Month plus your Monthly Remaining: what you've put into savings so far, plus what is still left to spend or keep this month. It never changes your Monthly Remaining or Projected Available.
 
         Tap the "+" next to "Quick Stats" to choose which of these tiles show — nothing is deleted when you hide one, it just tidies up the grid.
 

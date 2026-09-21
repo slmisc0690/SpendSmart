@@ -53,7 +53,30 @@ enum SavedViaTransferCalculator {
         in month: DateInterval,
         savingsPlaidAccountIds: Set<String> = []
     ) -> Decimal {
-        let total = transactions.reduce(Decimal(0)) { total, transaction in
+        max(netThisMonth(transactions, in: month, savingsPlaidAccountIds: savingsPlaidAccountIds), 0)
+    }
+
+    /// Everything saved this month in one number: savings you added by hand (Monthly Plan's
+    /// "Savings Added Manually") plus the register transfers and deposits above, with transfers back
+    /// out of savings deducted from the whole. Never below zero.
+    static func totalSavedThisMonth(
+        entries: [SavingsEntry],
+        transactions: [FinanceTransaction],
+        in month: DateInterval,
+        savingsPlaidAccountIds: Set<String> = []
+    ) -> Decimal {
+        let manual = SavingsCalculator.savedThisMonth(entries, in: month)
+        let net = netThisMonth(transactions, in: month, savingsPlaidAccountIds: savingsPlaidAccountIds)
+        return max(manual + net, 0)
+    }
+
+    /// The register transfers and deposits' net effect, before any floor at zero.
+    static func netThisMonth(
+        _ transactions: [FinanceTransaction],
+        in month: DateInterval,
+        savingsPlaidAccountIds: Set<String> = []
+    ) -> Decimal {
+        transactions.reduce(Decimal(0)) { total, transaction in
             guard !transaction.isExcludedFromReports,
                   intervalContainsHalfOpen(month, transaction.date)
             else { return total }
@@ -72,6 +95,5 @@ enum SavedViaTransferCalculator {
                 return total
             }
         }
-        return max(total, 0)
     }
 }
