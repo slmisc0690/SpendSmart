@@ -17,7 +17,7 @@ import Foundation
 /// accounts) is already fully isolated regardless, so this can only ever affect what NAME an
 /// account shows, never which account's data is shown.
 struct ConnectedAccountAliasStore {
-    private static let keyPrefix = "connectedAccount.alias.v1"
+    static let keyPrefix = "connectedAccount.alias.v1"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {

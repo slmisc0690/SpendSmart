@@ -346,6 +346,10 @@ enum SpendSmartBackupService {
         let monthlyPlanSettings: [MonthlyPlanSettingsDTO]
         let incomeSources: [IncomeSourceDTO]
         let recurringExpenses: [RecurringExpenseDTO]
+        /// Everything device-only that the fields above don't carry (settings, exclusions, bill and
+        /// transfer links, saved entries, scheduled transfers, favorites, aliases). `nil` in a backup
+        /// written before this section existed.
+        var extras: BackupExtras?
     }
 
     // MARK: - Export: model -> DTO
@@ -388,7 +392,7 @@ enum SpendSmartBackupService {
         let monthlyPlanSettings = try context.fetch(FetchDescriptor<MonthlyPlanSettings>())
         let incomeSources = try context.fetch(FetchDescriptor<IncomeSource>())
         let recurringExpenses = try context.fetch(FetchDescriptor<RecurringExpense>())
-        return makeDocument(
+        var document = makeDocument(
             accounts: accounts,
             transactions: transactions,
             categories: categories,
@@ -398,6 +402,8 @@ enum SpendSmartBackupService {
             recurringExpenses: recurringExpenses,
             createdAt: createdAt
         )
+        document.extras = try makeExtras(context: context)
+        return document
     }
 
     static func encode(_ document: Document) throws -> Data {
@@ -649,6 +655,47 @@ enum SpendSmartBackupService {
         }
 
         try context.save()
+        if let extras = document.extras {
+            try applyExtras(extras, into: context)
+        }
+    }
+
+    // MARK: - Protected backups (never rotated out by the rolling auto-backup)
+
+    static let dailyBackupFilenamePrefix = "SpendSmart-DailyBackup-"
+    static let preRestoreBackupFilenamePrefix = "SpendSmart-PreRestore-"
+
+    /// One verified copy per calendar day, kept for `retentionDays`. Only written after
+    /// `BackupSafetyGuard` has allowed the backup, and never touched by the 5-file auto rotation.
+    static func writeDailyBackup(_ document: Document, to directory: URL, retentionDays: Int = 14, date: Date = .now) throws {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let url = directory.appendingPathComponent("\(dailyBackupFilenamePrefix)\(formatter.string(from: date)).json")
+        try encode(document).write(to: url, options: .atomic)
+        pruneFiles(in: directory, prefix: dailyBackupFilenamePrefix, keepingLatest: max(retentionDays, 1))
+    }
+
+    /// A safety copy taken automatically immediately before any restore, so a restore can be undone.
+    @MainActor
+    @discardableResult
+    static func writePreRestoreBackup(context: ModelContext, to directory: URL = documentsDirectory(), date: Date = .now) throws -> URL {
+        let document = try fetchAndMakeDocument(context: context, createdAt: date)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let url = directory.appendingPathComponent("\(preRestoreBackupFilenamePrefix)\(formatter.string(from: date)).json")
+        try encode(document).write(to: url, options: .atomic)
+        pruneFiles(in: directory, prefix: preRestoreBackupFilenamePrefix, keepingLatest: 5)
+        return url
+    }
+
+    private static func pruneFiles(in directory: URL, prefix: String, keepingLatest count: Int) {
+        let files = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        guard files.count > count else { return }
+        for file in files[count...] { try? FileManager.default.removeItem(at: file) }
     }
 
     // MARK: - Auto backup: file management (pure, directory-parameterized, unit-testable)
