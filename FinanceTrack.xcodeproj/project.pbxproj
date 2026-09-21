@@ -168,6 +168,7 @@
 		A563180A244F87199BCBC577 /* PendingInvitationPopupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62D818F977B4A1F692E5DF92 /* PendingInvitationPopupView.swift */; };
 		A5B5C2C3D063D200D02D85EC /* AskSpendSmartService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C97A8AB014566FB0BB790D3F /* AskSpendSmartService.swift */; };
 		A5BE352E1AFCE8C2D73D143C /* UsersGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0007210113C93BF15855C34F /* UsersGuideView.swift */; };
+		A71F88065AE59B50BC685184 /* SpendAIVoiceInputService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91B254F873E0BA052E7496B /* SpendAIVoiceInputService.swift */; };
 		A754BC4AD61057B063675913 /* MonthlyOutlookBreakdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B89A1420DEF9BC04A5D230 /* MonthlyOutlookBreakdownView.swift */; };
 		A79B5EEEC6EC89A108D39C6A /* TransactionToggleRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B0777136A21A4D982B0B60 /* TransactionToggleRow.swift */; };
 		AA5E9C2F7AE9480464C93B2C /* ConnectedAccountAliasStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1D107BD43D7F54ECF546CC /* ConnectedAccountAliasStore.swift */; };
@@ -219,6 +220,7 @@
 		CBE3C7E6515FF87CE836337E /* SpendSenseSeverity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB2C3B7F8FA606E33CBB4240 /* SpendSenseSeverity.swift */; };
 		CCAFE489DFF581E8AD0B8504 /* CreditCardDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ED0ACB38788D1CAF1B4B87B /* CreditCardDetailView.swift */; };
 		D22A21492553F16A5F682E99 /* AskSpendSmartToolProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5451C5C6363E44CE47C17289 /* AskSpendSmartToolProvider.swift */; };
+		D29091A5049AE8D9BE316911 /* AskSpendSmartConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20F9D18556FA10CCCA2DFA80 /* AskSpendSmartConversationStore.swift */; };
 		D326059E8FACC1F4A46CA617 /* InsightsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2BA38ECA694C9B6900DD14 /* InsightsView.swift */; };
 		D4BFD7CA794986C77BF905B9 /* SpendSenseCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF44414917B07BBD149A42A8 /* SpendSenseCoordinator.swift */; };
 		D594535F0E475217B67D5C29 /* DescriptionPickerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6CE2E59FE9126C72C243B83 /* DescriptionPickerCard.swift */; };
@@ -299,6 +301,7 @@
 		1C9518723E2C0D996E59E0A8 /* AskSpendSmartToolContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskSpendSmartToolContext.swift; sourceTree = "<group>"; };
 		1E07B8595BDB7702A5B6A3EB /* UserDataStoreManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserDataStoreManager.swift; sourceTree = "<group>"; };
 		1FDFACC3C99033BAE18805E2 /* FinanceTrack.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FinanceTrack.entitlements; sourceTree = "<group>"; };
+		20F9D18556FA10CCCA2DFA80 /* AskSpendSmartConversationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskSpendSmartConversationStore.swift; sourceTree = "<group>"; };
 		21184532157037938C565516 /* CreditUtilizationCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreditUtilizationCalculator.swift; sourceTree = "<group>"; };
 		23263B16EAF2D6BA49701859 /* OnboardingPathSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPathSelectionView.swift; sourceTree = "<group>"; };
 		238C94B77B4B392A7DBCEC01 /* PremiumActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PremiumActionButton.swift; sourceTree = "<group>"; };
@@ -440,6 +443,7 @@
 		A82DF2CF6235C8389E0E7BD1 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		A8804351AC2BF1726C31979D /* SavingsCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavingsCalculator.swift; sourceTree = "<group>"; };
 		A8D6543A0ACCD98F61A94346 /* AccountRegisterDepositReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRegisterDepositReviewView.swift; sourceTree = "<group>"; };
+		A91B254F873E0BA052E7496B /* SpendAIVoiceInputService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendAIVoiceInputService.swift; sourceTree = "<group>"; };
 		AA92F639E1144EC97BA7C535 /* AccountSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSettingsView.swift; sourceTree = "<group>"; };
 		AB2C3B7F8FA606E33CBB4240 /* SpendSenseSeverity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendSenseSeverity.swift; sourceTree = "<group>"; };
 		ABA1A361A634A292F96BD4C9 /* TransactionSyncProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionSyncProvider.swift; sourceTree = "<group>"; };
@@ -981,6 +985,7 @@
 			isa = PBXGroup;
 			children = (
 				462C52BECADE76AA314D858A /* AskSpendSmartConversationModel.swift */,
+				20F9D18556FA10CCCA2DFA80 /* AskSpendSmartConversationStore.swift */,
 				2CEC03D6D9B072BBFF639033 /* AskSpendSmartFallbackRouter.swift */,
 				C97A8AB014566FB0BB790D3F /* AskSpendSmartService.swift */,
 				1C9518723E2C0D996E59E0A8 /* AskSpendSmartToolContext.swift */,
@@ -989,6 +994,7 @@
 				C5C3C27135E6439DA1F30523 /* SpendAIQueryOrchestrator.swift */,
 				0787DC43869746B9F7B4ADC7 /* SpendAIQueryPlan.swift */,
 				62951CE34C3CF0CBFD88D18B /* SpendAIResultFormatter.swift */,
+				A91B254F873E0BA052E7496B /* SpendAIVoiceInputService.swift */,
 			);
 			path = AskSpendSmart;
 			sourceTree = "<group>";
@@ -1146,6 +1152,7 @@
 				89B25CB32B22A52B89B3FA91 /* AmountText.swift in Sources */,
 				58CD3650D208BB152B0161C2 /* AppLockView.swift in Sources */,
 				AB273F6AC448C1C301C627F5 /* AskSpendSmartConversationModel.swift in Sources */,
+				D29091A5049AE8D9BE316911 /* AskSpendSmartConversationStore.swift in Sources */,
 				29415B58478A483C02A419E2 /* AskSpendSmartFallbackRouter.swift in Sources */,
 				D6D73EC8C36B4FBED13D86F4 /* AskSpendSmartGlyph.swift in Sources */,
 				A5B5C2C3D063D200D02D85EC /* AskSpendSmartService.swift in Sources */,
@@ -1324,6 +1331,7 @@
 				32893E210E52CC83849E6E4E /* SpendAIQueryOrchestrator.swift in Sources */,
 				E8F39E70E53C3A0032D93237 /* SpendAIQueryPlan.swift in Sources */,
 				6D26439561AD7E982126A783 /* SpendAIResultFormatter.swift in Sources */,
+				A71F88065AE59B50BC685184 /* SpendAIVoiceInputService.swift in Sources */,
 				DFA0ECFD46596F4768FBAF02 /* SpendAIWordmark.swift in Sources */,
 				E0CFA0221BDAB9C395A6DE1D /* SpendSenseAction.swift in Sources */,
 				C235F9D75A6C0A2424C3AC9E /* SpendSenseCategory.swift in Sources */,
