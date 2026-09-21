@@ -246,9 +246,11 @@ enum AskSpendSmartFallbackRouter {
         case .all:
             // COMPOUND-REQUEST PHASE — count, total, AND the itemized list together, never just
             // one of the three. Same 50-item cap and truncation wording as `.list` above.
-            let names = result.transactions.prefix(50).map { "\($0.description) (\(formattedAmount($0.amount)))" }.joined(separator: ", ")
-            let more = result.truncated ? " — showing \(result.transactions.count) of \(result.totalMatchCount)" : ""
-            return "You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase), totaling \(formattedAmount(result.totalAmount)): \(names)\(more)."
+            // Laid out as a list: a count line, one line per transaction with its amount, and the
+            // final total last, so "list them and then give me a total" reads in that order.
+            let lines = result.transactions.prefix(50).map { "\u{2022} \($0.description) \u{2014} \(formattedAmount($0.amount))" }.joined(separator: "\n")
+            let more = result.truncated ? "\nShowing \(result.transactions.count) of \(result.totalMatchCount) transactions." : ""
+            return "You have \(result.totalMatchCount) excluded transaction\(plural)\(rangePhrase):\n\(lines)\(more)\nFinal total: \(formattedAmount(result.totalAmount))"
         }
     }
 
@@ -366,6 +368,37 @@ enum AskSpendSmartFallbackRouter {
         }
 
         return nil
+    }
+
+    // MARK: - Several asks in one question
+
+    /// A question that asks for more than one thing ("how many excluded transactions do I have, and
+    /// what are my bills?") is split into its parts and each part routed on its own. Returns `nil`
+    /// unless there are at least two parts AND every part routes to a plan by itself, so a question
+    /// that only looks like two asks (one clause with no subject of its own) is left to the ordinary
+    /// single-plan path rather than guessed at.
+    static func routeMultiple(_ text: String, now: Date, calendar: Calendar = .current) -> [SpendAIQueryPlan]? {
+        let parts = splitIntoAsks(text)
+        guard parts.count >= 2 else { return nil }
+        var plans: [SpendAIQueryPlan] = []
+        for part in parts {
+            guard let plan = routeGeneralized(part, now: now, calendar: calendar, followUp: nil),
+                  SpendAIQueryPlanValidator.validate(plan)
+            else { return nil }
+            plans.append(plan)
+        }
+        return plans
+    }
+
+    static func splitIntoAsks(_ text: String) -> [String] {
+        var working = text
+        for separator in ["?", ";", " and then ", " then ", " and also ", " also ", " as well as ", ", and ", " and "] {
+            working = working.replacingOccurrences(of: separator, with: "|", options: .caseInsensitive)
+        }
+        return working
+            .split(separator: "|")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private static func mentionsAnyDomain(_ normalized: String) -> Bool {

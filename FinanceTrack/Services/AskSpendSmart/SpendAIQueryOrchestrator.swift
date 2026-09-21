@@ -45,6 +45,16 @@ enum SpendAIQueryOrchestrator {
         planner: any SpendAIQueryPlanning,
         wording: any SpendAIWordingGenerating
     ) async throws -> Outcome {
+        // 0. A question with several distinct asks is answered part by part, each through the same
+        // deterministic path, and the answers are put together in the order asked.
+        if let plans = AskSpendSmartFallbackRouter.routeMultiple(question, now: now), plans.count >= 2 {
+            let outcomes = plans.map { execute($0, context: context) }
+            return Outcome(
+                answer: outcomes.map(\.answer).joined(separator: "\n\n"),
+                followUp: outcomes.last?.followUp
+            )
+        }
+
         // 1. High-confidence local classification FIRST (Phase D's own preferred order) — fast,
         // free, and doesn't depend on the model's own tool-selection/planning judgment at all.
         if let plan = AskSpendSmartFallbackRouter.routeGeneralized(question, now: now, followUp: followUp) {
