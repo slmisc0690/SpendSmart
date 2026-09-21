@@ -42,7 +42,7 @@ enum ActivityTabPresenter {
     /// `.manual` tab, regardless of whether any manual transactions exist, so switching to it is
     /// always possible. Connected tabs are sorted by `account_id` for a stable, deterministic
     /// order across launches.
-    static func tabs(transactions: [FinanceTransaction], connections: [PlaidConnection]) -> [ActivityTab] {
+    static func tabs(transactions: [FinanceTransaction], connections: [PlaidConnection], aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()) -> [ActivityTab] {
         let accountIds = Set(transactions.compactMap { $0.source == .plaid ? $0.plaidAccountId : nil })
         guard !accountIds.isEmpty else { return [.manual] }
 
@@ -70,12 +70,13 @@ enum ActivityTabPresenter {
             // Only disambiguate when two or more VISIBLE tabs would otherwise share this exact
             // label — never appends a mask just because one happens to be available.
             let isAmbiguous = (institutionNameCounts[institutionName] ?? 0) > 1
-            let label: String
+            let computedLabel: String
             if isAmbiguous, let mask = info?.mask, !mask.isEmpty {
-                label = "\(institutionName) \u{00B7}\u{00B7}\u{00B7}\(mask)"
+                computedLabel = "\(institutionName) \u{00B7}\u{00B7}\u{00B7}\(mask)"
             } else {
-                label = institutionName
+                computedLabel = institutionName
             }
+            let label = aliases.resolvedLabel(accountId: accountId, fallback: computedLabel)
             return .connectedAccount(id: accountId, label: label)
         }
 

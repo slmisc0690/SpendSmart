@@ -200,6 +200,12 @@ struct ConnectedAccountsView: View {
     /// confirmation dialog this drives. See that dialog's own doc comment for why nothing is
     /// added locally until a choice is made.
     @State private var pendingDuplicateInstitution: PendingDuplicateInstitution?
+    /// CONNECTED ACCOUNT ALIASES — the account a "Rename" tap is currently editing; `nil` when no
+    /// rename is in progress. See `ConnectedAccountAliasStore`'s own header — Scott's own explicit
+    /// request, after two same-institution accounts (two Wells Fargo entries) were indistinguishable.
+    @State private var accountPendingRename: PlaidAccountBalance?
+    @State private var renameText = ""
+    private let accountAliasStore = ConnectedAccountAliasStore()
     /// Informational banner shown after "Use Existing Connection" successfully removes the
     /// duplicate — points the user at the institution's existing card. Cleared by its own
     /// "Dismiss" button, same pattern as `restoreErrorMessage`'s banner.
@@ -297,6 +303,7 @@ struct ConnectedAccountsView: View {
                 }
             }
             .task { await refreshConnectionStatusFromServer() }
+            .task { seedCachedBalancesIfNeeded() }
             .sheet(isPresented: $isPresentingImportReview) {
                 ImportedTransactionsReviewView()
             }
@@ -316,6 +323,30 @@ struct ConnectedAccountsView: View {
                 Button("Cancel", role: .cancel) { connectionPendingDisconnect = nil }
             } message: {
                 Text("SpendSmart's backend will revoke access to this account. No manual transactions or accounts are affected.")
+            }
+            .alert(
+                "Rename Account",
+                isPresented: Binding(
+                    get: { accountPendingRename != nil },
+                    set: { isPresented in if !isPresented { accountPendingRename = nil } }
+                )
+            ) {
+                TextField("e.g. Wells Fargo Savings", text: $renameText)
+                Button("Save") {
+                    if let accountPendingRename {
+                        accountAliasStore.setAlias(renameText, forAccountId: accountPendingRename.accountId)
+                    }
+                    accountPendingRename = nil
+                }
+                Button("Clear Alias", role: .destructive) {
+                    if let accountPendingRename {
+                        accountAliasStore.setAlias(nil, forAccountId: accountPendingRename.accountId)
+                    }
+                    accountPendingRename = nil
+                }
+                Button("Cancel", role: .cancel) { accountPendingRename = nil }
+            } message: {
+                Text("Only you see this — it never changes what your bank calls the account.")
             }
             // Plaid duplicate-Item detection ("Implement duplicate Item detection" onboarding
             // requirement) — shown when exchange-public-token reports the just-created Item is for
@@ -626,6 +657,39 @@ struct ConnectedAccountsView: View {
         }
     }
 
+    /// RENAME DISCOVERABILITY FIX — `balancesByConnectionId` (which `accountBalanceRow`/the Rename
+    /// pencil require) was previously populated ONLY by an explicit Manual Refresh/Refresh
+    /// Accounts tap, so a connection nobody had refreshed THIS SESSION showed no per-account rows
+    /// at all — Scott's own reported "there is no pencil" (nothing to attach it to). Seeds from
+    /// `PlaidConnectionManager`'s already-persisted `cachedBalances` instead — the exact same
+    /// cache Dashboard's own account cards already trust (see
+    /// `ConnectedAccountsDashboardPresenter.displays(for:)`'s identical conversion) — no network
+    /// call, no rate limit, nothing to wait for. Never overwrites a connection this session HAS
+    /// already live-refreshed (`balancesByConnectionId[connection.id]` already set), so a fresher
+    /// live result is never clobbered by older cached data.
+    private func seedCachedBalancesIfNeeded() {
+        for connection in plaidConnection.connections {
+            guard balancesByConnectionId[connection.id] == nil, let cached = connection.cachedBalances, !cached.isEmpty else { continue }
+            balancesByConnectionId[connection.id] = cached.values
+                .sorted { $0.accountId < $1.accountId }
+                .map { balance in
+                    PlaidAccountBalance(
+                        accountId: balance.accountId,
+                        name: balance.name,
+                        officialName: nil,
+                        mask: balance.mask,
+                        type: balance.type,
+                        subtype: balance.subtype,
+                        currentBalance: balance.currentBalance,
+                        availableBalance: balance.availableBalance,
+                        creditLimit: balance.creditLimit,
+                        isoCurrencyCode: balance.isoCurrencyCode,
+                        unofficialCurrencyCode: balance.unofficialCurrencyCode
+                    )
+                }
+        }
+    }
+
     /// One account's card row — never just a bare currency amount next to a name. Per the
     /// account-type-aware balance requirement, this always shows what KIND of account it is
     /// (`accountTypeLabel`) and labels every amount for what it actually means (`Balance Owed`
@@ -645,6 +709,16 @@ struct ConnectedAccountsView: View {
                         .foregroundStyle(Theme.textTertiary)
                 }
                 Spacer()
+                Button {
+                    renameText = accountAliasStore.alias(forAccountId: balance.accountId) ?? ""
+                    accountPendingRename = balance
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename Account")
             }
 
             let rows = PlaidBalanceFormatter.rows(for: balance)
@@ -671,8 +745,13 @@ struct ConnectedAccountsView: View {
 
     private func balanceDisplayName(_ balance: PlaidAccountBalance) -> String {
         let base = balance.name ?? balance.officialName ?? "Account"
-        guard let mask = balance.mask, !mask.isEmpty else { return base }
-        return "\(base) \u{00B7}\u{00B7}\u{00B7}\(mask)"
+        let computed: String
+        if let mask = balance.mask, !mask.isEmpty {
+            computed = "\(base) \u{00B7}\u{00B7}\u{00B7}\(mask)"
+        } else {
+            computed = base
+        }
+        return accountAliasStore.resolvedLabel(accountId: balance.accountId, fallback: computed)
     }
 
     /// A short, human label for the account's Plaid `type`/`subtype` — e.g. "Credit Card",

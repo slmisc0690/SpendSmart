@@ -59,7 +59,11 @@ enum ConnectedAccountsDashboardPresenter {
     /// row, with `rows` empty and `updatedAt` `nil`, so it shows an honest
     /// "Balance not refreshed yet" instead of silently disappearing from the Dashboard. Accounts
     /// within a connection are sorted by `accountId` purely for stable, deterministic ordering.
-    static func displays(for connections: [PlaidConnection]) -> [Display] {
+    /// `aliases` defaults to the current user's own store (see `ConnectedAccountAliasStore`'s own
+    /// header) — applied only to the per-account row below (the placeholder "no balance cached
+    /// yet" row has no `accountId` to key an alias by, so it always shows the plain institution
+    /// name).
+    static func displays(for connections: [PlaidConnection], aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()) -> [Display] {
         connections.flatMap { connection -> [Display] in
             guard let cached = connection.cachedBalances, !cached.isEmpty else {
                 return [
@@ -93,7 +97,7 @@ enum ConnectedAccountsDashboardPresenter {
                         id: "\(connection.id)-\(balance.accountId)",
                         connectionId: connection.id,
                         accountId: balance.accountId,
-                        institutionName: connection.institutionName,
+                        institutionName: aliases.resolvedLabel(accountId: balance.accountId, fallback: connection.institutionName),
                         // Reuses PlaidBalanceFormatter — the single existing authoritative place
                         // that already knows a credit account's positive balance means "Balance
                         // Owed," never "Current Balance." Every row it produces is shown, matching

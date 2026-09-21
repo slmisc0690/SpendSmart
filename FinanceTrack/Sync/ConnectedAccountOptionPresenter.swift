@@ -25,7 +25,12 @@ struct ConnectedAccountOption: Identifiable, Equatable {
 /// account so a brand-new manual transaction can reference one before any transaction on it
 /// exists.
 enum ConnectedAccountOptionPresenter {
-    static func options(for connections: [PlaidConnection]) -> [ConnectedAccountOption] {
+    /// `aliases` defaults to the current user's own store (see `ConnectedAccountAliasStore`'s own
+    /// header) — a user-set alias always wins over the computed institution-name/mask label, so
+    /// e.g. two Wells Fargo accounts the user has renamed "Wells Fargo Savings"/"Wells Fargo Money
+    /// Market" show exactly that everywhere this presenter is used, not just where the alias was
+    /// set.
+    static func options(for connections: [PlaidConnection], aliases: ConnectedAccountAliasStore = ConnectedAccountAliasStore()) -> [ConnectedAccountOption] {
         var perAccount: [(accountId: String, institutionName: String, mask: String?, subtype: String?)] = []
         for connection in connections {
             guard let cached = connection.cachedBalances else { continue }
@@ -41,12 +46,13 @@ enum ConnectedAccountOptionPresenter {
             .sorted { $0.accountId < $1.accountId }
             .map { entry in
                 let isAmbiguous = (institutionNameCounts[entry.institutionName] ?? 0) > 1
-                let label: String
+                let computedLabel: String
                 if isAmbiguous, let mask = entry.mask, !mask.isEmpty {
-                    label = "\(entry.institutionName) \u{00B7}\u{00B7}\u{00B7}\(mask)"
+                    computedLabel = "\(entry.institutionName) \u{00B7}\u{00B7}\u{00B7}\(mask)"
                 } else {
-                    label = entry.institutionName
+                    computedLabel = entry.institutionName
                 }
+                let label = aliases.resolvedLabel(accountId: entry.accountId, fallback: computedLabel)
                 return ConnectedAccountOption(id: entry.accountId, label: label, subtype: entry.subtype)
             }
     }
@@ -59,5 +65,10 @@ enum ConnectedAccountOptionPresenter {
     static func label(forAccountId accountId: String?, in connections: [PlaidConnection]) -> String? {
         guard let accountId else { return nil }
         return options(for: connections).first { $0.id == accountId }?.label
+    }
+
+    /// The ids of the connected accounts Plaid reports as savings accounts.
+    static func savingsAccountIds(for connections: [PlaidConnection]) -> Set<String> {
+        Set(options(for: connections).filter { $0.subtype?.lowercased() == "savings" }.map(\.id))
     }
 }
