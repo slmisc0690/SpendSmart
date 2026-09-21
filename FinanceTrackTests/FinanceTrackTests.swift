@@ -12175,6 +12175,46 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(outcome.followUp?.domain, .budgetExclusions)
     }
 
+    // MARK: - Several asks in one SpendAI question
+
+    func testExcludedListWithFinalTotalIsALineByLineListEndingInTheTotal() async throws {
+        let fixture = makeBudgetExclusionsDateRangeFixture()
+        let outcome = try await runOrchestrator(
+            question: "Show me a list of all Excluded transactions with their amounts and then a final total",
+            plan: nil, context: fixture.context, now: fixture.now
+        )
+        let lines = outcome.answer.split(separator: "\n").map(String.init)
+        XCTAssertTrue(lines.first?.contains("excluded transaction") == true)
+        XCTAssertEqual(lines.filter { $0.hasPrefix("\u{2022}") }.count, 10, "every excluded transaction gets its own line")
+        XCTAssertTrue(lines.last?.hasPrefix("Final total:") == true, "the total comes last")
+        XCTAssertTrue(lines.last?.contains("130") == true)
+    }
+
+    func testTwoAsksInOneQuestionAreAnsweredSeparatelyInOrder() async throws {
+        let fixture = makeBudgetExclusionsDateRangeFixture()
+        let outcome = try await runOrchestrator(
+            question: "How many excluded transactions do I have? Also how much have I spent this week?",
+            plan: nil, context: fixture.context, now: fixture.now
+        )
+        let parts = outcome.answer.components(separatedBy: "\n\n")
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertTrue(parts[0].contains("excluded transaction"))
+        XCTAssertTrue(parts[1].contains("this week"))
+    }
+
+    func testMultiAskRoutingReturnsOnePlanPerAskInOrder() {
+        let plans = AskSpendSmartFallbackRouter.routeMultiple("How many excluded transactions do I have and what are my bills", now: day(2026, 8, 30))
+        XCTAssertEqual(plans?.map(\.domain), [.budgetExclusions, .bills])
+    }
+
+    func testMultiAskRoutingLeavesASingleAskAloneEvenWhenItLooksLikeTwo() {
+        let now = day(2026, 8, 30)
+        XCTAssertNil(AskSpendSmartFallbackRouter.routeMultiple("How many excluded transactions do I have?", now: now))
+        XCTAssertNil(AskSpendSmartFallbackRouter.routeMultiple("List my excluded transactions with their amounts and then a final total", now: now),
+                     "the second part has no subject of its own, so this stays one compound request")
+        XCTAssertNil(AskSpendSmartFallbackRouter.routeMultiple("How many excluded transactions in June and July", now: now))
+    }
+
     func testEndToEndWeekly() async throws {
         let now = day(2026, 8, 15)
         let account = Account(name: "Checking", type: .checking)
@@ -41196,7 +41236,7 @@ final class FinanceTrackTests: XCTestCase {
     /// automatically restored when the toggle goes back OFF.
     func testAccountPickerOverriddenWhileOnAndRestoredWhenOff() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/CalculateTransactionsView.swift")
-        XCTAssertTrue(source.contains("\"All Accounts — Excluded\""), "ON must present a clear override indicator instead of the normal account picker")
+        XCTAssertTrue(source.contains("Text(\"All Accounts\").tag(Self.allAccountsID)"), "ON keeps the account picker and adds an All Accounts choice, so an account can be chosen in Excluded mode")
         XCTAssertFalse(source.contains("selectedAccountID = nil"), "entering/leaving excluded-only mode must never reset the stored account selection")
     }
 
