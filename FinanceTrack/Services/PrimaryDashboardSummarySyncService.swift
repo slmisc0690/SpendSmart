@@ -80,6 +80,7 @@ enum PrimaryDashboardSummarySyncService {
         warningThreshold: Double,
         autoTrackedAccountIds: Set<String> = [],
         excludedTransactionIDs: Set<UUID> = [],
+        savingsPlaidAccountIds: Set<String> = [],
         backend: HouseholdSharingService = SupabaseHouseholdSharingService()
     ) async {
         let summary = MonthlyPlanCalculator.summary(
@@ -94,7 +95,8 @@ enum PrimaryDashboardSummarySyncService {
             includePending: includePending,
             warningThreshold: warningThreshold,
             autoTrackedAccountIds: autoTrackedAccountIds,
-            excludedTransactionIDs: excludedTransactionIDs
+            excludedTransactionIDs: excludedTransactionIDs,
+            savingsPlaidAccountIds: savingsPlaidAccountIds
         )
 
         // FIXED BILLS UNIFICATION PARITY — replicates `DashboardView`'s own

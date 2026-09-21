@@ -3,9 +3,10 @@ import SwiftData
 
 /// EXCLUDE TRANSACTIONS — lets the user pick specific transactions to leave out of Weekly/Monthly
 /// budget calculations, WITHOUT touching the transaction itself in any way (no field on
-/// `FinanceTransaction` is ever read or written here). Shows local transactions in the BROWSABLE
-/// WINDOW below only — Connected Account, Manual Account, and manually-added expenses alike —
-/// day-grouped exactly like `ExpenseListView`'s own Activity list (`DailyTransactionTotals.groups(for:)`,
+/// `FinanceTransaction` is ever read or written here). Shows only purchases from Connected accounts
+/// turned on under Auto Calculate, plus dashboard +Expense entries, plus anything already excluded so
+/// it stays reachable, inside the BROWSABLE WINDOW below — never register entries, deposits or
+/// transfers — day-grouped exactly like `ExpenseListView`'s own Activity list (`DailyTransactionTotals.groups(for:)`,
 /// the same shared day-bucketing service that screen uses), reusing
 /// `ConnectedTransactionRow`/`TransactionRow` unmodified for each row. A checkmark button is added
 /// ALONGSIDE each row, never inside it.
@@ -51,8 +52,25 @@ struct ExcludeTransactionsView: View {
         return DateInterval(start: start, end: currentMonth.end)
     }
 
+    /// A row is offered only if excluding it could change a total: a purchase or refund from a
+    /// Connected account that is on under Auto Calculate, or a dashboard +Expense (an entry that
+    /// belongs to no register). Register entries never appear. Already-excluded rows always stay listed.
+    static func isSelectable(_ transaction: FinanceTransaction, autoTrackedAccountIds: Set<String>, excludedIDs: Set<UUID>) -> Bool {
+        if excludedIDs.contains(transaction.id) { return true }
+        if transaction.source == .plaid {
+            guard let accountId = transaction.plaidAccountId, autoTrackedAccountIds.contains(accountId) else { return false }
+            return transaction.type == .expense || transaction.type == .refund
+        }
+        guard transaction.account == nil else { return false }
+        return transaction.type == .expense || transaction.type == .refund
+    }
+
     private var browsableTransactions: [FinanceTransaction] {
-        transactions.filter { browsableRange.contains($0.date) }
+        let tracked = settings?.autoTrackedAccountIdSet ?? []
+        return transactions.filter {
+            browsableRange.contains($0.date)
+                && Self.isSelectable($0, autoTrackedAccountIds: tracked, excludedIDs: draftExcludedIDs)
+        }
     }
 
     private var dayGroups: [DailyTransactionTotals.DayGroup] {

@@ -30,21 +30,54 @@ enum BudgetCalculator {
         date >= interval.start && date < interval.end
     }
 
+    /// SAVINGS-TRANSFER STRUCTURAL EXCLUSION — a `.transferWithdrawal` sourced FROM a Savings
+    /// account, or a `.transferDeposit` whose counterparty (the side money left FROM) IS a
+    /// Savings account, must be excluded from Weekly/Monthly spending exactly like
+    /// `.transferToSavings` already is — unconditionally, never gated by the per-entry "Counts
+    /// Toward" toggles. Per Scott's own report: he transferred into Savings (correctly excluded),
+    /// then transferred back out via a plain Transfer Dep, and that leg — being a generic transfer
+    /// type that respects the toggles by design — silently reduced his Monthly Remaining's actual
+    /// spending (a `.transferDeposit` behaves like a refund) because the toggle defaults on. A
+    /// savings-account leg should never be treated as ordinary spending-relevant money movement
+    /// regardless of that toggle, matching `SavedViaTransferCalculator`'s own identical detection
+    /// (same "is this a Savings account" rule: Manual Account typed `.savings`, or a Connected/
+    /// Plaid account whose `subtype` is resolved by the caller into `savingsPlaidAccountIds`).
+    private static func isSavingsAccount(_ account: Account?) -> Bool {
+        account?.type == .savings
+    }
+
+    private static func isSavingsPlaidAccount(_ accountId: String?, savingsPlaidAccountIds: Set<String>) -> Bool {
+        guard let accountId else { return false }
+        return savingsPlaidAccountIds.contains(accountId)
+    }
+
+    private static func isSavingsRelatedTransfer(_ transaction: FinanceTransaction, savingsPlaidAccountIds: Set<String>) -> Bool {
+        switch transaction.type {
+        case .transferWithdrawal:
+            return isSavingsAccount(transaction.account)
+        case .transferDeposit:
+            return isSavingsAccount(transaction.transferCounterpartyAccount)
+                || isSavingsPlaidAccount(transaction.transferCounterpartyPlaidAccountId, savingsPlaidAccountIds: savingsPlaidAccountIds)
+        default:
+            return false
+        }
+    }
+
     /// Net spending for the *weekly* budget: expenses that count toward the weekly budget, minus
     /// refunds that ALSO count toward the weekly budget (a refund is gated the same way its
     /// originating expense would be — never unconditional), within `interval`. Transfers, credit
     /// card payments, balance adjustments, and income never contribute. Respects
     /// `isExcludedFromReports` and, when `includePending` is false, drops pending transactions
     /// entirely.
-    static func weeklySpent(_ transactions: [FinanceTransaction], in interval: DateInterval, includePending: Bool = true) -> Decimal {
-        netSpending(transactions, in: interval, includePending: includePending, context: .weekly)
+    static func weeklySpent(_ transactions: [FinanceTransaction], in interval: DateInterval, includePending: Bool = true, savingsPlaidAccountIds: Set<String> = []) -> Decimal {
+        netSpending(transactions, in: interval, includePending: includePending, context: .weekly, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// Net spending for the *monthly* view: same rules as `weeklySpent`, except an `.expense` row
     /// is gated by `countsTowardMonthlySpending` instead of `countsTowardWeeklyBudget` — the two
     /// flags are independent, so a transaction can count toward one, both, or neither total.
-    static func monthlySpent(_ transactions: [FinanceTransaction], in interval: DateInterval, includePending: Bool = true) -> Decimal {
-        netSpending(transactions, in: interval, includePending: includePending, context: .monthly)
+    static func monthlySpent(_ transactions: [FinanceTransaction], in interval: DateInterval, includePending: Bool = true, savingsPlaidAccountIds: Set<String> = []) -> Decimal {
+        netSpending(transactions, in: interval, includePending: includePending, context: .monthly, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     // MARK: - AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING (read-only query layer)
@@ -63,9 +96,10 @@ enum BudgetCalculator {
         in interval: DateInterval,
         includePending: Bool = true,
         autoTrackedAccountIds: Set<String> = [],
-        excludedTransactionIDs: Set<UUID> = []
+        excludedTransactionIDs: Set<UUID> = [],
+        savingsPlaidAccountIds: Set<String> = []
     ) -> Decimal {
-        weeklyActualBreakdown(transactions, in: interval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs).total
+        weeklyActualBreakdown(transactions, in: interval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds).total
     }
 
     /// Same combination as `weeklyActualSpending`, for the *monthly* total — `monthlySpent`
@@ -75,9 +109,10 @@ enum BudgetCalculator {
         in interval: DateInterval,
         includePending: Bool = true,
         autoTrackedAccountIds: Set<String> = [],
-        excludedTransactionIDs: Set<UUID> = []
+        excludedTransactionIDs: Set<UUID> = [],
+        savingsPlaidAccountIds: Set<String> = []
     ) -> Decimal {
-        monthlyActualBreakdown(transactions, in: interval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs).total
+        monthlyActualBreakdown(transactions, in: interval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds).total
     }
 
     /// Manual Spending vs. Auto-Tracked Spending, broken out separately — lets a caller (e.g. a
@@ -111,11 +146,12 @@ enum BudgetCalculator {
         in interval: DateInterval,
         includePending: Bool = true,
         autoTrackedAccountIds: Set<String> = [],
-        excludedTransactionIDs: Set<UUID> = []
+        excludedTransactionIDs: Set<UUID> = [],
+        savingsPlaidAccountIds: Set<String> = []
     ) -> ActualSpendingBreakdown {
         let eligible = excludeTransactions(excludedTransactionIDs, from: transactions)
         return ActualSpendingBreakdown(
-            manual: weeklySpent(eligible, in: interval, includePending: includePending),
+            manual: weeklySpent(eligible, in: interval, includePending: includePending, savingsPlaidAccountIds: savingsPlaidAccountIds),
             autoTracked: autoTrackedSpending(eligible, in: interval, includePending: includePending, accountIds: autoTrackedAccountIds)
         )
     }
@@ -125,11 +161,12 @@ enum BudgetCalculator {
         in interval: DateInterval,
         includePending: Bool = true,
         autoTrackedAccountIds: Set<String> = [],
-        excludedTransactionIDs: Set<UUID> = []
+        excludedTransactionIDs: Set<UUID> = [],
+        savingsPlaidAccountIds: Set<String> = []
     ) -> ActualSpendingBreakdown {
         let eligible = excludeTransactions(excludedTransactionIDs, from: transactions)
         return ActualSpendingBreakdown(
-            manual: monthlySpent(eligible, in: interval, includePending: includePending),
+            manual: monthlySpent(eligible, in: interval, includePending: includePending, savingsPlaidAccountIds: savingsPlaidAccountIds),
             autoTracked: autoTrackedSpending(eligible, in: interval, includePending: includePending, accountIds: autoTrackedAccountIds)
         )
     }
@@ -212,10 +249,11 @@ enum BudgetCalculator {
         _ transactions: [FinanceTransaction],
         in interval: DateInterval,
         includePending: Bool,
-        context: SpendingContext
+        context: SpendingContext,
+        savingsPlaidAccountIds: Set<String> = []
     ) -> Decimal {
         transactions.reduce(Decimal(0)) { total, transaction in
-            total + (spendingDelta(for: transaction, in: interval, includePending: includePending, context: context) ?? 0)
+            total + (spendingDelta(for: transaction, in: interval, includePending: includePending, context: context, savingsPlaidAccountIds: savingsPlaidAccountIds) ?? 0)
         }
     }
 
@@ -258,18 +296,27 @@ enum BudgetCalculator {
     /// Counted" filter chip — kept here so both screens' chip agrees with that screen's own ring
     /// total above, not with each other's (a transaction can be "counted" for one and not the
     /// other).
-    static func isCounted(_ transaction: FinanceTransaction, includePending: Bool, context: SpendingContext) -> Bool {
+    static func isCounted(_ transaction: FinanceTransaction, includePending: Bool, context: SpendingContext, savingsPlaidAccountIds: Set<String> = []) -> Bool {
         guard !transaction.isExcludedFromReports else { return false }
         guard includePending || !transaction.isPending else { return false }
+        guard transaction.account == nil else { return false }
         // See spendingDelta's own header — a Fixed Bill payment never counts directly.
         guard transaction.linkedRecurringExpense == nil else { return false }
+        // SAVINGS-TRANSFER STRUCTURAL EXCLUSION — see `isSavingsRelatedTransfer`'s own header:
+        // a legacy `.transferWithdrawal` whose Savings leg is the side money left FROM never
+        // counts, structurally, regardless of the per-entry toggles, same as `.transferToSavings`
+        // below.
+        guard !isSavingsRelatedTransfer(transaction, savingsPlaidAccountIds: savingsPlaidAccountIds) else { return false }
         switch transaction.type {
-        case .expense, .refund, .transferWithdrawal, .transferDeposit: return countsToward(transaction, context: context)
-        // SAVED-TRACKING — a Transfer To Savings entry never counts toward weekly/monthly
-        // spending, structurally, regardless of the per-entry toggles — see
-        // `TransactionType.transferToSavings`'s own header for why this is enforced here rather
-        // than left to the user's own toggle choice.
-        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings: return false
+        case .expense, .refund, .transferWithdrawal: return countsToward(transaction, context: context)
+        // SAVED-TRACKING / TRANSFER SIMPLIFICATION — a Transfer To Savings entry never counts
+        // toward weekly/monthly spending, structurally, regardless of the per-entry toggles — see
+        // `TransactionType.transferToSavings`'s own header. `.transferDeposit` ("Transfer to
+        // Checking") is now this type's ONLY deposit-direction transfer concept (Transfer WD was
+        // removed from the picker per Scott's explicit request), so it gets the exact same
+        // unconditional treatment — a transfer between the user's own accounts is never spending,
+        // regardless of which accounts are involved or what the per-entry toggle says.
+        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings, .transferDeposit: return false
         }
     }
 
@@ -345,24 +392,33 @@ enum BudgetCalculator {
     /// Account register entry (no linked bill) and an `isOneTimeBillEntry`-tagged transaction both
     /// count in full, exactly like any other manual transaction — neither was ever priced into
     /// Fixed Bills, so there is nothing to avoid double-counting.
-    private static func spendingDelta(for transaction: FinanceTransaction, in interval: DateInterval, includePending: Bool, context: SpendingContext) -> Decimal? {
+    private static func spendingDelta(for transaction: FinanceTransaction, in interval: DateInterval, includePending: Bool, context: SpendingContext, savingsPlaidAccountIds: Set<String> = []) -> Decimal? {
         guard intervalContainsHalfOpen(interval, transaction.date), !transaction.isExcludedFromReports else { return nil }
         guard includePending || !transaction.isPending else { return nil }
+        // SPENDING SPEC — an entry that belongs to an Account Register never counts toward weekly
+        // or monthly spending. Only a dashboard +Expense (no register) and tracked connected-account
+        // rows count. Registers feed the Saved stat only, which reads them on its own terms.
+        guard transaction.account == nil else { return nil }
         guard transaction.linkedRecurringExpense == nil else { return nil }
+        // SAVINGS-TRANSFER STRUCTURAL EXCLUSION — see `isSavingsRelatedTransfer`'s own header.
+        guard !isSavingsRelatedTransfer(transaction, savingsPlaidAccountIds: savingsPlaidAccountIds) else { return nil }
         switch transaction.type {
         case .expense: return countsToward(transaction, context: context) ? transaction.amount : nil
-        // TRANSFER TRACKING — a Transfer WD entry behaves like an expense (money leaving this
-        // account); a Transfer Dep entry behaves like a refund (money arriving offsets spending).
-        // Both are gated by the SAME per-entry `countsToward` flag `.expense`/`.refund` already
-        // use — unlike `.income`/`.transfer` below, which never count regardless of the toggles —
-        // so the user can decide, per entry, whether a given transfer should affect their totals.
-        case .refund, .transferDeposit: return countsToward(transaction, context: context) ? -transaction.amount : nil
+        case .refund: return countsToward(transaction, context: context) ? -transaction.amount : nil
+        // TRANSFER TRACKING (LEGACY) — a Transfer WD entry behaves like an expense (money leaving
+        // this account), gated by the same per-entry `countsToward` flag `.expense` uses. Removed
+        // from the Type picker (Scott's explicit request), but a transaction saved with it before
+        // that removal must keep calculating exactly as it always did.
         case .transferWithdrawal: return countsToward(transaction, context: context) ? transaction.amount : nil
-        // SAVED-TRACKING — always excluded, unconditionally, never gated by `countsToward` at
-        // all — this is what makes a save structurally incapable of affecting Monthly Remaining/
-        // Projected Available, per Scott's explicit requirement (see
-        // `TransactionType.transferToSavings`'s own header).
-        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings: return nil
+        // SAVED-TRACKING / TRANSFER SIMPLIFICATION — always excluded, unconditionally, never
+        // gated by `countsToward` at all — this is what makes a save structurally incapable of
+        // affecting Monthly Remaining/Projected Available, per Scott's explicit requirement (see
+        // `TransactionType.transferToSavings`'s own header). `.transferDeposit` ("Transfer to
+        // Checking") gets the identical unconditional treatment now that Transfer WD is gone —
+        // it's the sole remaining deposit-direction transfer concept, and per Scott's own framing
+        // a transfer between his own accounts should never behave like a refund reducing spending,
+        // regardless of which accounts are involved or what the per-entry toggle says.
+        case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings, .transferDeposit: return nil
         }
     }
 }

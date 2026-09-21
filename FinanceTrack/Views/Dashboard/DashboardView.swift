@@ -54,10 +54,6 @@ struct DashboardView: View {
     @State private var isPresentingActivity = false
     @State private var isPresentingMonthlyOutlookBreakdown = false
     @State private var isPresentingExcludeTransactionsPicker = false
-    /// ACCOUNT REGISTER AUTO DEPOSIT — REVIEW STEP. True while there are eligible Connected
-    /// deposits still awaiting a decision (see `AccountRegisterAutoDepositService`'s own header);
-    /// drives the `.sheet` presentation of `AccountRegisterDepositReviewView` below.
-    @State private var isPresentingDepositReview = false
     /// Non-`nil` while a Favorites Bar destination's sheet is presented — drives the single
     /// `.sheet(item:)` below (`destinationView(for:)`), which routes to each destination's existing
     /// canonical view unmodified. Never a second copy of any of those screens' own logic.
@@ -193,11 +189,11 @@ struct DashboardView: View {
     }
 
     private var spentThisWeek: Decimal {
-        BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+        BudgetCalculator.weeklyActualSpending(transactions, in: weekInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     private var spentThisMonth: Decimal {
-        BudgetCalculator.monthlyActualSpending(transactions, in: monthInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs)
+        BudgetCalculator.monthlyActualSpending(transactions, in: monthInterval, includePending: includePending, autoTrackedAccountIds: autoTrackedAccountIds, excludedTransactionIDs: excludedTransactionIDs, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// URGENT REGRESSION FIX — computed live via the same shared `effectivePlannedWeeklySpending`
@@ -229,11 +225,23 @@ struct DashboardView: View {
         SavingsCalculator.totalSavingsToDate(savingsEntries)
     }
 
-    /// SAVED-TRACKING — the "Saved" Quick Stat's own value: the current month's total of
-    /// `.transferToSavings` Manual Account entries, entirely independent of `savedThisMonth` above
-    /// (which totals manually-logged `SavingsEntry` rows instead).
+    /// SAVED-TRACKING — the "Saved" Quick Stat's own value: the current month's NET total of
+    /// transfers into vs. out of Savings (see `SavedViaTransferCalculator`'s own header), entirely
+    /// independent of `savedThisMonth` above (which totals manually-logged `SavingsEntry` rows
+    /// instead). `savingsPlaidAccountIds` resolves which Connected accounts count as "Savings" the
+    /// exact same way `AddExpenseView`'s own "Transfer To Savings" destination picker does — via
+    /// Plaid's own reported `subtype`, read from this view's already-cached `plaidConnection`
+    /// (never a new fetch/backend call).
+    private var savingsPlaidAccountIds: Set<String> {
+        Set(
+            ConnectedAccountOptionPresenter.options(for: plaidConnection.connections)
+                .filter { $0.subtype?.lowercased() == "savings" }
+                .map(\.id)
+        )
+    }
+
     private var savedViaTransferThisMonth: Decimal {
-        SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval)
+        SavedViaTransferCalculator.savedThisMonth(transactions, in: monthInterval, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     /// QUICK STATS CUSTOMIZATION — the single source of truth for which Quick Stats show, read
@@ -312,26 +320,7 @@ struct DashboardView: View {
     /// local-only (a plain SwiftData write, no network) — never `async`, unlike the Plaid call
     /// beside it.
     private func postDueScheduledTransfersIfNeeded() {
-        ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext)
-    }
-
-    /// ACCOUNT REGISTER AUTO DEPOSIT — every eligible Connected deposit still awaiting a decision.
-    /// See `AccountRegisterAutoDepositService`'s own header for why this is never fully automatic.
-    private var pendingDeposits: [FinanceTransaction] {
-        AccountRegisterAutoDepositService.pendingDeposits(allTransactions: transactions, connections: plaidConnection.connections, settings: settings)
-    }
-
-    private var pendingDepositDestinations: [Account] {
-        let destinationIds = Set(settings?.accountRegisterAutoDepositAccountIds ?? [])
-        return manualAccounts.filter { destinationIds.contains($0.id) }
-    }
-
-    /// Checked on the same launch/foreground lifecycle points `postDueScheduledTransfersIfNeeded`
-    /// already uses. Presenting the sheet is the only effect here — nothing is created or marked
-    /// reviewed until the user actually confirms inside `AccountRegisterDepositReviewView`.
-    private func presentDepositReviewIfNeeded() {
-        guard !isPresentingDepositReview, !pendingDeposits.isEmpty else { return }
-        isPresentingDepositReview = true
+        ScheduledTransferPostingService.postDueTransfers(scheduledTransfers, modelContext: modelContext, savingsPlaidAccountIds: savingsPlaidAccountIds)
     }
 
     private func pullSyncedTransactionsForConnectedAccountsIfNeeded() async {
@@ -406,7 +395,8 @@ struct DashboardView: View {
             includePending: includePending,
             warningThreshold: settings?.warningThreshold ?? 0.70,
             autoTrackedAccountIds: autoTrackedAccountIds,
-            excludedTransactionIDs: excludedTransactionIDs
+            excludedTransactionIDs: excludedTransactionIDs,
+            savingsPlaidAccountIds: savingsPlaidAccountIds
         )
     }
 
@@ -476,7 +466,8 @@ struct DashboardView: View {
             includePending: includePending,
             warningThreshold: settings?.warningThreshold ?? 0.70,
             autoTrackedAccountIds: autoTrackedAccountIds,
-            excludedTransactionIDs: excludedTransactionIDs
+            excludedTransactionIDs: excludedTransactionIDs,
+            savingsPlaidAccountIds: savingsPlaidAccountIds
         )
     }
 
@@ -645,20 +636,6 @@ struct DashboardView: View {
             .sheet(isPresented: $isPresentingExcludeTransactionsPicker) {
                 ExcludeTransactionsView()
             }
-            .sheet(isPresented: $isPresentingDepositReview) {
-                if let settings {
-                    AccountRegisterDepositReviewView(deposits: pendingDeposits, destinations: pendingDepositDestinations, settings: settings)
-                }
-            }
-            // ACCOUNT REGISTER AUTO DEPOSIT — the `.task`s below only check ONCE per appear, before
-            // `pullSyncedTransactionsForConnectedAccountsIfNeeded()`'s own `.task` has necessarily
-            // finished — a deposit that sync inserts moments later would otherwise sit unnoticed
-            // until the next launch/foreground. `transactions.count` changing (from THIS sync or
-            // any other insert) re-runs the check; `presentDepositReviewIfNeeded()` is idempotent
-            // (guarded on `!isPresentingDepositReview`), so re-triggering costs nothing.
-            .onChange(of: transactions.count) { _, _ in
-                presentDepositReviewIfNeeded()
-            }
             .task {
                 await syncSavingsSummaryIfNeeded()
             }
@@ -674,9 +651,6 @@ struct DashboardView: View {
             .task {
                 postDueScheduledTransfersIfNeeded()
             }
-            .task {
-                presentDepositReviewIfNeeded()
-            }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     Task { await syncSavingsSummaryIfNeeded() }
@@ -684,7 +658,6 @@ struct DashboardView: View {
                     Task { await syncSavedViaTransferSummaryIfNeeded() }
                     Task { await pullSyncedTransactionsForConnectedAccountsIfNeeded() }
                     postDueScheduledTransfersIfNeeded()
-                    presentDepositReviewIfNeeded()
                     // SHARED USER REFRESH PARITY — re-pulls the Secondary's own shared Dashboard
                     // aggregate on foreground-return, same trigger the Primary's own push above
                     // already uses. A no-op for a Primary (`secondaryOutlookPrimaryUserId` is nil,

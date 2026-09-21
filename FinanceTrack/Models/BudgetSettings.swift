@@ -60,6 +60,9 @@ final class BudgetSettings {
     /// with no issue. Same pattern as `autoBackupEnabled`/`cloudBackupRetentionDays` above. Every
     /// read site treats `nil` as "no accounts selected" via `?? []`.
     var autoCalculateConnectedAccountIds: [String]?
+
+    /// Read-only view of the Connected account ids currently on under Auto Calculate.
+    var autoTrackedAccountIdSet: Set<String> { Set(autoCalculateConnectedAccountIds ?? []) }
     /// EXCLUDE TRANSACTIONS — master on/off for the whole feature (Dashboard "Budget Exclusions"
     /// section). Defaults to off/unchecked. When `false`, `excludedTransactionIDs` below is never
     /// applied by any budgeting calculation, even if it still holds a non-empty set from a prior

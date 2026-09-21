@@ -38,8 +38,6 @@ struct AccountSettingsView: View {
     @State private var isPresentingWeeklySpendingEdit = false
     @State private var isPresentingSavingsGoalEdit = false
     @State private var isPresentingCategoryManagement = false
-    @State private var accountRegisterAutoDepositEnabled = false
-    @State private var accountRegisterAutoDepositAccountIds: [UUID] = []
 
     private var settings: BudgetSettings {
         if let existing = settingsList.first {
@@ -90,7 +88,6 @@ struct AccountSettingsView: View {
                     accountRelatedOptionsSection
                     budgetSection
                     monthlyPlanSection
-                    accountRegisterAutoDepositSection
                     securitySection
                     connectedAccountsSection
                     categoriesSection
@@ -111,8 +108,6 @@ struct AccountSettingsView: View {
                 requireFaceIDSetting = settings.requireFaceID
                 hideBalancesByDefault = settings.hideBalancesByDefault
                 biometricAuth.isFaceIDRequired = settings.requireFaceID
-                accountRegisterAutoDepositEnabled = settings.accountRegisterAutoDepositEnabled ?? false
-                accountRegisterAutoDepositAccountIds = settings.accountRegisterAutoDepositAccountIds ?? []
             }
             .sheet(isPresented: $isPresentingAccountRelatedOptions) {
                 AccountRelatedOptionsView()
@@ -385,108 +380,6 @@ struct AccountSettingsView: View {
             }
             .padding(.horizontal, Theme.Spacing.lg)
         }
-    }
-
-    // MARK: - Account Register Auto Deposit
-
-    /// ACCOUNT REGISTER AUTO DEPOSIT — Scott's own explicit request (2026-09-15), revised the same
-    /// day to add a review step: he pointed out that a transfer he makes BY HAND (e.g. Savings to
-    /// Checking) will also show up as an ordinary Plaid deposit once it posts, indistinguishable
-    /// from a real external deposit — so this can never post unattended without risking a double
-    /// count. Off by default; when on, a posted Connected-account deposit is offered for review
-    /// (never posted automatically) the next time the app opens — see
-    /// `AccountRegisterAutoDepositService` for the actual detection/review logic.
-    private var accountRegisterAutoDepositSection: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            DashboardSectionHeader(
-                title: "Account Register Auto Deposit",
-                infoTitle: "About Account Register Auto Deposit",
-                infoExplanation: """
-                    When a Connected account (like a checking account at your bank) receives a \
-                    deposit — a paycheck, a refund, anything money coming in — turning this on \
-                    means you'll be asked to review it the next time you open the app, so you can \
-                    add it to your Account Register(s) with one tap instead of typing it in by hand.
-
-                    You always get to choose which deposits to add and which to skip — for \
-                    example, if you already transferred that same money yourself, you can leave it \
-                    unchecked so it's never added twice.
-
-                    If you have more than one Account Register, choose which one(s) should receive \
-                    confirmed deposits below. Selecting more than one adds the SAME deposit to \
-                    every register you've selected.
-
-                    Turn this off at any time to go back to adding deposits to your register \
-                    yourself, with no review prompts.
-
-                    Example: your paycheck hits your Connected checking account. Next time you \
-                    open SpendSmart, you're asked to confirm it, then it's added to your checking \
-                    Account Register.
-                    """
-            )
-
-            CardBackground {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                    TransactionToggleRow(
-                        title: "Auto Deposit",
-                        subtitle: "Review Connected-account deposits to add to your Account Register(s)",
-                        isOn: Binding(
-                            get: { accountRegisterAutoDepositEnabled },
-                            set: { newValue in
-                                accountRegisterAutoDepositEnabled = newValue
-                                settings.accountRegisterAutoDepositEnabled = newValue
-                                settings.updatedAt = .now
-                            }
-                        )
-                    )
-
-                    if accountRegisterAutoDepositEnabled {
-                        Divider().overlay(Theme.cardStroke)
-
-                        Text("Deposit to:")
-                            .font(Theme.captionFont)
-                            .foregroundStyle(Theme.textSecondary)
-
-                        if allAccounts.isEmpty {
-                            Text("No Account Registers yet. Add one in Account Registers to choose a destination here.")
-                                .font(Theme.captionFont)
-                                .foregroundStyle(Theme.textTertiary)
-                        } else {
-                            ForEach(Array(allAccounts.enumerated()), id: \.element.id) { index, account in
-                                if index > 0 {
-                                    Divider().overlay(Theme.cardStroke)
-                                }
-                                TransactionToggleRow(
-                                    title: account.name,
-                                    subtitle: "Receives auto-deposited entries",
-                                    isOn: Binding(
-                                        get: { isAutoDepositAccountSelected(account.id) },
-                                        set: { newValue in setAutoDepositAccountSelected(account.id, isSelected: newValue) }
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, Theme.Spacing.lg)
-        }
-    }
-
-    private func isAutoDepositAccountSelected(_ accountId: UUID) -> Bool {
-        accountRegisterAutoDepositAccountIds.contains(accountId)
-    }
-
-    private func setAutoDepositAccountSelected(_ accountId: UUID, isSelected: Bool) {
-        var updated = Set(accountRegisterAutoDepositAccountIds)
-        if isSelected {
-            updated.insert(accountId)
-        } else {
-            updated.remove(accountId)
-        }
-        let updatedArray = Array(updated)
-        accountRegisterAutoDepositAccountIds = updatedArray
-        settings.accountRegisterAutoDepositAccountIds = updatedArray
-        settings.updatedAt = .now
     }
 
     // MARK: - Security & Privacy

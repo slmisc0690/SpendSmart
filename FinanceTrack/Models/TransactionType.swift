@@ -12,17 +12,26 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
     case creditCardPayment
     case refund
     case balanceAdjustment
-    /// TRANSFER TRACKING — a Manual Account register entry for money moving OUT of this account
-    /// to another account (manual or connected), tracked distinctly from `.transfer` (which
-    /// remains unused by any current UI) so a Manual Account entry can pick "Transfer WD"
-    /// specifically. Unlike `.income`/`.transfer`, this respects the same
-    /// `countsTowardWeeklyBudget`/`countsTowardMonthlySpending` toggles `.expense`/`.refund` do —
-    /// see `BudgetCalculator.spendingDelta`'s own header — since the user explicitly wants to
-    /// decide per-entry whether a given transfer affects their spending totals.
+    /// TRANSFER TRACKING (LEGACY) — a Manual Account register entry for money moving OUT of this
+    /// account to another account (manual or connected), tracked distinctly from `.transfer`
+    /// (which remains unused by any current UI). Removed from the Type picker (Scott's explicit
+    /// request: fully redundant with "Transfer to Savings"/"Transfer to Checking" for every real
+    /// use he had) — kept in the model only so a transaction saved with it before that removal
+    /// keeps decoding, displaying, and calculating exactly as before. Unlike `.income`/`.transfer`,
+    /// this still respects the same `countsTowardWeeklyBudget`/`countsTowardMonthlySpending`
+    /// toggles `.expense`/`.refund` do — see `BudgetCalculator.spendingDelta`'s own header —
+    /// preserving its original per-entry behavior for that legacy data.
     case transferWithdrawal
-    /// TRANSFER TRACKING — the deposit-direction counterpart to `.transferWithdrawal`: money
-    /// moving INTO this account from another account (manual or connected). Also respects the
-    /// per-entry Weekly/Monthly toggles, same as `.transferWithdrawal`.
+    /// TRANSFER SIMPLIFICATION — the deposit-direction counterpart to `.transferWithdrawal`: money
+    /// moving INTO this account from another account (manual or connected). Displayed to the user
+    /// as "Transfer to Checking" (see `label`) — per Scott's explicit request, a permanent rename,
+    /// not conditional on which accounts are actually involved; kept as `.transferDeposit` at the
+    /// model/rawValue level, matching `.income`/"Deposit"'s own established display-name-vs-
+    /// rawValue split immediately above. Now that Transfer WD is gone, this is the ONLY
+    /// deposit-direction transfer concept left, so — like `.transferToSavings` — it does NOT
+    /// respect the per-entry Weekly/Monthly toggles: `BudgetCalculator.spendingDelta`/`isCounted`
+    /// exclude it unconditionally, since a transfer between the user's own accounts should never
+    /// behave like a refund reducing spending, regardless of which accounts are involved.
     case transferDeposit
     /// SAVED-TRACKING — money moving OUT of this account into a Savings-type Manual Account,
     /// per Scott's explicit request for a dedicated, trackable "Transfer To Savings" type distinct
@@ -44,7 +53,7 @@ enum TransactionType: String, Codable, CaseIterable, Identifiable {
         case .refund: return "Refund"
         case .balanceAdjustment: return "Balance Adjustment"
         case .transferWithdrawal: return "Transfer WD"
-        case .transferDeposit: return "Transfer Dep"
+        case .transferDeposit: return "Transfer to Checking"
         case .transferToSavings: return "Transfer To Savings"
         }
     }

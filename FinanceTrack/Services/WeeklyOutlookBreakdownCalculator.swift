@@ -101,31 +101,9 @@ enum WeeklyOutlookBreakdownCalculator {
         var manualAccountNameByKey: [String: String] = [:]
         var plaidAccountByKey: [String: String] = [:]
 
-        // Manual side — same eligibility BudgetCalculator.spendingDelta applies
-        // (countsTowardWeeklyBudget, isExcludedFromReports, pending policy, half-open interval,
-        // linkedRecurringExpense excluded so bill payments are never double-counted here — they're
-        // captured separately below, via Bill Payment Variance), just grouped by
-        // transaction.account instead of summed into one total.
-        for transaction in eligible {
-            guard transaction.date >= interval.start, transaction.date < interval.end,
-                  !transaction.isExcludedFromReports,
-                  includePending || !transaction.isPending,
-                  transaction.linkedRecurringExpense == nil,
-                  transaction.countsTowardWeeklyBudget,
-                  let account = transaction.account
-            else { continue }
-            let delta: Decimal?
-            switch transaction.type {
-            case .expense, .transferWithdrawal: delta = transaction.amount
-            case .refund, .transferDeposit: delta = -transaction.amount
-            case .income, .transfer, .creditCardPayment, .balanceAdjustment, .transferToSavings: delta = nil
-            }
-            guard let delta else { continue }
-            let key = "manual:\(account.id.uuidString)"
-            spentByKey[key, default: 0] += delta
-            manualAccountByKey[key] = account.id
-            manualAccountNameByKey[key] = account.name
-        }
+        // Manual side — SPENDING SPEC: a register entry never counts toward spending, so nothing
+        // register-owned is grouped here (BudgetCalculator.spendingDelta skips it too). Bill Payment
+        // Variance below still keys by register, since it measures planned vs. paid per bill.
 
         // Auto-Tracked (connected account) side — same eligibility
         // BudgetCalculator.autoTrackedDelta applies, grouped by plaidAccountId.

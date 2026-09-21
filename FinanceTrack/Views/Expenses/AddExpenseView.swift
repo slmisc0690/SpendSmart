@@ -131,6 +131,17 @@ struct AddExpenseView: View {
         return nil
     }
 
+    /// TRANSFER TRACKING — the single resolution `performSave()` uses to populate a saved
+    /// transaction's `account`/`transferCounterpartyAccount`/`transferCounterpartyPlaidAccountId`
+    /// fields, extracted to its own property so the balance-mutation code below reads the exact
+    /// same values it saves.
+    private var resolvedTransferAccounts: (account: Account?, counterpartyAccount: Account?, counterpartyPlaidId: String?) {
+        let transactionAccount = showsTransferAccountPickers ? (selectedAccount ?? manualAccount(from: transferFromSelection) ?? manualAccount(from: transferToSelection)) : selectedAccount
+        let counterpartyAccount = showsTransferAccountPickers ? manualAccount(from: transferCounterpartySelection) : nil
+        let counterpartyPlaidId = showsTransferAccountPickers ? connectedAccountId(from: transferCounterpartySelection) : nil
+        return (transactionAccount, counterpartyAccount, counterpartyPlaidId)
+    }
+
     private let preferenceStore = TransactionPreferenceStore()
     private let descriptionStore = DescriptionStore()
 
@@ -255,7 +266,13 @@ struct AddExpenseView: View {
     /// Account flow, and Transfer To Savings only when a Savings account exists to receive it.
     private var availableTypes: [TransactionType] {
         guard isManualAccountEntry else { return [.expense, .refund, .income] }
-        var types: [TransactionType] = [.expense, .refund, .income, .transferWithdrawal, .transferDeposit]
+        // TRANSFER SIMPLIFICATION — "Transfer WD" removed from the picker per Scott's explicit
+        // request: it fully overlapped "Transfer to Savings"/"Transfer to Checking" (now
+        // `.transferDeposit`'s own renamed label) for every real use he had. `.transferWithdrawal`
+        // itself is NOT removed from `TransactionType` — any transaction already saved with it
+        // keeps decoding, displaying, and calculating exactly as before; it just can't be chosen
+        // for a NEW entry anymore.
+        var types: [TransactionType] = [.expense, .refund, .income, .transferDeposit]
         if hasSavingsAccount { types.append(.transferToSavings) }
         return types
     }
@@ -1025,10 +1042,13 @@ struct AddExpenseView: View {
             // deposit is structurally excluded from every spending total regardless of these
             // flags (see BudgetCalculator's `.income` handling), so showing controls that
             // would have no effect would be misleading — hidden for that type instead. Same
-            // reasoning for Transfer To Savings — `BudgetCalculator.countsToward` forces both
-            // flags to `false` for that type structurally, so it can never affect Monthly
+            // reasoning for Transfer To Savings — `BudgetCalculator.spendingDelta` forces both
+            // flags to have no effect for that type structurally, so it can never affect Monthly
             // Remaining or Projected Available regardless of what these toggles would say.
-            if type != .income && type != .transferToSavings {
+            // TRANSFER SIMPLIFICATION — Transfer to Checking (`.transferDeposit`) now gets the
+            // identical unconditional treatment (Transfer WD, the only type these toggles still
+            // meaningfully gate, was removed from this picker), so it's hidden here too.
+            if type != .income && type != .transferToSavings && type != .transferDeposit {
                 TransactionToggleRow(
                     title: "Counts Toward Weekly Budget",
                     subtitle: type == .expense
@@ -1111,11 +1131,10 @@ struct AddExpenseView: View {
 
         // TRANSFER TRACKING — `transactionAccount` is always the Manual Account this row lives in
         // (the register this screen was opened from); `counterpartyAccount`/`counterpartyPlaidId`
-        // is whichever of From/To is the FAR side, resolved once here so both the transaction's
-        // own fields and the balance mutation below stay in agreement.
-        let transactionAccount = showsTransferAccountPickers ? (selectedAccount ?? manualAccount(from: transferFromSelection) ?? manualAccount(from: transferToSelection)) : selectedAccount
-        let counterpartyAccount = showsTransferAccountPickers ? manualAccount(from: transferCounterpartySelection) : nil
-        let counterpartyPlaidId = showsTransferAccountPickers ? connectedAccountId(from: transferCounterpartySelection) : nil
+        // is whichever of From/To is the FAR side — see `resolvedTransferAccounts`'s own header,
+        // the single place this resolution happens, so both the transaction's own fields and the
+        // balance mutation below stay in agreement with the live Type menu label.
+        let (transactionAccount, counterpartyAccount, counterpartyPlaidId) = resolvedTransferAccounts
 
         // BILL PAYMENT TAGGING — resolved once, right before creating the transaction, so a
         // "New Monthly Bill" only ever creates its `RecurringExpense` on a genuine Save (never on
