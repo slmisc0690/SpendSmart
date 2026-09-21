@@ -159,6 +159,24 @@ final class BackupCompletenessTests: XCTestCase {
         XCTAssertTrue(BackupSafetyGuard.evaluate(new: document(transactions: 300), previous: document(transactions: 500)).isAllowed)
     }
 
+    // MARK: iCloud status line
+
+    func testCloudBackupStatusReportsOffEmptyAndLastBackup() throws {
+        XCTAssertEqual(SpendSmartBackupService.cloudBackupStatus(in: nil), .unavailable)
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        XCTAssertEqual(SpendSmartBackupService.cloudBackupStatus(in: directory), .noBackupYet)
+
+        let name = SpendSmartBackupService.cloudBackupFilename()
+        try Data("{}".utf8).write(to: directory.appendingPathComponent(name))
+        guard case .lastBackup(let date) = SpendSmartBackupService.cloudBackupStatus(in: directory) else {
+            return XCTFail("expected a last-backup status")
+        }
+        XCTAssertLessThan(abs(date.timeIntervalSinceNow), 60)
+    }
+
     // MARK: Protected copies
 
     func testDailyBackupsKeepTheRequestedNumberOfDaysAndAreNotAutoRotated() throws {

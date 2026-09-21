@@ -772,6 +772,22 @@ enum SpendSmartBackupService {
     /// Every iCloud daily-backup filename in `directory`, newest calendar day first — filenames
     /// sort lexically identically to date order (`yyyy-MM-dd`), so no separate date parse is
     /// needed just to order them.
+    /// What the Data Backup screen shows about the iCloud copy: not running at all, running but
+    /// nothing saved yet, or the time of the newest saved backup.
+    enum CloudBackupStatus: Equatable {
+        case unavailable
+        case noBackupYet
+        case lastBackup(Date)
+    }
+
+    static func cloudBackupStatus(in directory: URL?) -> CloudBackupStatus {
+        guard let directory else { return .unavailable }
+        guard let newest = cloudBackupFilenames(in: directory).first else { return .noBackupYet }
+        let modified = try? directory.appendingPathComponent(newest).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        guard let date = modified ?? cloudBackupDate(fromFilename: newest) else { return .noBackupYet }
+        return .lastBackup(date)
+    }
+
     static func cloudBackupFilenames(in directory: URL) -> [String] {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return files

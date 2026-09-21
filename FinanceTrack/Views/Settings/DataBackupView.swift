@@ -36,6 +36,7 @@ struct DataBackupView: View {
     /// `iCloudBackupsSection` show "iCloud Drive isn't available" only when it's genuinely
     /// unreachable, never merely because a fresh install hasn't backed up yet.
     @State private var cloudBackupFilenames: [String]?
+    @State private var cloudBackupStatus: SpendSmartBackupService.CloudBackupStatus?
 
     private var settings: BudgetSettings? { settingsList.first }
 
@@ -291,6 +292,8 @@ struct DataBackupView: View {
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
 
+                    iCloudStatusRow
+
                     Stepper(value: retentionDaysBinding, in: 1...365) {
                         HStack {
                             Text("Days of Backups to Save")
@@ -366,8 +369,31 @@ struct DataBackupView: View {
         )
     }
 
+    @ViewBuilder
+    private var iCloudStatusRow: some View {
+        switch cloudBackupStatus {
+        case nil:
+            EmptyView()
+        case .unavailable:
+            Text("iCloud backup is OFF — your data is only backed up on this phone. Turn on iCloud Drive for SpendSmart to protect it.")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.statusOver)
+        case .noBackupYet:
+            Text("No iCloud backup has been saved yet.")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(Theme.statusWarning)
+        case .lastBackup(let date):
+            let days = Calendar.current.dateComponents([.day], from: date, to: .now).day ?? 0
+            Text("Last iCloud backup: \(date.formatted(date: .abbreviated, time: .shortened))" + (days >= 3 ? " (\(days) days ago)" : ""))
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(days >= 3 ? Theme.statusWarning : Theme.statusGood)
+        }
+    }
+
     private func refreshCloudBackupFilenames() {
-        guard let directory = CloudBackupManager.ubiquityBackupDirectory() else {
+        let directory = CloudBackupManager.ubiquityBackupDirectory()
+        cloudBackupStatus = SpendSmartBackupService.cloudBackupStatus(in: directory)
+        guard let directory else {
             cloudBackupFilenames = []
             return
         }
