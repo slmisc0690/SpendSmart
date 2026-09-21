@@ -454,6 +454,8 @@ struct DataBackupView: View {
     private func performRestore() {
         guard let pendingDocument else { return }
         do {
+            // Automatic safety copy of the current data first, so a restore can be undone.
+            try? SpendSmartBackupService.writePreRestoreBackup(context: modelContext)
             try SpendSmartBackupService.restore(pendingDocument, into: modelContext)
             self.pendingDocument = nil
             refreshAutoBackupFiles()

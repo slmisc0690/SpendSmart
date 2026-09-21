@@ -107,7 +107,18 @@ final class AutoBackupManager {
             guard settings?.autoBackupEnabled ?? true else { return }
 
             let document = try SpendSmartBackupService.fetchAndMakeDocument(context: context)
-            try SpendSmartBackupService.writeAutoBackup(document, to: SpendSmartBackupService.documentsDirectory())
+            let directory = SpendSmartBackupService.documentsDirectory()
+            // Never let a damaged or emptied store overwrite or push out a good backup.
+            let previous = BackupSafetyGuard.loadLatest(
+                in: directory,
+                prefixes: [SpendSmartBackupService.autoBackupFilenamePrefix, SpendSmartBackupService.dailyBackupFilenamePrefix]
+            )
+            if case .reject(let reason) = BackupSafetyGuard.evaluate(new: document, previous: previous) {
+                lastBackupError = "Backup skipped to protect your last good backup: \(reason)."
+                return
+            }
+            try SpendSmartBackupService.writeAutoBackup(document, to: directory)
+            try? SpendSmartBackupService.writeDailyBackup(document, to: directory)
             lastBackupError = nil
         } catch {
             // Auto-backup failures are silent-but-visible: never interrupt the user's flow, but

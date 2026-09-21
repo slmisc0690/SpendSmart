@@ -119,6 +119,12 @@ final class CloudBackupManager {
             }
 
             let document = try SpendSmartBackupService.fetchAndMakeDocument(context: context)
+            // Never let a damaged or emptied store overwrite or push out a good backup.
+            let previous = BackupSafetyGuard.loadLatest(in: directory, prefixes: [SpendSmartBackupService.cloudBackupFilenamePrefix])
+            if case .reject(let reason) = BackupSafetyGuard.evaluate(new: document, previous: previous) {
+                lastBackupError = "iCloud backup skipped to protect your last good backup: \(reason)."
+                return
+            }
             let data = try SpendSmartBackupService.encode(document)
             let url = directory.appendingPathComponent(SpendSmartBackupService.cloudBackupFilename())
             try data.write(to: url, options: .atomic)
