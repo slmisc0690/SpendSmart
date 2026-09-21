@@ -867,6 +867,17 @@ struct AddExpenseView: View {
         }
     }
 
+    /// The name shown for the selected transfer account. A Connected account reopened from a saved
+    /// entry carries only a placeholder label, so its real name (or the user's alias) is looked up
+    /// from the connected accounts instead.
+    private func displayLabel(for selection: TransferAccountSelection) -> String? {
+        if case .connected(let id, _) = selection,
+           let match = connectedAccountOptions.first(where: { $0.id == id }) {
+            return match.label
+        }
+        return selection.label
+    }
+
     private func transferAccountDropdown(title: String, selection: Binding<TransferAccountSelection>, options: [TransferAccountSelection]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -878,9 +889,9 @@ struct AddExpenseView: View {
                 }
             } label: {
                 HStack(spacing: 4) {
-                    Text(selection.wrappedValue.label ?? "Select Account")
+                    Text(displayLabel(for: selection.wrappedValue) ?? "Select Account")
                         .font(Theme.bodyFont)
-                        .foregroundStyle(selection.wrappedValue.label == nil ? Theme.textTertiary : Theme.textPrimary)
+                        .foregroundStyle(displayLabel(for: selection.wrappedValue) == nil ? Theme.textTertiary : Theme.textPrimary)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.textTertiary)
