@@ -161,6 +161,12 @@ struct AddExpenseView: View {
     /// this screen is in can never drift from how it was actually opened.
     private let isManualAccountEntry: Bool
 
+    /// FULL TRANSACTION EDIT (2026-09-17, Scott's own explicit request) — set only by
+    /// `init(editing:)` below. Non-nil means `performSave()` mutates this EXISTING row in place
+    /// (reversing its OLD balance effect first, then applying the NEW one) instead of inserting a
+    /// brand-new `FinanceTransaction` — see that method's own header for the full reasoning.
+    private let existingTransaction: FinanceTransaction?
+
     /// Opening "Add Expense" from a specific account's own detail/register screen preselects
     /// that account. The four option toggles start from that account's own remembered
     /// preferences for the initial type (`.expense`) if any exist (see
@@ -170,6 +176,7 @@ struct AddExpenseView: View {
     /// `self` exists and can't call an instance method yet.
     init(preselectedAccount: Account? = nil) {
         isManualAccountEntry = preselectedAccount != nil
+        existingTransaction = nil
         _selectedAccount = State(initialValue: preselectedAccount)
         let resolved = TransactionPreferenceStore().resolvedPreferences(
             accountID: preselectedAccount?.id,
@@ -185,6 +192,85 @@ struct AddExpenseView: View {
         _countsTowardMonthlySpending = State(initialValue: resolved.countsTowardMonthlySpending)
         _isExcludedFromReports = State(initialValue: resolved.isExcludedFromReports)
         _isPending = State(initialValue: resolved.isPending)
+    }
+
+    /// FULL TRANSACTION EDIT (2026-09-17, Scott's own explicit request) — reuses this exact same
+    /// rich UI/validation/bill-tagging/transfer-picker machinery to edit an ALREADY-SAVED Manual
+    /// Account register entry, rather than building a second, parallel editor (which would risk
+    /// the two drifting apart — see `TransactionAmountEditView`/`TransactionBillTagEditView`/
+    /// `CheckNumberEditView`'s own headers, each of which deliberately stays narrow rather than
+    /// duplicating this screen's picker/validation logic). Only ever reachable for a type this
+    /// screen's own Type picker can represent — see `AddExpenseView.isEligibleForFullEdit(_:)` —
+    /// never a `.balanceAdjustment`/`.creditCardPayment`/`.transfer` entry, which this screen has
+    /// no Type-menu choice for and would silently corrupt if the user picked any other type.
+    /// `isManualAccountEntry` is always true here: editing is only ever reached from a Manual
+    /// Account's own register (see `ManualAccountDetailView.transactionOptionsMenu`).
+    init(editing transaction: FinanceTransaction) {
+        existingTransaction = transaction
+        isManualAccountEntry = true
+        _amount = State(initialValue: transaction.amount)
+        _note = State(initialValue: transaction.note)
+        _date = State(initialValue: transaction.date)
+        _type = State(initialValue: transaction.type)
+        _selectedAccount = State(initialValue: transaction.account)
+        _selectedCategory = State(initialValue: transaction.category)
+        _countsTowardWeeklyBudget = State(initialValue: transaction.countsTowardWeeklyBudget)
+        _countsTowardMonthlySpending = State(initialValue: transaction.countsTowardMonthlySpending)
+        _isExcludedFromReports = State(initialValue: transaction.isExcludedFromReports)
+        _isPending = State(initialValue: transaction.isPending)
+        if let checkNumber = transaction.checkNumber {
+            _isCheckPayment = State(initialValue: true)
+            _checkNumber = State(initialValue: checkNumber)
+        }
+        // BILL PAYMENT TAGGING — reverse-derives the picker's own choice from the stored fields in
+        // the EXACT same order `TransactionBillTagEditView.init` already established as
+        // authoritative (linked bill, then label-only timing, then one-time, then
+        // not-included-in-monthly) — never a second, differently-ordered derivation.
+        if transaction.type == .expense {
+            if let bill = transaction.linkedRecurringExpense {
+                _billTagChoice = State(initialValue: .existingBill)
+                _selectedExistingBillID = State(initialValue: bill.id)
+                _selectedExistingBillTiming = State(initialValue: bill.timing)
+            } else if let timing = transaction.billTiming {
+                _billTagChoice = State(initialValue: .existingBill)
+                _selectedExistingBillTiming = State(initialValue: timing)
+            } else if transaction.isOneTimeBillEntry {
+                _billTagChoice = State(initialValue: .oneTimeEntry)
+            } else if transaction.isExcludedFromReports {
+                _billTagChoice = State(initialValue: .notIncludedInMonthly)
+            }
+        }
+        // TRANSFER TRACKING — reverse-derives From/To from the stored account/counterparty
+        // fields, the exact inverse of what `resolvedTransferAccounts` computes going forward.
+        if transaction.type == .transferWithdrawal || transaction.type == .transferToSavings {
+            _transferFromSelection = State(initialValue: transaction.account.map { .manual($0) } ?? .none)
+            _transferToSelection = State(initialValue: Self.counterpartySelection(for: transaction))
+        } else if transaction.type == .transferDeposit {
+            _transferToSelection = State(initialValue: transaction.account.map { .manual($0) } ?? .none)
+            _transferFromSelection = State(initialValue: Self.counterpartySelection(for: transaction))
+        }
+    }
+
+    /// See `init(editing:)` above — resolves whichever counterparty a stored transfer transaction
+    /// actually has (a local Manual Account, or a Connected/Plaid reference tag). The label shown
+    /// for a Connected counterparty is only ever this collapsed placeholder — the live picker
+    /// resolves the real label (via `ConnectedAccountOptionPresenter`) the moment it's opened, so
+    /// nothing here needs to duplicate that lookup just for an initial display string.
+    private static func counterpartySelection(for transaction: FinanceTransaction) -> TransferAccountSelection {
+        if let counterparty = transaction.transferCounterpartyAccount { return .manual(counterparty) }
+        if let plaidId = transaction.transferCounterpartyPlaidAccountId { return .connected(id: plaidId, label: "Connected Account") }
+        return .none
+    }
+
+    /// Gate for offering "Edit Transaction" at all — see `init(editing:)`'s own header for why a
+    /// `.balanceAdjustment`/`.creditCardPayment`/`.transfer` entry must never reach this screen.
+    static func isEligibleForFullEdit(_ transaction: FinanceTransaction) -> Bool {
+        switch transaction.type {
+        case .expense, .refund, .income, .transferWithdrawal, .transferDeposit, .transferToSavings:
+            return true
+        case .transfer, .creditCardPayment, .balanceAdjustment:
+            return false
+        }
     }
 
     /// Reloads the four toggles for the current `type` and `account` (or `selectedAccount` if
@@ -341,6 +427,7 @@ struct AddExpenseView: View {
     private var isValid: Bool { validationMessages.isEmpty }
 
     private var navigationTitle: String {
+        if existingTransaction != nil { return "Edit Transaction" }
         switch type {
         case .expense: return "Add Expense"
         case .refund: return "Add Refund"
@@ -461,7 +548,7 @@ struct AddExpenseView: View {
             }
             .interactiveDismissDisabled(shouldConfirmDiscard)
             .confirmationDialog(
-                "Discard unfinished entry?",
+                existingTransaction != nil ? "Discard changes?" : "Discard unfinished entry?",
                 isPresented: $isPresentingDiscardConfirmation,
                 titleVisibility: .visible
             ) {
@@ -1172,31 +1259,86 @@ struct AddExpenseView: View {
         // Monthly totals regardless of the Options toggle, so this choice always means exactly
         // what its label says — register-only tracking, zero effect on any total.
         let effectiveIsExcludedFromReports = isExcludedFromReports || billTagChoice == .notIncludedInMonthly
+        let resolvedAccount = showsTransferAccountPickers ? transactionAccount : selectedAccount
 
-        let transaction = FinanceTransaction(
-            amount: amount,
-            date: date,
-            type: type,
-            source: .manual,
-            note: note,
-            countsTowardWeeklyBudget: countsTowardWeeklyBudget,
-            countsTowardMonthlySpending: countsTowardMonthlySpending,
-            isExcludedFromReports: effectiveIsExcludedFromReports,
-            isPending: isPending,
-            // `plaidAccountId` here is only ever the optional "card/account used" reference tag
-            // from `connectedAccountSection` (nil in the Manual Account flow) — never confused
-            // with a Plaid-imported transaction's own `plaidAccountId`, since `source` stays
-            // `.manual` regardless.
-            plaidAccountId: isManualAccountEntry ? nil : selectedConnectedAccountId,
-            account: showsTransferAccountPickers ? transactionAccount : selectedAccount,
-            category: selectedCategory,
-            linkedRecurringExpense: linkedRecurringExpense,
-            isOneTimeBillEntry: isOneTimeBillEntry,
-            billTiming: billTiming,
-            transferCounterpartyAccount: counterpartyAccount,
-            transferCounterpartyPlaidAccountId: counterpartyPlaidId,
-            checkNumber: isCheckPayment ? trimmedCheckNumber : nil
-        )
+        let transaction: FinanceTransaction
+        if let existingTransaction {
+            // FULL TRANSACTION EDIT — see `init(editing:)`'s own header. Reverse the OLD balance
+            // effect using the row's OWN stored fields BEFORE anything is overwritten (captured
+            // into plain locals first, exactly the same "read the stored fields, never the live
+            // account balance" discipline `ManualTransactionDeletionService.reverseBalanceEffect`
+            // already established — this IS that same reversal, restricted to the 6 types this
+            // screen can ever represent, see `isEligibleForFullEdit`), THEN mutate every field in
+            // place, THEN apply the NEW balance effect below. Never a raw `context.insert` — this
+            // is the same row, never a duplicate.
+            let oldType = existingTransaction.type
+            let oldAmount = existingTransaction.amount
+            let oldAccount = existingTransaction.account
+            let oldCounterparty = existingTransaction.transferCounterpartyAccount
+            if isManualAccountEntry {
+                switch oldType {
+                case .expense:
+                    if let oldAccount { AccountBalanceManager.applyRefund(amount: oldAmount, to: oldAccount) }
+                case .refund:
+                    if let oldAccount { AccountBalanceManager.applyExpense(amount: oldAmount, to: oldAccount) }
+                case .income:
+                    if let oldAccount { AccountBalanceManager.applyExpense(amount: oldAmount, to: oldAccount) }
+                case .transferWithdrawal, .transferToSavings:
+                    if let oldAccount { AccountBalanceManager.applyRefund(amount: oldAmount, to: oldAccount) }
+                    if let oldCounterparty { AccountBalanceManager.applyExpense(amount: oldAmount, to: oldCounterparty) }
+                case .transferDeposit:
+                    if let oldAccount { AccountBalanceManager.applyExpense(amount: oldAmount, to: oldAccount) }
+                    if let oldCounterparty { AccountBalanceManager.applyRefund(amount: oldAmount, to: oldCounterparty) }
+                case .transfer, .creditCardPayment, .balanceAdjustment:
+                    break
+                }
+            }
+
+            existingTransaction.amount = amount
+            existingTransaction.date = date
+            existingTransaction.type = type
+            existingTransaction.note = note
+            existingTransaction.countsTowardWeeklyBudget = countsTowardWeeklyBudget
+            existingTransaction.countsTowardMonthlySpending = countsTowardMonthlySpending
+            existingTransaction.isExcludedFromReports = effectiveIsExcludedFromReports
+            existingTransaction.isPending = isPending
+            existingTransaction.account = resolvedAccount
+            existingTransaction.category = selectedCategory
+            existingTransaction.linkedRecurringExpense = linkedRecurringExpense
+            existingTransaction.isOneTimeBillEntry = isOneTimeBillEntry
+            existingTransaction.billTiming = billTiming
+            existingTransaction.transferCounterpartyAccount = counterpartyAccount
+            existingTransaction.transferCounterpartyPlaidAccountId = counterpartyPlaidId
+            existingTransaction.checkNumber = isCheckPayment ? trimmedCheckNumber : nil
+            existingTransaction.updatedAt = .now
+            transaction = existingTransaction
+        } else {
+            transaction = FinanceTransaction(
+                amount: amount,
+                date: date,
+                type: type,
+                source: .manual,
+                note: note,
+                countsTowardWeeklyBudget: countsTowardWeeklyBudget,
+                countsTowardMonthlySpending: countsTowardMonthlySpending,
+                isExcludedFromReports: effectiveIsExcludedFromReports,
+                isPending: isPending,
+                // `plaidAccountId` here is only ever the optional "card/account used" reference tag
+                // from `connectedAccountSection` (nil in the Manual Account flow) — never confused
+                // with a Plaid-imported transaction's own `plaidAccountId`, since `source` stays
+                // `.manual` regardless.
+                plaidAccountId: isManualAccountEntry ? nil : selectedConnectedAccountId,
+                account: resolvedAccount,
+                category: selectedCategory,
+                linkedRecurringExpense: linkedRecurringExpense,
+                isOneTimeBillEntry: isOneTimeBillEntry,
+                billTiming: billTiming,
+                transferCounterpartyAccount: counterpartyAccount,
+                transferCounterpartyPlaidAccountId: counterpartyPlaidId,
+                checkNumber: isCheckPayment ? trimmedCheckNumber : nil
+            )
+            modelContext.insert(transaction)
+        }
         #if DEBUG
         // A single `print` call (one write, effectively atomic) rather than four separate calls —
         // four discrete calls issued in the same tick were observed to occasionally lose a line
@@ -1212,7 +1354,6 @@ struct AddExpenseView: View {
         [MonthlySpendDebug] weekly calculator included=\(weeklyIncluded)
         """)
         #endif
-        modelContext.insert(transaction)
 
         // Only the Manual Account flow ever has a local Account to update — the general flow's
         // optional connected-account tag is a reference-only identifier, never a local balance to

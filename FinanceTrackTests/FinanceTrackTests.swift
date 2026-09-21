@@ -34208,7 +34208,7 @@ final class FinanceTrackTests: XCTestCase {
     /// corrects the NEW batch path, not the pre-existing single-entry flow.
     func testExistingNormalSingleEntryOwnershipConventionUnchanged() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
-        guard let range = source.range(of: "let transaction = FinanceTransaction(") else {
+        guard let range = source.range(of: "transaction = FinanceTransaction(") else {
             XCTFail("FinanceTransaction construction not found in AddExpenseView"); return
         }
         let scoped = String(source[range.lowerBound...].prefix(500))
@@ -36756,7 +36756,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private func transactionOptionsMenu") else {
             XCTFail("transactionOptionsMenu not found"); return
         }
-        let body = String(source[range.lowerBound...].prefix(700))
+        let body = String(source[range.lowerBound...].prefix(1300))
         XCTAssertTrue(body.contains("transaction.type == .expense"), "the Edit Bill Tag menu item must be hidden for a deposit")
     }
 
@@ -37017,7 +37017,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private func transactionOptionsMenu") else {
             XCTFail("transactionOptionsMenu not found"); return
         }
-        let body = String(source[range.lowerBound...].prefix(950))
+        let body = String(source[range.lowerBound...].prefix(1750))
         XCTAssertTrue(body.contains("TransactionAmountEditView.isEligible(transaction)"))
         XCTAssertTrue(body.contains("\"Edit Amount\""))
     }
@@ -37545,6 +37545,132 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(BudgetCalculator.monthlySpent([historicalWithdrawal], in: month), 0)
     }
 
+    // MARK: - Full Transaction Edit (2026-09-17, Scott's own explicit request)
+    //
+    // "Edit Transaction" in the Account Register's options menu reuses AddExpenseView's own rich
+    // UI/validation/bill-tagging/transfer-picker machinery via a new `init(editing:)`, rather than
+    // a second, parallel editor — see that init's own header. These tests pin the type-eligibility
+    // gate (real, directly callable) and the save-path's structural shape (source-scan, matching
+    // this codebase's established convention for AddExpenseView's private `performSave`).
+
+    /// Only a type this screen's own Type picker can represent may be full-edited — a
+    /// `.balanceAdjustment`/`.creditCardPayment`/`.transfer` entry has no safe representation in
+    /// this Type menu (picking any other type would silently corrupt it, e.g. losing
+    /// balanceAdjustment's signed-delta semantics) and must never be offered it.
+    func testIsEligibleForFullEditAllowsOnlyTypesThisScreenCanRepresent() {
+        let account = Account(name: "Checking", type: .checking)
+        let eligibleTypes: [TransactionType] = [.expense, .refund, .income, .transferWithdrawal, .transferDeposit, .transferToSavings]
+        for type in eligibleTypes {
+            let transaction = FinanceTransaction(amount: 10, type: type, source: .manual, account: account)
+            XCTAssertTrue(AddExpenseView.isEligibleForFullEdit(transaction), "\(type) must be eligible for full edit")
+        }
+        let ineligibleTypes: [TransactionType] = [.transfer, .creditCardPayment, .balanceAdjustment]
+        for type in ineligibleTypes {
+            let transaction = FinanceTransaction(amount: 10, type: type, source: .manual, account: account)
+            XCTAssertFalse(AddExpenseView.isEligibleForFullEdit(transaction), "\(type) has no safe Type-picker representation and must never be full-editable")
+        }
+    }
+
+    /// `performSave()` must mutate the existing row in place when editing — never insert a second,
+    /// duplicate `FinanceTransaction` — and must reverse the OLD balance effect using the row's own
+    /// stored fields BEFORE overwriting them, exactly like `ManualTransactionDeletionService
+    /// .reverseBalanceEffect` already established as the safe pattern, never a raw balance
+    /// overwrite.
+    func testAddExpenseViewEditModeMutatesInPlaceWithReverseThenReapplyBalance() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let saveRange = source.range(of: "private func performSave() {") else {
+            return XCTFail("performSave() not found")
+        }
+        let saveBody = String(source[saveRange.lowerBound...])
+        XCTAssertTrue(saveBody.contains("if let existingTransaction {"), "must branch on whether this is an edit")
+        XCTAssertTrue(saveBody.contains("let oldType = existingTransaction.type"), "must capture the OLD stored fields before any mutation")
+        XCTAssertTrue(saveBody.contains("existingTransaction.amount = amount"), "must mutate the existing row's fields in place")
+        XCTAssertTrue(saveBody.contains("transaction = existingTransaction"), "must reuse the existing row as `transaction`, never a second insert")
+    }
+
+    /// `init(editing:)` must pre-populate every field a save could touch, so opening the editor and
+    /// tapping Save unchanged is a true no-op — never a save that silently drops the note, category,
+    /// toggles, check number, or bill tag.
+    func testAddExpenseViewEditInitPrePopulatesEveryField() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Expenses/AddExpenseView.swift")
+        guard let initRange = source.range(of: "init(editing transaction: FinanceTransaction) {") else {
+            return XCTFail("init(editing:) not found")
+        }
+        let initBody = String(source[initRange.lowerBound...].prefix(2500))
+        for expected in [
+            "_amount = State(initialValue: transaction.amount)",
+            "_note = State(initialValue: transaction.note)",
+            "_date = State(initialValue: transaction.date)",
+            "_type = State(initialValue: transaction.type)",
+            "_selectedAccount = State(initialValue: transaction.account)",
+            "_selectedCategory = State(initialValue: transaction.category)",
+            "_countsTowardWeeklyBudget = State(initialValue: transaction.countsTowardWeeklyBudget)",
+            "_countsTowardMonthlySpending = State(initialValue: transaction.countsTowardMonthlySpending)",
+            "_isExcludedFromReports = State(initialValue: transaction.isExcludedFromReports)",
+            "_isPending = State(initialValue: transaction.isPending)",
+        ] {
+            XCTAssertTrue(initBody.contains(expected), "init(editing:) must set \(expected)")
+        }
+    }
+
+    /// The Account Register's options menu must offer "Edit Transaction", gated by
+    /// `isEligibleForFullEdit`, and open it via `AddExpenseView(editing:)` — never a second,
+    /// competing full-edit implementation.
+    func testManualAccountDetailViewOffersFullEditGatedByEligibility() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Accounts/ManualAccountDetailView.swift")
+        XCTAssertTrue(source.contains("\"Edit Transaction\""))
+        XCTAssertTrue(source.contains("AddExpenseView.isEligibleForFullEdit(transaction)"))
+        XCTAssertTrue(source.contains("AddExpenseView(editing: transaction)"))
+    }
+
+    // MARK: - Bulk Delete (2026-09-17, Scott's own explicit request)
+    //
+    // Multi-select + "Delete N Transactions" in the Account Register, mirroring the exact same
+    // Select/Cancel + checkbox-per-row + bottom action-bar pattern ExpenseListView's own
+    // "Activity Register Import" multi-select feature already established.
+
+    /// Looping the existing per-transaction delete is safe here: each call reverses balance using
+    /// only that row's own stored fields, never the account's live balance, so order within the
+    /// batch can never matter — this pins that the implementation actually loops the shared
+    /// service rather than reimplementing balance reversal a second time.
+    @MainActor
+    func testBulkDeleteReversesEveryStoredTypeIndependentOfOrder() throws {
+        let context = makeAutosaveTestContext()
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 500)
+        context.insert(checking)
+        let expense = FinanceTransaction(amount: 20, type: .expense, source: .manual, account: checking)
+        let refund = FinanceTransaction(amount: 15, type: .refund, source: .manual, account: checking)
+        let deposit = FinanceTransaction(amount: 100, type: .income, source: .manual, account: checking)
+        context.insert(expense)
+        context.insert(refund)
+        context.insert(deposit)
+        AccountBalanceManager.applyExpense(amount: 20, to: checking)
+        AccountBalanceManager.applyRefund(amount: 15, to: checking)
+        AccountBalanceManager.applyIncome(amount: 100, to: checking)
+        XCTAssertEqual(checking.currentBalance, 595)
+
+        // Deliberately reverse order from insertion — proves order-independence.
+        for transaction in [deposit, refund, expense] {
+            XCTAssertTrue(ManualTransactionDeletionService.delete(transaction, context: context))
+        }
+
+        XCTAssertEqual(checking.currentBalance, 500, "every selected transaction's balance effect must be fully reversed regardless of deletion order")
+        XCTAssertTrue(try context.fetch(FetchDescriptor<FinanceTransaction>()).isEmpty)
+    }
+
+    /// A Plaid-imported transaction shown in the same register (e.g. a `.creditCardPayment` made
+    /// FROM this account) must never be selectable for bulk delete — matches the exact same
+    /// eligibility gate the single-delete path already enforces.
+    func testManualAccountDetailViewNeverSelectsIneligibleTransactionsForBulkDelete() throws {
+        let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Accounts/ManualAccountDetailView.swift")
+        guard let range = source.range(of: "private func transactionRow(") else {
+            return XCTFail("transactionRow(_:) not found")
+        }
+        let body = String(source[range.lowerBound...].prefix(2000))
+        XCTAssertTrue(body.contains("guard isEligibleForDeletion else { return }"), "selection tap must no-op for an ineligible (Plaid) transaction")
+        XCTAssertTrue(body.contains(".disabled(!isEligibleForDeletion)"), "the selection checkbox itself must be disabled for an ineligible transaction")
+    }
+
     // MARK: - AddExpenseView Transfer To Savings wiring (source-scan)
 
     func testAddExpenseViewOffersTransferToSavingsOnlyWhenSavingsAccountExists() throws {
@@ -37562,7 +37688,7 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private var navigationTitle: String") else {
             XCTFail("navigationTitle not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(400))
+        let section = String(source[range.lowerBound...].prefix(450))
         XCTAssertTrue(section.contains("case .transferToSavings: return \"Add Transfer To Savings\""))
     }
 

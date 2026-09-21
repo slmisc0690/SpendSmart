@@ -28,9 +28,18 @@ struct ManualAccountDetailView: View {
     @State private var transactionPendingBillTagEdit: FinanceTransaction?
     @State private var transactionPendingAmountEdit: FinanceTransaction?
     @State private var transactionPendingCheckNumberEdit: FinanceTransaction?
+    @State private var transactionPendingFullEdit: FinanceTransaction?
     @State private var isPresentingDeletionError = false
     @State private var isPresentingAccountDeletionConfirmation = false
     @State private var accountDeletionBlockedMessage: String?
+
+    /// BULK DELETE (2026-09-17, Scott's own explicit request) — mirrors the exact same
+    /// Select/Cancel + checkbox-per-row + bottom action-bar pattern `ExpenseListView`'s "Activity
+    /// Register Import" feature already established, rather than inventing a second selection UI.
+    @State private var isSelectingTransactions = false
+    @State private var selectedTransactionIDs: Set<UUID> = []
+    @State private var isPresentingBulkDeletionConfirmation = false
+    @State private var bulkDeletionFailureCount = 0
 
     init(account: Account) {
         self.account = account
@@ -103,6 +112,9 @@ struct ManualAccountDetailView: View {
             .sheet(item: $transactionPendingCheckNumberEdit) { transaction in
                 CheckNumberEditView(transaction: transaction)
             }
+            .sheet(item: $transactionPendingFullEdit) { transaction in
+                AddExpenseView(editing: transaction)
+            }
             .confirmationDialog(
                 transactionPendingDeletion.map { ManualTransactionDeletionService.confirmationCopy(for: $0).title } ?? "Delete?",
                 isPresented: Binding(
@@ -130,6 +142,24 @@ struct ManualAccountDetailView: View {
                 Text("This transaction couldn't be safely deleted, so nothing was changed.")
             }
             .confirmationDialog(
+                "Delete \(selectedTransactionIDs.count) Transaction\(selectedTransactionIDs.count == 1 ? "" : "s")?",
+                isPresented: $isPresentingBulkDeletionConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) { deleteSelectedTransactions() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Every selected transaction will be removed from the register and its balance effect reversed. This cannot be undone.")
+            }
+            .alert("Couldn't Delete Everything", isPresented: Binding(
+                get: { bulkDeletionFailureCount > 0 },
+                set: { isPresented in if !isPresented { bulkDeletionFailureCount = 0 } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("\(bulkDeletionFailureCount) selected transaction\(bulkDeletionFailureCount == 1 ? "" : "s") couldn't be safely deleted and were left untouched. Everything else selected was removed.")
+            }
+            .confirmationDialog(
                 "Delete Account Register?",
                 isPresented: $isPresentingAccountDeletionConfirmation,
                 titleVisibility: .visible
@@ -152,8 +182,33 @@ struct ManualAccountDetailView: View {
             } message: {
                 Text(accountDeletionBlockedMessage ?? "")
             }
+            .safeAreaInset(edge: .bottom) {
+                if isSelectingTransactions, !selectedTransactionIDs.isEmpty {
+                    selectedActionBar
+                }
+            }
         }
         .preferredColorScheme(.dark)
+    }
+
+    /// BULK DELETE — loops the same `ManualTransactionDeletionService.delete(_:context:)` every
+    /// single-transaction delete already uses, one call per selected transaction. Safe to loop:
+    /// each call reverses balance using ONLY that transaction's own stored fields, never the
+    /// account's current live balance, so the order transactions are deleted in never matters (see
+    /// this service's own header). Any transaction that turns out ineligible (e.g. a Plaid import
+    /// somehow still selected) is simply skipped, counted, and reported — never a partial/silent
+    /// failure.
+    private func deleteSelectedTransactions() {
+        let targets = accountTransactions.filter { selectedTransactionIDs.contains($0.id) }
+        var failures = 0
+        for transaction in targets {
+            if !ManualTransactionDeletionService.delete(transaction, context: modelContext) {
+                failures += 1
+            }
+        }
+        isSelectingTransactions = false
+        selectedTransactionIDs = []
+        bulkDeletionFailureCount = failures
     }
 
     private func deleteAccount() {
@@ -339,50 +394,18 @@ struct ManualAccountDetailView: View {
                     .padding(.horizontal, Theme.Spacing.lg)
             } else {
                 if hasEligibleManualTransactions {
-                    Text("Use the options button or press and hold a manual entry to delete it.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.textTertiary)
-                        .padding(.horizontal, Theme.Spacing.lg)
+                    selectControlRow
+                    if !isSelectingTransactions {
+                        Text("Use the options button or press and hold a manual entry to delete it.")
+                            .font(Theme.captionFont)
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.horizontal, Theme.Spacing.lg)
+                    }
                 }
                 CardBackground {
                     VStack(spacing: Theme.Spacing.md) {
                         ForEach(Array(accountTransactions.enumerated()), id: \.element.id) { index, transaction in
-                            HStack(spacing: 0) {
-                                // REGISTER PAID CHECKBOX — a purely local "I actually sent/paid
-                                // this" tracking flag, independent of everything else this
-                                // transaction represents (see `FinanceTransaction
-                                // .isPaymentConfirmed`'s own header for the full "never affects
-                                // any calculation" guarantee). Mirrors Pay Bills' own established
-                                // checkbox visual (`checkmark.circle.fill`/`circle`) for
-                                // consistency, never a new visual language. Kept on the OUTER
-                                // `HStack(spacing: 0)` (unchanged from before) so the existing
-                                // TransactionRow-to-options-menu spacing is untouched; this
-                                // checkbox supplies its own trailing gap instead.
-                                Button {
-                                    transaction.isPaymentConfirmed.toggle()
-                                } label: {
-                                    Image(systemName: transaction.isPaymentConfirmed ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 20, weight: .semibold))
-                                        .foregroundStyle(transaction.isPaymentConfirmed ? Theme.accent : Theme.textTertiary)
-                                        .frame(width: 44, height: 44)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .padding(.trailing, Theme.Spacing.xs)
-                                .accessibilityLabel(transaction.isPaymentConfirmed ? "Mark as not yet paid" : "Mark as paid")
-
-                                TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled, showsTypeBadge: true)
-                                    .contextMenu {
-                                        if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
-                                            Button("Delete", systemImage: "trash", role: .destructive) {
-                                                transactionPendingDeletion = transaction
-                                            }
-                                        }
-                                    }
-                                if ManualTransactionDeletionService.eligibility(for: transaction) == .eligible {
-                                    transactionOptionsMenu(for: transaction)
-                                }
-                            }
+                            transactionRow(transaction)
                             if index < accountTransactions.count - 1 {
                                 Divider().overlay(Theme.cardStroke)
                             }
@@ -394,8 +417,118 @@ struct ManualAccountDetailView: View {
         }
     }
 
+    /// BULK DELETE — Select/Cancel, exactly the same control shape
+    /// `ExpenseListView.selectControlRow` already established for its own multi-select feature.
+    /// Only offered when at least one transaction here is even eligible to delete (a register that
+    /// is entirely Plaid-imported, if that were ever possible, would have nothing to select).
+    private var selectControlRow: some View {
+        HStack {
+            Button(isSelectingTransactions ? "Cancel" : "Select") {
+                isSelectingTransactions.toggle()
+                if !isSelectingTransactions {
+                    selectedTransactionIDs = []
+                }
+            }
+            .font(Theme.bodyFont)
+            .foregroundStyle(Theme.accent)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+    }
+
+    /// Pinned above the bottom safe area via `.safeAreaInset(edge: .bottom)` in `body`, matching
+    /// `ExpenseListView.selectedActionBar`'s own placement so it never covers this screen's own
+    /// "Done" toolbar/tab chrome.
+    private var selectedActionBar: some View {
+        HStack {
+            Text("\(selectedTransactionIDs.count) Selected")
+                .font(Theme.bodyFont)
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+            Button("Delete", role: .destructive) {
+                isPresentingBulkDeletionConfirmation = true
+            }
+            .font(Theme.bodyFont.weight(.semibold))
+            .foregroundStyle(Theme.statusOver)
+        }
+        .padding(Theme.Spacing.md)
+        .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder
+    private func transactionRow(_ transaction: FinanceTransaction) -> some View {
+        let isEligibleForDeletion = ManualTransactionDeletionService.eligibility(for: transaction) == .eligible
+        HStack(spacing: 0) {
+            if isSelectingTransactions {
+                // BULK DELETE — a Plaid-imported (ineligible) transaction can still be SHOWN in
+                // this register (e.g. `.creditCardPayment` paid FROM this account) but must never
+                // be selectable, matching the exact same eligibility gate the single-delete path
+                // already enforces — never offer a selection that would silently no-op.
+                Button {
+                    guard isEligibleForDeletion else { return }
+                    if selectedTransactionIDs.contains(transaction.id) {
+                        selectedTransactionIDs.remove(transaction.id)
+                    } else {
+                        selectedTransactionIDs.insert(transaction.id)
+                    }
+                } label: {
+                    Image(systemName: selectedTransactionIDs.contains(transaction.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(isEligibleForDeletion ? (selectedTransactionIDs.contains(transaction.id) ? Theme.accent : Theme.textTertiary) : Theme.textTertiary.opacity(0.4))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!isEligibleForDeletion)
+                .padding(.trailing, Theme.Spacing.xs)
+                .accessibilityLabel(selectedTransactionIDs.contains(transaction.id) ? "Deselect" : "Select")
+            } else {
+                // REGISTER PAID CHECKBOX — a purely local "I actually sent/paid this" tracking
+                // flag, independent of everything else this transaction represents (see
+                // `FinanceTransaction.isPaymentConfirmed`'s own header for the full "never affects
+                // any calculation" guarantee). Mirrors Pay Bills' own established checkbox visual
+                // (`checkmark.circle.fill`/`circle`) for consistency, never a new visual language.
+                Button {
+                    transaction.isPaymentConfirmed.toggle()
+                } label: {
+                    Image(systemName: transaction.isPaymentConfirmed ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(transaction.isPaymentConfirmed ? Theme.accent : Theme.textTertiary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, Theme.Spacing.xs)
+                .accessibilityLabel(transaction.isPaymentConfirmed ? "Mark as not yet paid" : "Mark as paid")
+            }
+
+            TransactionRow(transaction: transaction, isPrivacyModeEnabled: privacyMode.isEnabled, showsTypeBadge: true)
+                .contextMenu {
+                    if !isSelectingTransactions, isEligibleForDeletion {
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            transactionPendingDeletion = transaction
+                        }
+                    }
+                }
+            if !isSelectingTransactions, isEligibleForDeletion {
+                transactionOptionsMenu(for: transaction)
+            }
+        }
+    }
+
     private func transactionOptionsMenu(for transaction: FinanceTransaction) -> some View {
         Menu {
+            // FULL TRANSACTION EDIT (2026-09-17, Scott's own explicit request) — the general
+            // editor, offered first since it's the most complete option; the narrower Edit Bill
+            // Tag/Amount/Check Number entries below remain as faster single-field shortcuts for
+            // the common case, not replaced. Gated to only the types `AddExpenseView` can actually
+            // represent — see `AddExpenseView.isEligibleForFullEdit(_:)`'s own header for why a
+            // `.balanceAdjustment`/`.creditCardPayment`/`.transfer` entry must never reach it.
+            if AddExpenseView.isEligibleForFullEdit(transaction) {
+                Button("Edit Transaction", systemImage: "square.and.pencil") {
+                    transactionPendingFullEdit = transaction
+                }
+            }
             // DEPOSIT-TAGGING GAP FIX — a deposit can never be a bill payment (see
             // `TransactionBillTagEditView.showsBillTagPicker`'s own header); hidden here rather
             // than shown-but-disabled inside the sheet.
