@@ -645,8 +645,8 @@ struct SettingsView: View {
     /// naming. No binding, button action, or persistence below was touched.
     private var dataSection: some View {
         SettingsCollapsibleSection(
-            title: "Data Tools",
-            infoTitle: "About Data Tools",
+            title: "Backup Options",
+            infoTitle: "About Backup Options",
             infoExplanation: """
                 Backing up, restoring, and connecting your accounts.
 
