@@ -34,6 +34,8 @@ struct CalculateTransactionsView: View {
     /// earlier "include excluded transactions too" interpretation that Scott confirmed was wrong —
     /// see this file's git history/session notes for that correction.
     @State private var excludedTransactionsOnly = false
+    /// Picker value meaning "every account" — offered only while Excluded Transactions is on.
+    private static let allAccountsID = "all-accounts"
     /// NOT-EXCLUDED OPTION — narrows the selected account's list to transactions that are NOT Budget
     /// Excluded (the ones that count toward the budget), so they can be checked off and added up.
     /// Mutually exclusive with `excludedTransactionsOnly`.
@@ -57,6 +59,12 @@ struct CalculateTransactionsView: View {
         )
     }
 
+    /// In Excluded Transactions mode, "All Accounts" is the default; picking a specific account narrows
+    /// the excluded list to that account.
+    private var showsAllAccountsInExcludedMode: Bool {
+        excludedTransactionsOnly && (selectedAccountID == nil || selectedAccountID == Self.allAccountsID)
+    }
+
     private var selectedAccountOption: CalculateTransactionsCalculator.AccountOption? {
         viewModel.accountOptions.first { $0.id == selectedAccountID } ?? viewModel.accountOptions.first
     }
@@ -75,8 +83,9 @@ struct CalculateTransactionsView: View {
     /// then applies the SAME date filter. Never an additive "also include" list — a mode switch.
     private var visibleTransactions: [FinanceTransaction] {
         if excludedTransactionsOnly {
-            let excludedAcrossAccounts = CalculateTransactionsCalculator.excludedOnly(from: viewModel.allEligibleTransactions, excludedIDs: budgetExcludedIDs)
-            return CalculateTransactionsCalculator.visibleTransactions(from: excludedAcrossAccounts, dateInterval: dateFilter.interval())
+            let pool = showsAllAccountsInExcludedMode ? viewModel.allEligibleTransactions : currentAccountAllTransactions
+            let excluded = CalculateTransactionsCalculator.excludedOnly(from: pool, excludedIDs: budgetExcludedIDs)
+            return CalculateTransactionsCalculator.visibleTransactions(from: excluded, dateInterval: dateFilter.interval())
         } else if notExcludedTransactionsOnly {
             let notExcluded = CalculateTransactionsCalculator.notExcludedOnly(from: currentAccountAllTransactions, excludedIDs: budgetExcludedIDs)
             return CalculateTransactionsCalculator.visibleTransactions(from: notExcluded, dateInterval: dateFilter.interval())
@@ -243,38 +252,35 @@ struct CalculateTransactionsView: View {
 
     // MARK: - Account picker
 
-    /// EXCLUDED-ONLY MODE PHASE — while `excludedTransactionsOnly` is on, the account filter is
-    /// overridden, so the real `Picker` is replaced with a static "All Accounts — Excluded" row
-    /// plus an explanatory caption. Crucially, `selectedAccountID` itself is never touched here —
-    /// the Picker (and the account it was on) reappears exactly as it was the moment the toggle
-    /// goes back off (Part 5's own "do not reset to the first account unnecessarily" requirement).
+    /// The account picker stays available in every mode. While Excluded Transactions is on it gains
+    /// an "All Accounts" choice (the default); picking a specific account narrows the excluded list to
+    /// that account. `selectedAccountID` is never reset when the mode changes, so the picker returns
+    /// to the account you were on the moment the toggle goes back off.
     private var accountPickerSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             DashboardSectionHeader(title: "Account")
             CardBackground {
-                if excludedTransactionsOnly {
-                    Text("All Accounts — Excluded")
-                        .font(Theme.bodyFont)
-                        .foregroundStyle(Theme.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Picker("Account", selection: Binding(
-                        get: { selectedAccountOption?.id ?? "" },
-                        set: { selectedAccountID = $0 }
-                    )) {
-                        ForEach(viewModel.accountOptions) { option in
-                            Text(option.displayName).tag(option.id)
-                        }
+                Picker("Account", selection: Binding(
+                    get: { showsAllAccountsInExcludedMode ? Self.allAccountsID : (selectedAccountOption?.id ?? "") },
+                    set: { selectedAccountID = $0 }
+                )) {
+                    if excludedTransactionsOnly {
+                        Text("All Accounts").tag(Self.allAccountsID)
                     }
-                    .pickerStyle(.menu)
-                    .tint(Theme.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    ForEach(viewModel.accountOptions) { option in
+                        Text(option.displayName).tag(option.id)
+                    }
                 }
+                .pickerStyle(.menu)
+                .tint(Theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, Theme.Spacing.lg)
 
             if excludedTransactionsOnly {
-                Text("Showing excluded transactions from all accounts")
+                Text(showsAllAccountsInExcludedMode
+                     ? "Showing excluded transactions from all accounts"
+                     : "Showing excluded transactions from \(selectedAccountOption?.displayName ?? "this account")")
                     .font(Theme.captionFont)
                     .foregroundStyle(Theme.textTertiary)
                     .padding(.horizontal, Theme.Spacing.lg)
