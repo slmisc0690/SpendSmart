@@ -26954,9 +26954,9 @@ final class FinanceTrackTests: XCTestCase {
             XCTFail("MonthlySavingsSharingSectionView not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(1700))
-        XCTAssertTrue(section.contains("@Query private var savingsEntries: [SavingsEntry]"), "the section needs its own local SavingsEntry query — the view model itself must not gain a SwiftData dependency")
+        XCTAssertTrue(section.contains("@Environment(\\.modelContext) private var modelContext"), "the section reads its own local data — the view model itself must not gain a SwiftData dependency")
         XCTAssertTrue(section.contains("onSuccessfullyEnabled"), "must wire the reconciliation hook")
-        XCTAssertTrue(section.contains("SavingsSummarySyncService.sync(entries: savingsEntries)"), "must reuse the existing sync service, never a duplicate upload path")
+        XCTAssertTrue(section.contains("SavingsSummarySyncService.syncAll("), "must reuse the existing sync service, never a duplicate upload path")
     }
 
     /// The upload itself is data-minimized by `SavingsSummarySyncService`'s own existing,
@@ -27140,7 +27140,7 @@ final class FinanceTrackTests: XCTestCase {
             XCTFail("syncSavedViaTransferSummaryIfNeeded not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(500))
-        XCTAssertTrue(section.contains("SavedViaTransferSummarySyncService.sync(transactions: transactions)"))
+        XCTAssertTrue(section.contains("SavingsSummarySyncService.syncAll(context: modelContext, connections: plaidConnection.connections)"), "the Saved summary is now pushed together with Saved This Month, from the same combined number")
         XCTAssertTrue(source.contains("Task { await syncSavedViaTransferSummaryIfNeeded() }"), "must reconcile on scenePhase foreground return, mirroring the Monthly Savings/Dashboard aggregate triggers")
     }
 
@@ -38185,7 +38185,7 @@ final class FinanceTrackTests: XCTestCase {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
         let expectedInfoTitles = [
             "About Account", "About Tools", "About Auto Calculate",
-            "About Quick Stats", "About Data Tools", "About Favorites",
+            "About Quick Stats", "About Backup Options", "About Favorites",
         ]
         for title in expectedInfoTitles {
             XCTAssertTrue(source.contains("infoTitle: \"\(title)\""), "Settings is missing an info button titled '\(title)'")
@@ -38243,7 +38243,7 @@ final class FinanceTrackTests: XCTestCase {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
         let expectedInfoTitles = [
             "About Account", "About Tools", "About Auto Calculate",
-            "About Quick Stats", "About Data Tools", "About Favorites",
+            "About Quick Stats", "About Backup Options", "About Favorites",
         ]
         for title in expectedInfoTitles {
             guard let titleRange = source.range(of: "infoTitle: \"\(title)\"") else {
@@ -38655,7 +38655,7 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("MajorSectionHeaderCard(\n                icon: \"info.circle.fill\",\n                title: \"About\","), "About must use the shared major-section card with an info icon")
         XCTAssertTrue(source.contains("SettingsCollapsibleSection(title: \"Developer Options\", isMajorSection: true, majorSectionIcon: \"chevron.left.forwardslash.chevron.right\""), "Developer Options must use the shared major-section card (via SettingsCollapsibleSection) with a code icon")
 
-        for toolsChild in ["title: \"Auto Calculate\",", "title: \"Quick Stats\",", "title: \"Data Tools\","] {
+        for toolsChild in ["title: \"Auto Calculate\",", "title: \"Quick Stats\",", "title: \"Backup Options\","] {
             guard let range = source.range(of: toolsChild) else {
                 XCTFail("\(toolsChild) not found"); continue
             }
