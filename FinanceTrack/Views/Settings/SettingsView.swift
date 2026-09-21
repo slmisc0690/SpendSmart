@@ -477,9 +477,10 @@ struct SettingsView: View {
                 .sorted { $0.accountId < $1.accountId }
                 .map { balance in
                     let maskSuffix = balance.mask.map { " •••\($0)" } ?? ""
+                    let computedLabel = "\(connection.institutionName)\(maskSuffix)"
                     return EligibleAutoCalculateAccount(
                         id: balance.accountId,
-                        label: "\(connection.institutionName)\(maskSuffix)"
+                        label: ConnectedAccountAliasStore().resolvedLabel(accountId: balance.accountId, fallback: computedLabel)
                     )
                 }
         }

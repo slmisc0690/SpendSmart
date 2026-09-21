@@ -215,7 +215,7 @@ final class AskSpendSmartToolContext: @unchecked Sendable {
             for balance in cached.values.sorted(by: { ($0.name ?? "") < ($1.name ?? "") }) {
                 results.append(
                     AccountBalanceResult(
-                        name: balance.name ?? connection.institutionName,
+                        name: ConnectedAccountAliasStore().resolvedLabel(accountId: balance.accountId, fallback: balance.name ?? connection.institutionName),
                         accountType: balance.subtype ?? balance.type ?? "connected",
                         isManual: false,
                         institutionName: connection.institutionName,
@@ -361,7 +361,7 @@ final class AskSpendSmartToolContext: @unchecked Sendable {
         guard let plaidAccountId = transaction.plaidAccountId else { return nil }
         for connection in plaidConnections {
             if let balance = connection.cachedBalances?[plaidAccountId] {
-                return balance.name ?? connection.institutionName
+                return ConnectedAccountAliasStore().resolvedLabel(accountId: plaidAccountId, fallback: balance.name ?? connection.institutionName)
             }
         }
         return ConnectedAccountOptionPresenter.label(forAccountId: plaidAccountId, in: plaidConnections)
@@ -650,7 +650,9 @@ final class AskSpendSmartToolContext: @unchecked Sendable {
     func budgetSettingsStatus() -> BudgetSettingsResult {
         let autoNames: [String] = autoTrackedAccountIds.compactMap { plaidAccountId in
             for connection in plaidConnections {
-                if let balance = connection.cachedBalances?[plaidAccountId] { return balance.name ?? connection.institutionName }
+                if let balance = connection.cachedBalances?[plaidAccountId] {
+                    return ConnectedAccountAliasStore().resolvedLabel(accountId: plaidAccountId, fallback: balance.name ?? connection.institutionName)
+                }
             }
             return nil
         }.sorted()
