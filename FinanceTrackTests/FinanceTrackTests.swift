@@ -2245,8 +2245,12 @@ final class FinanceTrackTests: XCTestCase {
         // `settings?.monthlyGoal`/`monthlyPlanSummary.projectedStatus` (the Savings-Goal mirror
         // and the actual-spending status) with the planning-based values — updated to check the
         // current, corrected wiring. `actualMonthlySpend` is genuinely unchanged (Part 2).
+        // PERFORMANCE — `monthlyPlanSummary` is now snapshotted once per body pass as `summary`
+        // and threaded through explicitly (see DashboardView.swift's own PERFORMANCE comment);
+        // `summary.actualSpentThisMonth` IS `monthlyPlanSummary.actualSpentThisMonth`, just under
+        // the passed-in parameter's name instead of a re-read of the bare property.
         XCTAssertTrue(source.contains("budgetedMonthlySpend: plannedMonthlySpendingForOutlook"))
-        XCTAssertTrue(source.contains("actualMonthlySpend: monthlyPlanSummary.actualSpentThisMonth"))
+        XCTAssertTrue(source.contains("actualMonthlySpend: summary.actualSpentThisMonth"))
         XCTAssertTrue(source.contains("status: projectedStatusForOutlook"))
     }
 
@@ -2807,7 +2811,7 @@ final class FinanceTrackTests: XCTestCase {
         let section = String(source[range.lowerBound...].prefix(600))
         XCTAssertTrue(section.contains("let expectedWeeklyLimit = plannedWeeklySpending"), "must reuse the existing, already-authoritative plannedWeeklySpending, never a duplicated actual-spending-adjusted formula")
         XCTAssertTrue(section.contains("budgetSettings.applyMonthlyPlanAutoCalculate(monthlyPlanSavingsGoal: goal, monthlySpendRemaining: plannedMonthlySpending)"), "must pass the override-aware plannedMonthlySpending through the calculator's own unchanged /4 formula")
-        XCTAssertFalse(source.contains("private var monthlySpendRemaining: Decimal"), "the legacy actual-spending-adjusted computed property must no longer exist in this view")
+        XCTAssertFalse(source.contains("private func monthlySpendRemaining(summary: MonthlyPlanCalculator.Summary) -> Decimal"), "the legacy actual-spending-adjusted computed property must no longer exist in this view")
     }
 
     func testNoSecondWriterCanOverwriteTheDerivedWeeklySpendingLimit() throws {
@@ -9565,7 +9569,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardNormalCardAppearsInAutomaticMode() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(3200))
@@ -10366,7 +10370,7 @@ final class FinanceTrackTests: XCTestCase {
             .appendingPathComponent("../FinanceTrack/Views/Dashboard/DashboardView.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        guard let range = source.range(of: "private var quickStatsSection") else {
+        guard let range = source.range(of: "private func quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(1500))
@@ -10454,6 +10458,8 @@ final class FinanceTrackTests: XCTestCase {
             .appendingPathComponent("../FinanceTrack/Views/Settings/SettingsView.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        // NOTE: SettingsView.swift's own quickStatsSection is a separate, untouched property in a
+        // different file from DashboardView.swift's — still `private var`, not `private func`.
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
@@ -10728,7 +10734,7 @@ final class FinanceTrackTests: XCTestCase {
             .appendingPathComponent("../FinanceTrack/Views/Dashboard/DashboardView.swift")
             .standardized
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        guard let range = source.range(of: "private var monthlySpendRemaining: Decimal") else {
+        guard let range = source.range(of: "private func monthlySpendRemaining(summary: MonthlyPlanCalculator.Summary) -> Decimal") else {
             XCTFail("monthlySpendRemaining not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(900))
@@ -10741,7 +10747,11 @@ final class FinanceTrackTests: XCTestCase {
         // duplicated here.
         XCTAssertTrue(section.contains("correctedFlexibleSpendingAvailableForOutlook"), "Dashboard must derive its spending budget from the corrected, variance-adjusted baseline")
         XCTAssertTrue(section.contains("MonthlyPlanCalculator.monthlySpendRemaining"), "Dashboard must reuse the canonical calculator, never duplicate the formula")
-        XCTAssertTrue(section.contains("monthlyPlanSummary."), "Dashboard must source its inputs from the existing monthlyPlanSummary, never re-query independently")
+        // PERFORMANCE — `monthlyPlanSummary` is now snapshotted once per body pass and threaded
+        // through as the `summary` parameter (see that snapshot's own PERFORMANCE comment in
+        // DashboardView.swift) rather than re-read as a bare property inside this chain — `summary`
+        // IS `monthlyPlanSummary`'s value, just passed explicitly instead of re-queried.
+        XCTAssertTrue(section.contains("summary."), "Dashboard must source its inputs from the passed-in summary snapshot, never re-query monthlyPlanSummary independently")
     }
 
     func testSavingsGoalChangeRecalculatesMonthlyRemaining() {
@@ -26691,6 +26701,8 @@ final class FinanceTrackTests: XCTestCase {
     /// Secondary-specific gating left in Settings to test for.
     func testSettingsViewQuickStatsSectionPointsToTheDashboardPicker() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Settings/SettingsView.swift")
+        // NOTE: SettingsView.swift's own quickStatsSection is a separate, untouched property in a
+        // different file from DashboardView.swift's — still `private var`, not `private func`.
         guard let range = source.range(of: "private var quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
@@ -26842,7 +26854,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardQuickStatsGatesLocalAndSharedSavingsCardsByRole() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var quickStatsSection") else {
+        guard let range = source.range(of: "private func quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(10000))
@@ -27194,7 +27206,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardQuickStatsSectionRoutesSavedViaTransferByRoleAndSharingState() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var quickStatsSection") else {
+        guard let range = source.range(of: "private func quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(10000))
@@ -27217,7 +27229,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardMonthlyOutlookRoutesByRoleAndSharingState() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var monthlyOutlookAndWeekByWeekSection") else {
+        guard let range = source.range(of: "private func monthlyOutlookAndWeekByWeekSection") else {
             XCTFail("monthlyOutlookAndWeekByWeekSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(1000))
@@ -27242,7 +27254,10 @@ final class FinanceTrackTests: XCTestCase {
         guard let bodyRange = source.range(of: "var body: some View") else {
             XCTFail("body not found"); return
         }
-        let bodySection = String(source[bodyRange.lowerBound...].prefix(700))
+        // PERFORMANCE — widened from 700: body now opens with a PERFORMANCE comment plus a
+        // `let summary = monthlyPlanSummary` snapshot line before the section calls this test
+        // scans for (see DashboardView.swift's own PERFORMANCE comment on `body`).
+        let bodySection = String(source[bodyRange.lowerBound...].prefix(1400))
         XCTAssertTrue(bodySection.contains("monthlyOutlookAndWeekByWeekSection"), "body must route through the new role-aware section")
         XCTAssertFalse(bodySection.contains("\n                    monthlyOutlookSection\n"), "body must no longer call the local section unconditionally")
     }
@@ -27312,7 +27327,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardWeeklyCardSectionRoutesByRoleAndSharingState() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(2500))
@@ -27332,7 +27347,7 @@ final class FinanceTrackTests: XCTestCase {
     /// never hidden behind a "Set Weekly Budget" setup prompt.
     func testDashboardWeeklyCardAlwaysRendersForPrimary() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(3200))
@@ -27346,7 +27361,7 @@ final class FinanceTrackTests: XCTestCase {
     /// non-Secondary `else` branch below it may still use them).
     func testDashboardWeeklyCardSectionNeverShowsLocalPromptToSecondary() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         guard let secondaryStart = source.range(of: "if isSecondary {", range: range.lowerBound..<source.endIndex),
@@ -27367,7 +27382,7 @@ final class FinanceTrackTests: XCTestCase {
     /// direct, possibly-stale read of `BudgetSettings.weeklySpendingLimit`.
     func testDashboardPrimaryWeeklyCardSectionUnchangedByUserBRestoration() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         guard let elseRange = source.range(of: "            } else {\n                SpendingCardView(", range: range.lowerBound..<source.endIndex) else {
@@ -27387,7 +27402,7 @@ final class FinanceTrackTests: XCTestCase {
     /// `settings?.weeklySpendingLimit` directly.
     func testDashboardWeeklyLimitUsesSharedAuthorityNotStaleBudgetSettings() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyLimit: Decimal {") else {
+        guard let range = source.range(of: "private func weeklyLimit(summary: MonthlyPlanCalculator.Summary) -> Decimal {") else {
             XCTFail("weeklyLimit not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(200))
@@ -27746,7 +27761,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardSecondaryWeeklyLimitNeverUsesWeeklyComparisonsRecommendedLimit() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         guard let secondaryStart = source.range(of: "if isSecondary {", range: range.lowerBound..<source.endIndex),
@@ -28884,7 +28899,7 @@ final class FinanceTrackTests: XCTestCase {
     func testDashboardWeeklyCardSectionNoLongerUsesSharedMonthlyOutlookViewModelForParity() throws {
         // 3 — Secondary This Week no longer reconstructs from SharedMonthlyOutlookViewModel.
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         guard let secondaryStart = source.range(of: "if isSecondary {", range: range.lowerBound..<source.endIndex),
@@ -29106,7 +29121,7 @@ final class FinanceTrackTests: XCTestCase {
         // 15 — the Secondary branch must not itself compute monthlySpendRemaining/weeklyLimit;
         // those come pre-computed from the aggregate.
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         guard let secondaryStart = source.range(of: "if isSecondary {", range: range.lowerBound..<source.endIndex),
@@ -29123,7 +29138,7 @@ final class FinanceTrackTests: XCTestCase {
     func testDashboardSecondaryStillNeverShowsLocalBudgetPromptWithParityArchitecture() throws {
         // 16-19 — no local BudgetSettings fallback, no "No weekly budget set"/"Set Weekly Budget".
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var weeklyCardSection") else {
+        guard let range = source.range(of: "private func weeklyCardSection") else {
             XCTFail("weeklyCardSection not found"); return
         }
         guard let secondaryStart = source.range(of: "if isSecondary {", range: range.lowerBound..<source.endIndex),
@@ -29199,7 +29214,7 @@ final class FinanceTrackTests: XCTestCase {
     /// by the separate `SharedMonthlyPlanView` Settings screen (verified elsewhere).
     func testDashboardMonthlyOutlookSectionUsesCanonicalDashboardSummaryAggregate() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var monthlyOutlookAndWeekByWeekSection") else {
+        guard let range = source.range(of: "private func monthlyOutlookAndWeekByWeekSection") else {
             XCTFail("monthlyOutlookAndWeekByWeekSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(700))
@@ -29256,7 +29271,9 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private func syncDashboardSummaryIfNeeded") else {
             XCTFail("syncDashboardSummaryIfNeeded not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(600))
+        // PERFORMANCE — widened from 600: this function now opens with a comment plus a
+        // `let summary = monthlyPlanSummary` line before the sync call this test scans for.
+        let section = String(source[range.lowerBound...].prefix(1100))
         XCTAssertTrue(section.contains("transactions: transactions"), "must pass the full local transaction set directly")
         XCTAssertTrue(section.contains("authoritativeWeeklyLimit: weeklyLimit"), "must supply the SAME weeklyLimit this view already displays, never a second value")
         XCTAssertFalse(section.contains("sharedScopeTransactions"))
@@ -29323,7 +29340,9 @@ final class FinanceTrackTests: XCTestCase {
         guard let range = source.range(of: "private func syncDashboardSummaryIfNeeded") else {
             XCTFail("syncDashboardSummaryIfNeeded not found"); return
         }
-        let section = String(source[range.lowerBound...].prefix(900))
+        // PERFORMANCE — widened from 900: this function now opens with a comment plus a
+        // `let summary = monthlyPlanSummary` line before the sync call this test scans for.
+        let section = String(source[range.lowerBound...].prefix(1200))
         // MONTHLY OUTLOOK + SCENARIO PERIOD-CASH-FLOW CORRECTION: `BudgetSettings.monthlyGoal`
         // mirrors the Savings Goal, not planned spending — that was the exact root cause of the
         // $0.00 Budgeted defect when the Savings Goal was $0. Updated to check the corrected,
@@ -32854,24 +32873,24 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(scoped.contains("end: currentMonth.end"), "the window's upper bound must still be the end of the current month")
     }
 
-    /// The exact trap Scott named: scoping the DISPLAY to the browsable window must never also
-    /// scope what gets PERSISTED — `save()` must still write the complete draft set, including any
-    /// earlier exclusion ids never shown in the window's own list, or a past exclusion the user
-    /// never touched this session would be silently dropped on the next Save.
+    /// The exact trap Scott named: scoping the DISPLAY to the current month must never also scope
+    /// what gets PERSISTED — `save()` must still write the complete draft set, including any
+    /// earlier-month exclusion ids never shown in the current-month list, or a past exclusion the
+    /// user never touched this session would be silently dropped on the next Save.
     func testExcludeTransactionsSaveStillPersistsFullDraftSetNotJustCurrentMonth() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/ExcludeTransactionsView.swift")
         guard let range = source.range(of: "private func save() {") else {
             XCTFail("save() not found"); return
         }
         let scoped = String(source[range.lowerBound...].prefix(400))
-        XCTAssertTrue(scoped.contains("Array(draftExcludedIDs)"), "save() must persist the complete draft set, unfiltered by the browsable window")
+        XCTAssertTrue(scoped.contains("Array(draftExcludedIDs)"), "save() must persist the complete draft set, unfiltered by month")
     }
 
     func testExcludeTransactionsViewSurfacesEarlierMonthExclusions() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/ExcludeTransactionsView.swift")
-        XCTAssertTrue(source.contains("Excluded in Earlier Months"), "exclusions outside the browsable window must be surfaced, never silently hidden with no way back to them")
+        XCTAssertTrue(source.contains("Excluded in Earlier Months"), "exclusions outside the current month must be surfaced, never silently hidden with no way back to them")
         XCTAssertTrue(source.contains("SettingsCollapsibleSection"), "must reuse the existing shared collapsible-section component, not a new one")
-        XCTAssertTrue(source.contains("@State private var isEarlierExclusionsExpanded = false"), "must default to collapsed — visible on open, not forced open over the window's own list")
+        XCTAssertTrue(source.contains("@State private var isEarlierExclusionsExpanded = false"), "must default to collapsed — visible on open, not forced open over the current month's own list")
     }
 
     /// Mirrors `ExcludeTransactionsView.earlierExclusions`' own filter exactly (against the
@@ -33602,7 +33621,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testQuickStatsHasExactlyFiveCardsInRequiredOrder() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let sectionRange = source.range(of: "private var quickStatsSection: some View {") else {
+        guard let sectionRange = source.range(of: "private func quickStatsSection(summary: MonthlyPlanCalculator.Summary) -> some View {") else {
             XCTFail("quickStatsSection not found"); return
         }
         let scoped = String(source[sectionRange.lowerBound...].prefix(10000))
@@ -33629,10 +33648,14 @@ final class FinanceTrackTests: XCTestCase {
         // `weeklyLimit`/the Weekly Card/Monthly Outlook section already use, never a second
         // `MonthlyPlanCalculator` call written fresh inside quickStatsSection.
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let sectionRange = source.range(of: "private var quickStatsSection: some View {") else {
+        guard let sectionRange = source.range(of: "private func quickStatsSection(summary: MonthlyPlanCalculator.Summary) -> some View {") else {
             XCTFail("quickStatsSection not found"); return
         }
-        let scoped = String(source[sectionRange.lowerBound...].prefix(10000))
+        // PERFORMANCE — scoped from sectionRange.upperBound (just after the opening brace), not
+        // .lowerBound: the function's own signature now names `MonthlyPlanCalculator.Summary` as
+        // its parameter type, which is not a call to MonthlyPlanCalculator and must not trip the
+        // "never call MonthlyPlanCalculator directly" check below.
+        let scoped = String(source[sectionRange.upperBound...].prefix(10000))
         XCTAssertTrue(scoped.contains("plannedWeeklySpendingForOutlook"))
         XCTAssertTrue(scoped.contains("spentThisWeek"))
         XCTAssertTrue(scoped.contains("plannedMonthlySpendingForOutlook"))
@@ -37383,7 +37406,7 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertEqual(SavedViaTransferCalculator.savedThisMonth([deposit, excludedWithdrawal], in: month), 1000)
     }
 
-    // MARK: - Dashboard "Saved" net-withdrawal wiring (source-scan)
+    // MARK: - Dashboard "Saved" net-withdrawal wiring + Recent Activity redundant-scan fix (source-scan)
 
     /// The Dashboard's own "Saved" Quick Stat must feed `SavedViaTransferCalculator` the resolved
     /// Connected-account Savings ids so a withdrawal FROM a Connected Savings account nets exactly
@@ -37394,6 +37417,24 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertTrue(source.contains("SavedViaTransferCalculator.totalSavedThisMonth("))
         XCTAssertTrue(source.contains("savingsPlaidAccountIds: savingsPlaidAccountIds"))
         XCTAssertTrue(source.contains("ConnectedAccountOptionPresenter.options(for: plaidConnection.connections)"))
+    }
+
+    /// PERFORMANCE — `recentActivitySection` must snapshot `activityTabs`/`effectiveActivityTab`/
+    /// `recentTransactions` to local `let`s once rather than re-invoking those un-memoized,
+    /// full-`transactions`-scanning computed properties repeatedly (once per `ForEach` row, in
+    /// `effectiveActivityTab`'s case) within the same body evaluation.
+    func testDashboardRecentActivitySectionSnapshotsExpensiveComputedPropertiesOnce() throws {
+        let source = try Self.dashboardViewSource()
+        guard let sectionRange = source.range(of: "private var recentActivitySection: some View {") else {
+            return XCTFail("recentActivitySection not found")
+        }
+        let section = String(source[sectionRange.lowerBound...].prefix(2600))
+        XCTAssertTrue(section.contains("let tabs = activityTabs"))
+        XCTAssertTrue(section.contains("let currentTab = effectiveActivityTab"))
+        XCTAssertTrue(section.contains("let visibleTransactions = recentTransactions"))
+        XCTAssertTrue(section.contains("ForEach(tabs)"))
+        XCTAssertTrue(section.contains("isSelected: tab == currentTab"))
+        XCTAssertTrue(section.contains("Array(visibleTransactions.enumerated())"))
     }
 
     // MARK: - BudgetCalculator savings-transfer structural exclusion
@@ -37821,7 +37862,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardHasQuickStatsPlusButton() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var quickStatsSection") else {
+        guard let range = source.range(of: "private func quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(1200))
@@ -37831,7 +37872,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardPresentsQuickStatsConfigurationSheet() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var quickStatsSection") else {
+        guard let range = source.range(of: "private func quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(10000))
@@ -37844,7 +37885,7 @@ final class FinanceTrackTests: XCTestCase {
     /// picker UI.
     func testDashboardEveryQuickStatTileIsGatedByVisibility() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var quickStatsSection") else {
+        guard let range = source.range(of: "private func quickStatsSection") else {
             XCTFail("quickStatsSection not found"); return
         }
         let section = String(source[range.lowerBound...].prefix(10000))
@@ -37952,7 +37993,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardQuickStatsNoLongerReadFlexibleSpendingAvailableDirectly() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var plannedWeeklySpendingForOutlook") else {
+        guard let range = source.range(of: "private func plannedWeeklySpendingForOutlook") else {
             XCTFail("plannedWeeklySpendingForOutlook not found"); return
         }
         let scoped = String(source[range.lowerBound...].prefix(1500))
@@ -37962,7 +38003,7 @@ final class FinanceTrackTests: XCTestCase {
 
     func testDashboardMonthlySpendRemainingUsesCorrectedBaseline() throws {
         let source = try Self.monthlySavingsSourceFile("../FinanceTrack/Views/Dashboard/DashboardView.swift")
-        guard let range = source.range(of: "private var monthlySpendRemaining: Decimal") else {
+        guard let range = source.range(of: "private func monthlySpendRemaining(summary: MonthlyPlanCalculator.Summary) -> Decimal") else {
             XCTFail("monthlySpendRemaining not found"); return
         }
         let scoped = String(source[range.lowerBound...].prefix(600))
@@ -38751,6 +38792,8 @@ final class FinanceTrackTests: XCTestCase {
     /// 13 — Existing Quick Stats controls remain available on the main Settings screen.
     func testQuickStatsControlsRemainAvailable() throws {
         let source = try Self.settingsViewSource()
+        // NOTE: SettingsView.swift's own quickStatsSection is a separate, untouched property in a
+        // different file from DashboardView.swift's — still `private var`, not `private func`.
         XCTAssertTrue(source.contains("private var quickStatsSection"))
         XCTAssertTrue(source.contains("isPresentingQuickStats = true"))
     }

@@ -109,7 +109,7 @@ final class SpendingFixesTests: XCTestCase {
     func testSavedTileIsSavedThisMonthPlusMonthlyRemaining() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("FinanceTrack/Views/Dashboard/DashboardView.swift"), encoding: .utf8)
-        XCTAssertTrue(source.contains("amount: savedThisMonth + monthlySpendRemaining,"))
+        XCTAssertTrue(source.contains("amount: savedThisMonth + monthlySpendRemaining(summary: summary),"))
     }
 
     // MARK: Quick Stat subtitles wrap
