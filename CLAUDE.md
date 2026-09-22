@@ -100,10 +100,9 @@ of which are unfinished code:
   **separate, explicitly-requested task** with its own backup-verification and read-only
   post-deploy checks. Never deploy a migration/function to Production in the same turn it was
   written, unless the user's own instructions explicitly say so for that turn.
-- **Backup before editing source**, per the global standing rule — for this repo that means a full
-  working-tree copy (rsync) to `../FinanceTracker Backups/<label>-<timestamp>/`, **excluding**
-  `.git`, `build/` (Xcode's local index cache — huge file count, not real source, rsync will stall
-  copying it), and `*.xcuserstate`. Verify with `diff -rq` (same excludes) before editing.
+- **Backups:** see ~/.claude/CLAUDE.md — git snapshot under `refs/snapshots/`, never a folder
+  copy. This project previously took a full working-tree rsync copy to
+  `../FinanceTracker Backups/<label>-<timestamp>/` before every edit; that convention is retired.
 - **Full Swift build + full test suite, zero new warnings**, before any "done" report. Report the
   *actual* test total from that run, never assume a remembered number. As of **2026-08-21** the
   suite is at **2779 tests** (it was 2719 on 2026-08-15 and 1020 on 2026-07-21 — treat any
@@ -383,6 +382,68 @@ Not yet built (explicitly out of scope until requested):
   values both on `onAppear` and whenever either edit sheet's `isPresented` flips back to `false`,
   since `SettingsView` stays mounted underneath its own sheets and nothing else would trigger a
   refresh.
+- **Plaid Item leak closure + this project's first background scheduler** (migrations 0029/0030,
+  2026-09-06): `delete-account` had two paths that deleted a `plaid_items` row without confirming
+  Plaid was ever told to revoke it (an Item's `environment` not matching the server's active
+  `PLAID_ENV`, and a swallowed `/item/remove` failure) — a real Item left in that state keeps
+  billing forever with zero trace anywhere in this system. `plaid_item_removal_failures`
+  (migration 0029) is a self-emptying queue (steady-state size should be zero) that the orphan-insert
+  in `delete-account` writes to as a **hard precondition**: if that insert itself fails, the entire
+  deletion aborts rather than let an un-revoked Item disappear untracked.
+  `retry-plaid-item-removals` is the sole consumer — retries `/item/remove` hourly for 24h then
+  daily indefinitely (`isRetryDue`), deletes the row on success, treats Plaid's `ITEM_NOT_FOUND` as
+  success too (covers a crash between Plaid's own successful revoke and this table's row-delete, so
+  a row is never stuck retrying forever against an Item already gone).
+  **Migration 0030 introduces this project's FIRST background job scheduler** (`pg_cron` + `pg_net`)
+  — deliberately avoided until now (see migration 0028's own header). It fires
+  `retry-plaid-item-removals-hourly` (`0 * * * *`) via `public.trigger_retry_plaid_item_removals()`,
+  which reads its target URL and auth key from Supabase Vault (`retry_plaid_item_removals_url` /
+  `retry_plaid_item_removals_auth_key`) — **the schedule does nothing until both Vault secrets and
+  the matching `RETRY_PLAID_ITEM_REMOVALS_SECRET` Edge Function secret exist in that environment**;
+  with either missing it logs a warning and no-ops rather than failing loudly or calling out with a
+  garbage Authorization header. This is why the Production deployment order mattered: secret + Vault
+  entries first, then both Edge Functions, then migration 0029, then 0030 last — so the schedule
+  never had a window where it could fire against a target that wasn't there yet. The auth secret is
+  a value dedicated to this one function, never the platform's own service-role/secret key (which is
+  write-only once set and could not have been independently placed into Vault or tested end-to-end).
+  Verified on Preview: RLS + explicit revoke/grant block anon and authenticated with real `42501`
+  errors, the cron job shows `active: true` in `cron.job`, and an unattended run was observed in
+  `cron.job_run_details` mutating a deliberately-planted evidence row before that row was removed.
+  **On Production only RLS/grants and the cron registration were verified at deploy time — an
+  unattended end-to-end run was never observed there, and the retry was in fact non-functional from
+  its 2026-09-06 deploy until 2026-09-20:** the function was found deployed with `verify_jwt = true`
+  (no `config.toml` entry existed to say otherwise), so the gateway rejected every pg_cron call —
+  whose bearer is the dedicated secret, not a Supabase JWT — with 401
+  `UNAUTHORIZED_INVALID_JWT_FORMAT` before the function's code ran. Fixed 2026-09-20 (see Session
+  Log). **`cron.job_run_details` showing `succeeded` only means the HTTP request was enqueued by
+  `net.http_post` — the real result is the status code in `net._http_response`; check that.**
+- **`monitor-usage`** — SpendSmart's read-only aggregate for an external multi-app cost-monitor
+  dashboard (alongside Scan2Cal, LifeVaultPlus, StreamDrop), built against a shared JSON contract
+  none of this project's own code owns. That contract's `ServiceUsage`/`UsageStats` shape is built
+  for call/token-based billing (`calls`, `inputTokens`, etc.) and has no dedicated "billable unit
+  count" field — but Plaid bills per Item per month, not per call, so this endpoint deliberately
+  overloads two fields rather than inventing new ones the shared Swift client wouldn't decode:
+  **`month.calls` means "live Plaid Item count," and `byCategory[].calls` means "row count in that
+  category"** (currently one row: stuck orphans over 24h from `plaid_item_removal_failures`) —
+  neither is ever a request count for this service. The `label` ("Plaid Items"), `billing`
+  (`"per_item_monthly"`), and `category` ("Stuck orphans (over 24h)") strings carry the real
+  meaning the field names cannot; `today` is always `null` (no daily-activity concept exists for a
+  static Item roster) while `month` is always present since the monthly-billing concept always
+  applies, only its `calls` value goes `null` on a read failure. If a future version of the shared
+  contract adds a proper billable-unit-count field, migrate off this overload rather than layering
+  a second one on top of it.
+  Per-Item `created_at`/age and Plaid product enablement are deliberately NOT reported here — the
+  contract has no per-entity list shape, and forcing them into an unrelated field (`lastRequestAt`
+  for "oldest Item created_at", say) would render one concept as another, which is exactly what
+  this contract's null-vs-zero discipline exists to prevent. Per-Item age belongs on SpendSmart's
+  own Connected Accounts screen instead, not a cost dashboard — not built as part of this endpoint.
+  Auth is two independent layers: gateway-level `verify_jwt = true` (the one function in this
+  project set that way — see `supabase/config.toml`'s own note on why every other function sets it
+  `false`) plus a dedicated `MONITOR_USAGE_TOKEN` secret checked via `X-Monitor-Token` with a
+  SHA-256-digest constant-time comparison, fail-closed if unset. Empirically confirmed on Preview:
+  both the legacy JWT-format anon key and the newer `sb_publishable_...` key pass the gateway check
+  and correctly reach this function's own token check — the `sb_publishable_` gateway-incompatibility
+  noted elsewhere in this file for `requireAuthenticatedUserId`-based functions does not apply here.
 
 ## Testing conventions
 
@@ -405,6 +466,51 @@ Not yet built (explicitly out of scope until requested):
   manifest cannot be accessed" error (hit and fixed during Phase 8F, 2026-07-21).
 
 ## Session Log
+
+### 2026-09-20 — retry-plaid-item-removals found non-functional on Production; fixed
+- **Finding:** the live function (v2, deployed 2026-09-06) had `verify_jwt = true`. The pg_cron/pg_net
+  caller (migration 0030) presents a dedicated bearer secret, not a Supabase-signed JWT, so the
+  gateway rejected it before the function ran. All 6 retained `net._http_response` rows (hourly,
+  09:00–14:00 UTC that day) were 401 `UNAUTHORIZED_INVALID_JWT_FORMAT`. pg_net keeps only a few
+  hours of responses, so earlier attempts could not be inspected; the retry is presumed to have been
+  non-functional for the whole of v2's life, i.e. from deploy until this fix.
+- **Why it went unnoticed:** `cron.job_run_details` reported every run as `succeeded` (it only records
+  that `net.http_post` enqueued the request), and `plaid_item_removal_failures` was empty, so nothing
+  ever needed retrying. No item was stranded, but the safety net would not have caught one.
+- **Fix:** `config.toml` entry `[functions.retry-plaid-item-removals] verify_jwt = false` (commit
+  `6b0a4c1`), then a redeploy of that one function (v3). Function source, database, cron schedule,
+  Vault secrets and the function secret were not touched; the other 33 functions were confirmed
+  unchanged (`verify_jwt`, version, updated_at).
+- **Verified:** live `verify_jwt` is now `false`; one manual `trigger_retry_plaid_item_removals()`
+  produced a 200 with `{"revoked":0,"still_failing":0,"skipped":0}` — which also proves the Vault key
+  matches `RETRY_PLAID_ITEM_REMOVALS_SECRET`. `plaid_item_removal_failures` still 0 rows. The first
+  natural scheduled tick after the fix had not yet been observed when this was written.
+- **Lesson:** to verify a pg_cron→pg_net job, read `net._http_response`, never `cron.job_run_details`.
+
+### 2026-09-06 — Plaid Item leak closure + first background scheduler, deployed to Production
+- Root cause: `delete-account` had two paths (environment mismatch; swallowed `/item/remove`
+  failure) that deleted a `plaid_items` row without confirming Plaid ever revoked it — a still-
+  billing Item could become permanently untracked. Closed via migration 0029
+  (`plaid_item_removal_failures`, a self-emptying orphan queue, RLS + explicit revoke/grant) and a
+  `delete-account` rewrite making the orphan-insert a hard precondition (its own failure aborts the
+  whole deletion, never a best-effort step). See the new Architecture landmark above for the full
+  design and the reasoning behind the Production deployment order.
+- Built `retry-plaid-item-removals` (migration 0030's `pg_cron`/`pg_net` schedule, this project's
+  first background scheduler) as the sole consumer, and a dedicated `RETRY_PLAID_ITEM_REMOVALS_SECRET`
+  rather than reusing the platform's own service-role key.
+- Verified in stages on Preview first (all three `delete-account` outcomes proven individually with
+  throwaway test data; a real Plaid Sandbox Item used to prove the success path still causes Plaid
+  itself, not just this database, to report the Item gone; an autonomous cron tick observed via
+  `cron.job_run_details` mutating a deliberately-planted evidence row, not just registered).
+- Deployed to Production in the order the cron dependency required: `RETRY_PLAID_ITEM_REMOVALS_SECRET`
+  + its two Vault entries set first (fresh value, distinct from Preview's) → both Edge Functions
+  deployed → migration 0029 then 0030 applied (0030 creates the schedule, so it had to be last).
+  Verified live on Production: RLS/grant genuinely blocks anon (`401`/`42501`) and authenticated
+  (`403`/`42501` — tested via one throwaway auth user created and deleted directly through the Admin
+  API, never through `delete-account`, and never involving any of the 4 real Production Items); the
+  cron job is registered and `active`; `plaid_item_removal_failures` is empty (0 rows);
+  `plaid_items` unchanged at 4 rows. **`delete-account` itself was never invoked against Production
+  during this work**, per explicit instruction.
 
 ### 2026-08-18/21 — Week-by-Week parity, user_profiles backfill, onboarding flow, Face ID grace
 ### period, Dashboard/Settings UX polish (large multi-topic session)

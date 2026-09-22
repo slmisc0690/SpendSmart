@@ -14538,10 +14538,14 @@ final class FinanceTrackTests: XCTestCase {
         var refreshResult: Result<ConnectedAccountRefreshResult, Error>
         var syncTransactionsResult: Result<PlaidSyncResult, Error> = .success(PlaidSyncResult(added: [], modified: [], removedExternalIds: []))
         var syncBalancesResult: Result<[PlaidAccountBalance], Error> = .success([])
+        var acknowledgeTransactionsSyncResult: Result<Void, Error> = .success(())
         private(set) var refreshConnectedAccountCallCount = 0
         private(set) var syncTransactionsCallCount = 0
         private(set) var syncBalancesCallCount = 0
         private(set) var lastSyncTransactionsConnectionId: String?
+        private(set) var acknowledgeTransactionsSyncCallCount = 0
+        private(set) var lastAcknowledgedConnectionId: String?
+        private(set) var lastAcknowledgedSyncToken: String?
 
         init(refreshResult: Result<ConnectedAccountRefreshResult, Error>) {
             self.refreshResult = refreshResult
@@ -14567,6 +14571,12 @@ final class FinanceTrackTests: XCTestCase {
         func listConnections() async throws -> [PlaidConnectionStatus] { fatalError("not used in this test") }
         func disconnectAccount(connectionId: String) async throws { fatalError("not used in this test") }
         func debugResetCursor(connectionId: String) async throws { fatalError("not used in this test") }
+        func acknowledgeTransactionsSync(connectionId: String, syncToken: String) async throws {
+            acknowledgeTransactionsSyncCallCount += 1
+            lastAcknowledgedConnectionId = connectionId
+            lastAcknowledgedSyncToken = syncToken
+            try acknowledgeTransactionsSyncResult.get()
+        }
     }
 
     @MainActor
@@ -14781,6 +14791,76 @@ final class FinanceTrackTests: XCTestCase {
         _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
 
         XCTAssertEqual(manager.connections.first?.cachedBalances?["checking-1"]?.currentBalance, 500, "an empty accountBalances array must leave the existing cache completely untouched")
+    }
+
+    // MARK: - Client-confirmed delivery watermark (ack-transactions-sync)
+    //
+    // Real Production incident, 2026-09-16: the server used to advance its delivery watermark
+    // (plaid_items.last_transactions_ack_at) the instant sync-transactions SENT its response,
+    // whether or not this device ever actually received or persisted it — silently and
+    // permanently hiding real transactions from Activity with no self-healing path. The fix moves
+    // the watermark advance into a separate acknowledgeTransactionsSync call this device makes
+    // ONLY after a successful local import/save. These tests pin that ordering and its
+    // best-effort failure handling.
+
+    @MainActor
+    func testPullSyncedTransactionsAcknowledgesSyncTokenAfterSuccessfulImport() async throws {
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(added: [makePlaidDTO(id: "new-txn-1")], modified: [], removedExternalIds: [], syncToken: "2026-09-16T11:24:32.000Z")
+        )
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(fake.acknowledgeTransactionsSyncCallCount, 1, "a successful import must be acknowledged exactly once, never skipped and never double-acked")
+        XCTAssertEqual(fake.lastAcknowledgedConnectionId, "conn-1")
+        XCTAssertEqual(fake.lastAcknowledgedSyncToken, "2026-09-16T11:24:32.000Z", "the exact server-provided token must be echoed back verbatim, never recomputed on-device")
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsSkipsAcknowledgementWhenSyncTokenIsNil() async throws {
+        // A backend build that predates this fix simply omits sync_token — nothing to ack yet,
+        // and this must never crash or send a bogus/empty token.
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(PlaidSyncResult(added: [], modified: [], removedExternalIds: [], syncToken: nil))
+
+        _ = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(fake.acknowledgeTransactionsSyncCallCount, 0, "there is nothing to acknowledge when the backend didn't provide a token")
+    }
+
+    @MainActor
+    func testPullSyncedTransactionsSucceedsEvenWhenAcknowledgementFails() async throws {
+        // The whole point of splitting the ack into its own call: if IT fails (network drop right
+        // after a successful save), nothing is lost — the watermark simply stays where it was, and
+        // the next pull safely re-requests the same already-idempotent-to-import batch. This must
+        // never surface as a failure of the pull itself, which already succeeded.
+        let manager = PlaidConnectionManager(defaults: makeIsolatedDefaults())
+        manager.addOrUpdate(connectionId: "conn-1", institutionId: "ins_1", institutionName: "Wells Fargo")
+        let context = makePlaidSyncTestContext()
+        let fake = FakeBalanceAndTransactionsPlaidBackendService(
+            refreshResult: .success(ConnectedAccountRefreshResult(balance: makeBalance(accountId: "acc-A", current: 1), remaining: 1))
+        )
+        fake.syncTransactionsResult = .success(
+            PlaidSyncResult(added: [makePlaidDTO(id: "new-txn-1")], modified: [], removedExternalIds: [], syncToken: "2026-09-16T11:24:32.000Z")
+        )
+        fake.acknowledgeTransactionsSyncResult = .failure(PlaidBackendError.server(status: 500, message: "boom"))
+
+        let outcome = try await manager.pullSyncedTransactions(connectionId: "conn-1", context: context, backend: fake)
+
+        XCTAssertEqual(outcome.insertedCount, 1, "an acknowledgement failure must never roll back or hide an already-successful import")
+        let imported = try context.fetch(FetchDescriptor<FinanceTransaction>()).filter { $0.externalTransactionId == "new-txn-1" }
+        XCTAssertEqual(imported.count, 1)
     }
 
     private final class FakeTriggerCountingPlaidBackendService: PlaidBackendService {
@@ -16205,6 +16285,22 @@ final class FinanceTrackTests: XCTestCase {
         XCTAssertFalse(source.contains("\"Ignore\""))
         XCTAssertFalse(source.contains("\"Exclude\""))
         XCTAssertTrue(source.contains("ConnectedTransactionRow"), "Connected rows must use the new minimal presentation")
+    }
+
+    // Real on-device report, 2026-09-16: this screen locked up for a long time opening with
+    // several hundred imported transactions across multiple Connected accounts. Root cause:
+    // `possibleMatches` was a plain computed property referenced from two places in the view body,
+    // so its full O(imported x manual) matching pass ran twice, on the main thread, on every
+    // single render — not just when the transaction set actually changed.
+    func testImportedTransactionsReviewViewComputesPossibleMatchesOnceNotOnEveryRender() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Settings/ImportedTransactionsReviewView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("@State private var possibleMatches"), "must be cached state, never a plain computed property recomputed on every render")
+        XCTAssertTrue(source.contains(".task(id: allTransactions.count)"), "must only recompute when the underlying transaction set actually changes")
+        XCTAssertTrue(source.contains("await Task.yield()"), "must yield periodically so the main thread stays responsive during the matching pass, instead of one long unbroken blocking stretch")
     }
 
     func testDashboardMoreActionOpensActivityWithSelectedTab() throws {
@@ -40154,20 +40250,20 @@ final class FinanceTrackTests: XCTestCase {
         let connections = [makeDepositoryConnection()]
 
         let deposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: account)
-        XCTAssertTrue(AccountRegisterAutoDepositService.isEligibleDeposit(deposit, connections: connections), "a posted, depository-account credit is a real deposit")
+        XCTAssertTrue(AccountRegisterAutoDepositService.isEligibleDeposit(deposit, connections: connections, enabledAt: .distantPast), "a posted, depository-account credit is a real deposit")
 
         let pending = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: true, plaidAccountId: "plaid-checking-1", account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(pending, connections: connections), "a still-pending transaction must never auto-deposit")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(pending, connections: connections, enabledAt: .distantPast), "a still-pending transaction must never auto-deposit")
 
         let expense = FinanceTransaction(amount: 50, date: .now, type: .expense, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(expense, connections: connections), "an ordinary expense is never a deposit")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(expense, connections: connections, enabledAt: .distantPast), "an ordinary expense is never a deposit")
 
         let creditCardConnections = [makeDepositoryConnection(accountId: "plaid-credit-1", type: "credit")]
         let cardPayment = FinanceTransaction(amount: 200, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-credit-1", account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(cardPayment, connections: creditCardConnections), "a genuine credit card payment (credit-type account) must never be treated as a deposit")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(cardPayment, connections: creditCardConnections, enabledAt: .distantPast), "a genuine credit card payment (credit-type account) must never be treated as a deposit")
 
         let manualEntry = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .manual, isPending: false, account: account)
-        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(manualEntry, connections: connections), "only Connected (Plaid) transactions are ever eligible")
+        XCTAssertFalse(AccountRegisterAutoDepositService.isEligibleDeposit(manualEntry, connections: connections, enabledAt: .distantPast), "only Connected (Plaid) transactions are ever eligible")
     }
 
     /// The master toggle being off must leave every account and transaction completely untouched
@@ -40208,7 +40304,7 @@ final class FinanceTrackTests: XCTestCase {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
         context.insert(checking)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         context.insert(settings)
         let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, note: "", isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)
@@ -40243,7 +40339,7 @@ final class FinanceTrackTests: XCTestCase {
         let context = makeAutoDepositTestContext()
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
         context.insert(checking)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         context.insert(settings)
         let sourceDeposit = FinanceTransaction(amount: 100, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)
@@ -40265,13 +40361,79 @@ final class FinanceTrackTests: XCTestCase {
     @MainActor
     func testPendingDepositsExcludesAlreadyManuallyImportedDeposit() throws {
         let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         let alreadyImported = FinanceTransaction(amount: 500, date: .now, type: .income, source: .manual, account: checking, importedFromTransactionId: sourceDeposit.id)
 
         let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [sourceDeposit, alreadyImported], connections: [makeDepositoryConnection()], settings: settings)
 
         XCTAssertTrue(pending.isEmpty, "a transaction already imported by the manual flow must never be offered for review")
+    }
+
+    // MARK: - DATE FLOOR (real incident, 2026-09-17)
+    //
+    // With no date floor at all, pendingDeposits matched every eligible deposit ever, going back
+    // through an account's FULL history. Combined with a one-time full Plaid resync, this
+    // surfaced months of old paychecks (back to June) as "pending review" all at once, and
+    // all-defaulted-to-checked in the review screen meant a single "Done" tap added $50,000 that
+    // was never intended. `accountRegisterAutoDepositEnabledAt` closes this: only a deposit dated
+    // on or after the feature's own recorded start time is ever eligible.
+
+    /// The exact incident scenario: a real paycheck from before Auto Deposit was ever turned on
+    /// must never be offered, no matter how it later gets (re)synced into local storage.
+    @MainActor
+    func testPendingDepositsExcludesADepositDatedBeforeAutoDepositWasEnabled() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let enabledAt = day(2026, 9, 15)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: enabledAt)
+        let juneDeposit = FinanceTransaction(amount: 2500, date: day(2026, 6, 15), type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [juneDeposit], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertTrue(pending.isEmpty, "a deposit dated before the feature was turned on must never be offered, regardless of when it happens to sync locally")
+    }
+
+    /// The boundary and the normal case: a deposit dated exactly at (or after) the enabled
+    /// instant is still offered — the floor excludes the past, never the present.
+    @MainActor
+    func testPendingDepositsIncludesADepositDatedOnOrAfterAutoDepositWasEnabled() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let enabledAt = day(2026, 9, 15)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id], accountRegisterAutoDepositEnabledAt: enabledAt)
+        let onBoundary = FinanceTransaction(amount: 500, date: enabledAt, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+        let afterward = FinanceTransaction(amount: 700, date: day(2026, 9, 16), type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [onBoundary, afterward], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertEqual(Set(pending.map(\.id)), [onBoundary.id, afterward.id], "a deposit dated on or after the feature was turned on must still be offered normally")
+    }
+
+    /// An install that enabled the feature before this field existed (`accountRegisterAutoDepositEnabledAt`
+    /// nil) must never fall back to "no floor" — the exact bug that caused the incident. Nil means
+    /// "nothing is eligible yet" until `AccountSettingsView`'s self-heal stamps a real value.
+    @MainActor
+    func testPendingDepositsIsEmptyWhenEnabledAtIsNilEvenThoughToggleIsOn() throws {
+        let checking = Account(name: "Checking", type: .checking, currentBalance: 100)
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id])
+        let todayDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
+
+        let pending = AccountRegisterAutoDepositService.pendingDeposits(allTransactions: [todayDeposit], connections: [makeDepositoryConnection()], settings: settings)
+
+        XCTAssertTrue(pending.isEmpty, "a missing enabled-at timestamp must never be treated as 'no floor' — that was the incident")
+    }
+
+    /// The other half of the incident: the review screen itself must never default a deposit to
+    /// checked — a deliberate per-item opt-IN, never opt-out, plus a visible running total so
+    /// tapping "Done" is never ambiguous about what it's about to add.
+    func testAccountRegisterDepositReviewViewDefaultsToNothingSelectedWithVisibleTotal() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../FinanceTrack/Views/Dashboard/AccountRegisterDepositReviewView.swift")
+            .standardized
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("_includedIds = State(initialValue: [])"), "must start with nothing selected — a deliberate opt-in, never opt-out")
+        XCTAssertFalse(source.contains("_includedIds = State(initialValue: Set(deposits.map"), "must never default every deposit to checked again")
+        XCTAssertTrue(source.contains("includedTotal"), "must show a running total so 'Done' is never ambiguous about what it adds")
     }
 
     /// Selecting more than one destination register broadcasts the SAME confirmed deposit into
@@ -40284,7 +40446,7 @@ final class FinanceTrackTests: XCTestCase {
         let cash = Account(name: "Cash", type: .checking)
         context.insert(checking)
         context.insert(cash)
-        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id, cash.id])
+        let settings = BudgetSettings(accountRegisterAutoDepositEnabled: true, accountRegisterAutoDepositAccountIds: [checking.id, cash.id], accountRegisterAutoDepositEnabledAt: .distantPast)
         context.insert(settings)
         let sourceDeposit = FinanceTransaction(amount: 500, date: .now, type: .creditCardPayment, source: .plaid, isPending: false, plaidAccountId: "plaid-checking-1", account: nil)
         context.insert(sourceDeposit)

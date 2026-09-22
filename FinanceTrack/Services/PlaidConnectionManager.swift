@@ -532,6 +532,24 @@ final class PlaidConnectionManager {
             updateCachedBalances(connectionId: connectionId, balances: syncResult.accountBalances)
         }
         let outcome = try PlaidTransactionImportService.applySync(syncResult, context: context)
+        // CLIENT-CONFIRMED DELIVERY WATERMARK — see `ack-transactions-sync/index.ts`'s own header
+        // for the real Production data-loss incident (2026-09-16) this closes: the server used to
+        // advance its delivery watermark the instant it SENT a sync-transactions response, whether
+        // or not this device ever actually received or persisted it. Only ack AFTER `applySync`
+        // above has returned successfully (its own `context.save()` already succeeded) — never
+        // before. Best-effort/non-fatal: if this call itself fails, nothing is lost — the
+        // watermark simply stays put, and the next `syncTransactions` pull safely re-delivers the
+        // exact same (already-idempotent-to-import) batch. `syncToken` is nil only when talking to
+        // an older backend build that predates this fix, in which case there is nothing to ack.
+        if let syncToken = syncResult.syncToken {
+            do {
+                try await backend.acknowledgeTransactionsSync(connectionId: connectionId, syncToken: syncToken)
+            } catch {
+                #if DEBUG
+                print("[PlaidConnectionManager] acknowledgeTransactionsSync failed (non-fatal, next pull will safely re-request this batch): \(error)")
+                #endif
+            }
+        }
         // AUTO-TRACKED CONNECTED-ACCOUNT BUDGETING — deliberately NO post-import step here. Newly
         // imported transactions are picked up automatically by the canonical, READ-ONLY
         // `BudgetCalculator.weeklyActualSpending`/`monthlyActualSpending` query the next time a

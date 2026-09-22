@@ -19,22 +19,34 @@ struct AccountRegisterDepositReviewView: View {
     @State private var includedIds: Set<UUID>
     @State private var errorMessage: String?
 
+    /// INCIDENT FIX (2026-09-17) — this used to default every deposit to checked, so a single
+    /// "Done" tap (the natural confirm action) added everything shown, whether the user meant to
+    /// review each one or not. Combined with a since-fixed missing date floor that could surface
+    /// months of history at once, that's how a single tap added $50,000 that was never intended.
+    /// Now starts with NOTHING selected — each deposit must be deliberately tapped in, never
+    /// tapped out, before it counts toward "Done."
     init(deposits: [FinanceTransaction], destinations: [Account], settings: BudgetSettings) {
         self.deposits = deposits
         self.destinations = destinations
         self.settings = settings
-        _includedIds = State(initialValue: Set(deposits.map(\.id)))
+        _includedIds = State(initialValue: [])
     }
 
     private var destinationLabel: String {
         destinations.map(\.name).joined(separator: ", ")
     }
 
+    /// See this view's own init header — shown prominently so it's never ambiguous what tapping
+    /// "Done" is about to do.
+    private var includedTotal: Decimal {
+        deposits.filter { includedIds.contains($0.id) }.reduce(Decimal(0)) { $0 + $1.amount }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                    Text("These deposits showed up in your Connected accounts. Uncheck any you've already entered yourself — for example, a transfer you made by hand that will also appear here once it posts.")
+                    Text("These deposits showed up in your Connected accounts. Check any you'd like to add to your register — for example, NOT a transfer you already made by hand, which will also appear here once it posts.")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.textTertiary)
                         .padding(.horizontal, Theme.Spacing.lg)
@@ -50,6 +62,17 @@ struct AccountRegisterDepositReviewView: View {
                         }
                     }
                     .padding(.horizontal, Theme.Spacing.lg)
+
+                    // INCIDENT FIX (2026-09-17) — shown prominently, right above the destination
+                    // note, so tapping "Done" never has an ambiguous effect: exactly this many
+                    // deposits, exactly this total, exactly these registers, or nothing at all.
+                    Text(includedIds.isEmpty
+                        ? "Nothing selected — tapping Done will add nothing."
+                        : "Adding \(includedIds.count) deposit\(includedIds.count == 1 ? "" : "s") totaling \(CurrencyFormat.string(from: includedTotal)).")
+                        .font(Theme.captionFont)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(includedIds.isEmpty ? Theme.textTertiary : Theme.accent)
+                        .padding(.horizontal, Theme.Spacing.lg)
 
                     Text("Checked deposits will be added to: \(destinationLabel).")
                         .font(Theme.captionFont)

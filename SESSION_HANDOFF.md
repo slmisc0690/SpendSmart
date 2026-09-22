@@ -364,8 +364,9 @@ was involved) deployed to Production already.
   never hand-edit `project.pbxproj`.
 - **Do not create additional duplicate `.xcodeproj` shells.** If Xcode produces one, confirm via
   `strings ~/Library/Preferences/com.apple.dt.Xcode.plist | grep FinanceTrack` before deleting.
-- **`../FinanceTracker Backups/`** (sibling dir, outside git) — never delete without the same kind
-  of explicit, itemized user approval used in past sessions.
+- **Backups:** see ~/.claude/CLAUDE.md — git snapshot under `refs/snapshots/`, never a folder
+  copy. This project previously kept full working-tree copies in the sibling
+  `../FinanceTracker Backups/` directory; that convention is retired.
 
 ## 13. Important calculations, constants, IDs, thresholds, APIs that must remain unchanged
 
